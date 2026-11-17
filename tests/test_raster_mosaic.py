@@ -10,6 +10,8 @@ import sys
 import math
 import random
 import statistics
+import zlib
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
@@ -17,7 +19,11 @@ import pikepdf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pdf_image_placements import enumerate_image_paints, rectangle_path_quad, image_quad
-from reconstruct_raster_mosaic import composite, cluster_native_raster_paints
+from reconstruct_raster_mosaic import (
+    composite,
+    cluster_native_raster_paints,
+    decode_mosaic_image,
+)
 
 
 def make_fixture(path):
@@ -67,6 +73,118 @@ def test_clips_and_mosaic():
                 assert report["paint_statistics"]["painted_instances"] == 1
                 layouts.append(np.asarray(bitmap).copy())
             assert np.array_equal(layouts[0], layouts[1])
+
+
+def test_device_raster_fast_decode_matches_full_pdf_decoder():
+    """Uncompressed/Flate device pixels and complex fallback are bit-identical."""
+    width, height = 4, 3
+    rgb = bytes(range(width * height * 3))
+    gray = bytes(range(width * height))
+    cases = (
+        ("raw_rgb", rgb, "/DeviceRGB", 8, False, None, False, False),
+        ("flate_rgb", rgb, "/DeviceRGB", 8, True, None, False, False),
+        ("raw_gray", gray, "/DeviceGray", 8, False, None, False, False),
+        ("flate_gray", gray, "/DeviceGray", 8, True, None, False, False),
+        (
+            "rgb_explicit_identity",
+            rgb,
+            "/DeviceRGB",
+            8,
+            False,
+            [0, 1, 0, 1, 0, 1],
+            False,
+            False,
+        ),
+        ("rgb_inverted", rgb, "/DeviceRGB", 8, False, [1, 0, 1, 0, 1, 0], False, False),
+        ("gray_inverted", gray, "/DeviceGray", 8, True, [1, 0], False, False),
+        ("rgb_soft_mask", rgb, "/DeviceRGB", 8, False, None, True, False),
+        ("rgb_decode_params", rgb, "/DeviceRGB", 8, True, None, False, True),
+        (
+            "gray_1bit",
+            bytes([0xA5, 0x3C, 0xC3]),
+            "/DeviceGray",
+            1,
+            False,
+            None,
+            False,
+            False,
+        ),
+    )
+    with pikepdf.Pdf.new() as doc:
+        for name, data, colorspace, bits, flate, decode, mask, params in cases:
+            image = pikepdf.Stream(doc, zlib.compress(data) if flate else data)
+            image["/Type"] = pikepdf.Name("/XObject")
+            image["/Subtype"] = pikepdf.Name("/Image")
+            image["/Width"] = width if bits == 8 else 8
+            image["/Height"] = height
+            image["/BitsPerComponent"] = bits
+            image["/ColorSpace"] = pikepdf.Name(colorspace)
+            if flate:
+                image["/Filter"] = pikepdf.Name("/FlateDecode")
+            if decode is not None:
+                image["/Decode"] = pikepdf.Array(decode)
+            if params:
+                image["/DecodeParms"] = pikepdf.Dictionary(Predictor=1)
+            if mask:
+                alpha = pikepdf.Stream(doc, gray)
+                alpha["/Type"] = pikepdf.Name("/XObject")
+                alpha["/Subtype"] = pikepdf.Name("/Image")
+                alpha["/Width"] = width
+                alpha["/Height"] = height
+                alpha["/BitsPerComponent"] = 8
+                alpha["/ColorSpace"] = pikepdf.Name("/DeviceGray")
+                image["/SMask"] = doc.make_indirect(alpha)
+            with pikepdf.PdfImage(image).as_pil_image(
+                apply_decode_array=True, apply_mask=True
+            ) as reference:
+                expected = np.asarray(reference.convert("RGBA"), dtype=np.uint8)
+            fast = name in (
+                "raw_rgb",
+                "flate_rgb",
+                "raw_gray",
+                "flate_gray",
+                "rgb_explicit_identity",
+            )
+            if fast:
+                # Prove the eligible path does not instantiate PdfImage.
+                with patch(
+                    "reconstruct_raster_mosaic.pikepdf.PdfImage",
+                    side_effect=AssertionError("unexpected full decoder"),
+                ):
+                    actual = decode_mosaic_image(image)
+            else:
+                actual = decode_mosaic_image(image)
+            assert np.array_equal(actual, expected), name
+
+
+def test_composite_fast_path_preserves_pixels_and_coverage():
+    def original_decoder(image):
+        with pikepdf.PdfImage(image).as_pil_image(
+            apply_decode_array=True, apply_mask=True
+        ) as raw:
+            return np.asarray(raw.convert("RGBA"), dtype=np.uint8).copy()
+
+    with TemporaryDirectory(prefix="pdf-redox-composite-fast-pixels-") as td:
+        path = Path(td) / "fixture.pdf"
+        make_fixture(path)
+        with pikepdf.Pdf.open(path) as pdf:
+            for page in (1, 2):
+                paints, images, _ = enumerate_image_paints(pdf, [page])
+                with patch(
+                    "reconstruct_raster_mosaic.decode_mosaic_image",
+                    side_effect=original_decoder,
+                ):
+                    expected_image, expected_coverage, expected_report = composite(
+                        paints, images, [0, 0, 400, 200], pitch=1
+                    )
+                image, coverage, report = composite(
+                    paints, images, [0, 0, 400, 200], pitch=1
+                )
+                assert np.array_equal(np.asarray(image), np.asarray(expected_image))
+                assert np.array_equal(
+                    np.asarray(coverage), np.asarray(expected_coverage)
+                )
+                assert report == expected_report
 
 
 def reference_quadratic_groups(placements, page_rect, proximity=2.5, tolerance=0.075):
@@ -239,6 +357,8 @@ def test_spatial_index_large_footprint_and_symmetric_pitch():
 
 
 if __name__ == "__main__":
+    test_device_raster_fast_decode_matches_full_pdf_decoder()
+    test_composite_fast_path_preserves_pixels_and_coverage()
     test_spatial_index_agrees_with_all_pairs()
     test_spatial_index_large_footprint_and_symmetric_pitch()
     test_clips_and_mosaic()
