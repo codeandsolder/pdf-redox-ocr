@@ -7,14 +7,17 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import sys
+import math
+import random
+import statistics
 
 import numpy as np
 from PIL import Image
 import pikepdf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from pdf_image_placements import enumerate_image_paints, rectangle_path_quad
-from reconstruct_raster_mosaic import composite
+from pdf_image_placements import enumerate_image_paints, rectangle_path_quad, image_quad
+from reconstruct_raster_mosaic import composite, cluster_native_raster_paints
 
 
 def make_fixture(path):
@@ -66,6 +69,177 @@ def test_clips_and_mosaic():
             assert np.array_equal(layouts[0], layouts[1])
 
 
+def reference_quadratic_groups(placements, page_rect, proximity=2.5, tolerance=0.075):
+    """Oracle: the original all-pairs grouping rule, without spatial indexing."""
+    items = []
+    for p in placements:
+        if p["unsafe_reasons"]:
+            continue
+        w, h = p["width"], p["height"]
+        if w <= 0 or h <= 0:
+            continue
+        c = p["ctm"]
+        pitch_x = math.hypot(c[0], c[1]) / w
+        pitch_y = math.hypot(c[2], c[3]) / h
+        pitch = (pitch_x + pitch_y) / 2
+        if not 0.04 < pitch <= 10 or abs(pitch_x - pitch_y) > tolerance * pitch:
+            continue
+        corners = image_quad(p, [[0, 0], [w, 0], [w, h], [0, h]])
+        box = (
+            max(page_rect[0], min(x for x, _ in corners)),
+            max(page_rect[1], min(y for _, y in corners)),
+            min(page_rect[2], max(x for x, _ in corners)),
+            min(page_rect[3], max(y for _, y in corners)),
+        )
+        if box[2] <= box[0] or box[3] <= box[1]:
+            continue
+        items.append((p, box, pitch))
+    parents = list(range(len(items)))
+
+    def root(i):
+        while i != parents[i]:
+            parents[i] = parents[parents[i]]
+            i = parents[i]
+        return i
+
+    for i, (_, a, pitch_a) in enumerate(items):
+        for j in range(i + 1, len(items)):
+            _, b, pitch_b = items[j]
+            if abs(pitch_a - pitch_b) > tolerance * max(pitch_a, pitch_b):
+                continue
+            xgap = max(0, a[0] - b[2], b[0] - a[2])
+            ygap = max(0, a[1] - b[3], b[1] - a[3])
+            gap_limit = proximity * max(pitch_a, pitch_b)
+            if xgap <= gap_limit and ygap <= gap_limit:
+                parents[root(j)] = root(i)
+    groups = {}
+    for i, item in enumerate(items):
+        groups.setdefault(root(i), []).append(item)
+    result = []
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        pitch = statistics.median(z[2] for z in group)
+        region = (
+            max(page_rect[0], min(z[1][0] for z in group) - 5 * pitch),
+            max(page_rect[1], min(z[1][1] for z in group) - 5 * pitch),
+            min(page_rect[2], max(z[1][2] for z in group) + 5 * pitch),
+            min(page_rect[3], max(z[1][3] for z in group) + 5 * pitch),
+        )
+        pixels = math.ceil((region[2] - region[0]) / pitch) * math.ceil(
+            (region[3] - region[1]) / pitch
+        )
+        if pixels <= 12_000_000:
+            result.append(
+                (frozenset(p["source_id"] for p, _, _ in group), region, pitch, pixels)
+            )
+    return sorted(result, key=lambda x: sorted(x[0]))
+
+
+def test_spatial_index_agrees_with_all_pairs():
+    rng = random.Random(314159)
+    page = (-50, -50, 850, 650)
+    for trial in range(20):
+        placements = []
+        for i in range(180):
+            pitch = rng.choice((0.6, 0.62, 0.65, 0.75, 1.0, 1.05, 1.1, 1.3))
+            w, h = rng.choice((12, 24, 60, 180)), rng.choice((6, 12, 40, 200))
+            x = rng.uniform(-90, 900) if trial % 2 else (i % 15) * 18
+            y = rng.uniform(-90, 700) if trial % 2 else (i // 15) * 16
+            transform = (
+                [0, w * pitch, -h * pitch, 0, x, y]
+                if i % 11 == 0
+                else [w * pitch, 0, 0, h * pitch, x, y]
+            )
+            placements.append(
+                {
+                    "source_id": f"source-{i}",
+                    "width": w,
+                    "height": h,
+                    "ctm": transform,
+                    "unsafe_reasons": ["unsupported"] if i % 23 == 0 else [],
+                }
+            )
+        expected = reference_quadratic_groups(placements, page)
+        groups = cluster_native_raster_paints(placements, page)
+        found = sorted(
+            [
+                (
+                    frozenset(p["source_id"] for p in group["placements"]),
+                    group["region"],
+                    group["pitch"],
+                    group["estimated_pixels"],
+                )
+                for group in groups
+            ],
+            key=lambda x: sorted(x[0]),
+        )
+        assert found == expected, (trial, found, expected)
+        reordered = rng.sample(placements, k=len(placements))
+        permuted = sorted(
+            [
+                (
+                    frozenset(p["source_id"] for p in group["placements"]),
+                    group["region"],
+                    group["pitch"],
+                    group["estimated_pixels"],
+                )
+                for group in cluster_native_raster_paints(reordered, page)
+            ],
+            key=lambda x: sorted(x[0]),
+        )
+        assert permuted == expected, (trial, permuted, expected)
+
+
+def test_spatial_index_large_footprint_and_symmetric_pitch():
+    page = (0, 0, 900, 900)
+    # One image spans more than the bucket budget; later small paints must
+    # still find it, regardless of index insertion or query order.
+    large = {
+        "source_id": "large",
+        "width": 600,
+        "height": 600,
+        "ctm": [600, 0, 0, 600, 20, 20],
+        "unsafe_reasons": [],
+    }
+    small = {
+        "source_id": "small",
+        "width": 10,
+        "height": 10,
+        "ctm": [10, 0, 0, 10, 300, 300],
+        "unsafe_reasons": [],
+    }
+    distant = {
+        "source_id": "distant",
+        "width": 10,
+        "height": 10,
+        "ctm": [10, 0, 0, 10, 720, 720],
+        "unsafe_reasons": [],
+    }
+    for ordered in ([large, small, distant], [small, distant, large]):
+        result = cluster_native_raster_paints(ordered, page)
+        assert len(result) == 1, result
+        assert {p["source_id"] for p in result[0]["placements"]} == {"large", "small"}
+
+    def strip(source, x, pitch):
+        return {
+            "source_id": source,
+            "width": 10,
+            "height": 10,
+            "ctm": [10 * pitch, 0, 0, 10 * pitch, x, 20],
+            "unsafe_reasons": [],
+        }
+
+    # Previously a 2.6 pt gap grouped only if the 1.05-pitch source
+    # appeared first. The correct symmetric rule accepts either order.
+    first = strip("first", 20, 1)
+    second = strip("second", 32.6, 1.05)
+    assert len(cluster_native_raster_paints([first, second], page)) == 1
+    assert len(cluster_native_raster_paints([second, first], page)) == 1
+
+
 if __name__ == "__main__":
+    test_spatial_index_agrees_with_all_pairs()
+    test_spatial_index_large_footprint_and_symmetric_pitch()
     test_clips_and_mosaic()
     print("PDF_NATIVE_RASTER_MOSAIC_CLIPPING_PASS")

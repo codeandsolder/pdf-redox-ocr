@@ -17,7 +17,10 @@ original source-pixel resolution, once per reusable Image XObject. When an
 image-only page is assembled from many tiny bitmap fragments, the hybrid
 groups their native pixels using actual PDF paint order/geometry, clips and
 transforms, then OCRs the mosaic rather than each stripe or a downscaled
-page. Repeated groups reuse recognition across pages, including translated
+page. A sparse spatial index identifies adjoining fragments without an
+all-pairs scan; oversized source images use an exact bounded-memory fallback.
+Grouping uses symmetric pixel-pitch proximity, so the same geometry is grouped
+regardless of PDF image paint order. Repeated groups reuse recognition across pages, including translated
 placements; quarter-turn text is rectified and returned to PDF coordinates.
 Pages containing only native searchable text bypass OCR. On mixed pages, the
 hybrid compares each embedded image's original pixel area against its projected
