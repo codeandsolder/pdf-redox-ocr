@@ -10,15 +10,24 @@ permissions:
   contents: read
 
 jobs:
-  rust:
+  stable-core:
     uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@77dd7bb7dcbb8450e335bbbd1c47591733dc79a4 # main
     with:
       command: |
         cd rust
         cargo +stable fmt --all -- --check
-        git diff --check
-        cargo +stable clippy --locked --all-targets --all-features -- -D warnings
-        cargo +stable test --locked --all-features
-        RUSTDOCFLAGS=-Dwarnings cargo +stable doc --locked --all-features --no-deps
+        cargo +stable clippy --locked --all-targets --no-default-features -- -D warnings
+        cargo +stable test --locked --no-default-features
+        RUSTDOCFLAGS=-Dwarnings cargo +stable doc --locked --no-default-features --no-deps
       rust-toolchain: "1.100.0"
       rust-components: "rustfmt clippy"
+  native-pdf:
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@77dd7bb7dcbb8450e335bbbd1c47591733dc79a4 # main
+    with:
+      command: |
+        cd rust
+        cargo clippy --locked --all-targets --all-features -- -D warnings
+        cargo test --locked --all-features
+        RUSTDOCFLAGS=-Dwarnings cargo doc --locked --all-features --no-deps
+      rust-toolchain: "nightly-2026-11-17"
+      rust-components: "clippy"

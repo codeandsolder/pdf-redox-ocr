@@ -6,8 +6,15 @@
 pub mod draft;
 pub mod geometry;
 pub mod hybrid;
+#[cfg(feature = "native-inference")]
+pub mod inference;
 pub mod native_words;
+#[cfg(feature = "pdf-integration")]
+pub mod paint_scan;
+#[cfg(feature = "pdf-integration")]
+pub mod pdf_metadata;
 pub mod polygon;
+pub mod rasterize;
 pub mod source_selection;
 
 use thiserror::Error;
@@ -27,6 +34,16 @@ pub enum Error {
     /// Bad number in external PDF text data.
     #[error(transparent)]
     Number(#[from] std::num::ParseFloatError),
+    /// An error in the original Rust pdf-redox parser or writer.
+    #[cfg(feature = "pdf-integration")]
+    #[error(transparent)]
+    Pdf(#[from] pdf_redox::Error),
+    /// Raster decoding failed.
+    #[error(transparent)]
+    Image(#[from] image::ImageError),
+    /// Native model inference could not complete.
+    #[error("native OCR inference failed: {0}")]
+    Inference(String),
     /// Poppler command failed.
     #[error("pdftotext failed: {0}")]
     Poppler(String),
