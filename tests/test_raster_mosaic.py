@@ -187,6 +187,73 @@ def test_composite_fast_path_preserves_pixels_and_coverage():
                 assert report == expected_report
 
 
+def _solid_rgb_xobject(doc, color, alpha=None):
+    data = bytes(color) * (20 * 20)
+    image = pikepdf.Stream(doc, data)
+    image["/Type"] = pikepdf.Name("/XObject")
+    image["/Subtype"] = pikepdf.Name("/Image")
+    image["/Width"] = 20
+    image["/Height"] = 20
+    image["/BitsPerComponent"] = 8
+    image["/ColorSpace"] = pikepdf.Name("/DeviceRGB")
+    if alpha is not None:
+        mask = pikepdf.Stream(doc, bytes([alpha]) * (20 * 20))
+        mask["/Type"] = pikepdf.Name("/XObject")
+        mask["/Subtype"] = pikepdf.Name("/Image")
+        mask["/Width"] = 20
+        mask["/Height"] = 20
+        mask["/BitsPerComponent"] = 8
+        mask["/ColorSpace"] = pikepdf.Name("/DeviceGray")
+        image["/SMask"] = doc.make_indirect(mask)
+    return doc.make_indirect(image)
+
+
+def test_premultiplied_raster_edges_and_masked_layers():
+    """Opaque blue must remain blue under fractional-edge antialiasing."""
+    with pikepdf.Pdf.new() as doc:
+        blue = _solid_rgb_xobject(doc, (0, 0, 255))
+        paint = {
+            "source_id": "blue",
+            "width": 20,
+            "height": 20,
+            "ctm": [27, 0, 0, 27, 10.25, 12.25],
+            "unsafe_reasons": [],
+            "clip_polygons": [],
+        }
+        bitmap, coverage, report = composite(
+            [paint], {"blue": blue}, [0, 0, 50, 50], pitch=0.5
+        )
+        pixels = np.asarray(bitmap)
+        # With straight-alpha interpolation this fixture produced 647 dark
+        # pixels and the blue channel dropped all the way to 191.
+        assert pixels[:, :, 2].min() >= 254
+        assert np.count_nonzero(np.asarray(coverage)) > 2500
+        assert report["paint_statistics"]["painted_instances"] == 1
+
+        blue_masked = _solid_rgb_xobject(doc, (0, 0, 255), alpha=128)
+        red_masked = _solid_rgb_xobject(doc, (255, 0, 0), alpha=128)
+        blue_paint = {**paint, "source_id": "blue_masked"}
+        red_paint = {
+            **paint,
+            "source_id": "red_masked",
+            "clip_polygons": [[[10, 10], [20, 10], [20, 50], [10, 50]]],
+        }
+        image, _, report = composite(
+            [blue_paint, red_paint],
+            {"blue_masked": blue_masked, "red_masked": red_masked},
+            [0, 0, 50, 50],
+            pitch=0.5,
+        )
+        data = np.asarray(image)
+        assert report["paint_statistics"]["painted_instances"] == 2
+        # The blue source over white produces (127,127,255). The red
+        # semitransparent paint then covers only its clipping rectangle.
+        red_over_blue = data[60, 30].astype(np.int16)
+        blue_only = data[60, 50].astype(np.int16)
+        assert np.max(np.abs(red_over_blue - [191, 63, 127])) <= 2, red_over_blue
+        assert np.max(np.abs(blue_only - [127, 127, 255])) <= 2, blue_only
+
+
 def reference_quadratic_groups(placements, page_rect, proximity=2.5, tolerance=0.075):
     """Oracle: the original all-pairs grouping rule, without spatial indexing."""
     items = []
@@ -357,6 +424,7 @@ def test_spatial_index_large_footprint_and_symmetric_pitch():
 
 
 if __name__ == "__main__":
+    test_premultiplied_raster_edges_and_masked_layers()
     test_device_raster_fast_decode_matches_full_pdf_decoder()
     test_composite_fast_path_preserves_pixels_and_coverage()
     test_spatial_index_agrees_with_all_pairs()

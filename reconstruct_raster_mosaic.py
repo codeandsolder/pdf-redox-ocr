@@ -104,6 +104,24 @@ def decode_mosaic_image(image_stream):
         return np.asarray(raw.convert("RGBA"), dtype=np.uint8).copy()
 
 
+def premultiply_rgba(rgba):
+    """Premultiply source RGB before spatial filtering of the PDF alpha mask.
+
+    Interpolating straight-alpha RGB against a transparent black border and
+    then multiplying by the interpolated alpha *again* introduces dark seams.
+    Premultiplied samples blend correctly even at image and mask boundaries.
+    """
+    alpha = rgba[:, :, 3]
+    if np.all(alpha == 255):
+        return rgba
+    result = rgba.copy()
+    result[:, :, :3] = (
+        (rgba[:, :, :3].astype(np.uint16) * alpha[:, :, None].astype(np.uint16) + 127)
+        // 255
+    ).astype(np.uint8)
+    return result
+
+
 def composite(image_placements, images, region, pitch=0.48, max_pixels=12_000_000):
     left, bottom, right, top = map(float, region)
     if not (0 < pitch <= 10 and right > left and top > bottom):
@@ -135,7 +153,7 @@ def composite(image_placements, images, region, pitch=0.48, max_pixels=12_000_00
             continue
         if source not in parsed:
             try:
-                parsed[source] = decode_mosaic_image(images[source])
+                parsed[source] = premultiply_rgba(decode_mosaic_image(images[source]))
             except (
                 TypeError,
                 ValueError,
@@ -175,6 +193,7 @@ def composite(image_placements, images, region, pitch=0.48, max_pixels=12_000_00
             borderValue=(0, 0, 0, 0),
         )
         alpha = warped[:, :, 3].astype(np.float32) / 255
+        clip_fraction = None
         for clip in placement["clip_polygons"]:
             pts = np.asarray(
                 [inverse_canvas(point, region, pitch) for point in clip],
@@ -185,7 +204,12 @@ def composite(image_placements, images, region, pitch=0.48, max_pixels=12_000_00
             cv2.fillConvexPoly(
                 mask, np.rint(pts).astype(np.int32), 255, lineType=cv2.LINE_8
             )
-            alpha *= mask.astype(np.float32) / 255
+            fraction = mask.astype(np.float32) / 255
+            alpha *= fraction
+            if clip_fraction is None:
+                clip_fraction = fraction
+            else:
+                clip_fraction *= fraction
         if any(placement["unsafe_reasons"]):
             stats["unsafe_placement_painted_for_diagnostic"] += 1
         nonempty = alpha > 0.005
@@ -195,9 +219,13 @@ def composite(image_placements, images, region, pitch=0.48, max_pixels=12_000_00
         rgb_roi = rgb[y0:y1, x0:x1]
         coverage_roi = coverage[y0:y1, x0:x1]
         subset = rgb_roi[nonempty].astype(np.float32)
+        # Warped RGB is already multiplied by source alpha. Applying
+        # alpha a second time would darken antialiased image boundaries.
+        foreground = warped[nonempty, :3].astype(np.float32)
+        if clip_fraction is not None:
+            foreground *= clip_fraction[nonempty, None]
         rgb_roi[nonempty] = np.clip(
-            warped[nonempty, :3].astype(np.float32) * alpha[nonempty, None]
-            + subset * (1 - alpha[nonempty, None]),
+            foreground + subset * (1 - alpha[nonempty, None]),
             0,
             255,
         ).astype(np.uint8)

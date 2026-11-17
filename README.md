@@ -23,7 +23,8 @@ Grouping uses symmetric pixel-pitch proximity, so the same geometry is grouped
 regardless of PDF image paint order. For standard 8-bit RGB/grayscale rasters
 with raw or Flate-compressed pixels, mosaic composition uses the decoded stream
 directly; other PDF colour spaces, masks and decoding rules retain full
-pikepdf image decoding. Repeated groups reuse recognition across pages,
+pikepdf image decoding. Composition warps premultiplied RGBA to avoid dark
+halos at subpixel image edges and correctly blend soft masks and page clips. Repeated groups reuse recognition across pages,
 including translated placements; quarter-turn text is rectified and returned
 to PDF coordinates.
 Pages containing only native searchable text bypass OCR. On mixed pages, the
