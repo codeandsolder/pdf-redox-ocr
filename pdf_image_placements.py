@@ -442,9 +442,9 @@ def enumerate_image_paints(doc, selected_pages):
         if page_number < 1 or page_number > len(doc.pages):
             raise ValueError("PDF page number outside source")
         page = doc.pages[page_number - 1]
-        x0, y0, x1, y1 = map(float, page.cropbox)
+        x0, y0, x1, y1 = map(float, page.mediabox)
         if x1 <= x0 or y1 <= y0:
-            raise ValueError("bad PDF CropBox")
+            raise ValueError("bad PDF MediaBox")
         stats = {
             "page": page_number,
             "image_paints": 0,

@@ -172,7 +172,7 @@ def pages_from_fragments(
                 continue
             groups = cluster_native_raster_paints(
                 sources,
-                tuple(float(x) for x in doc.pages[n - 1].cropbox),
+                tuple(float(x) for x in doc.pages[n - 1].mediabox),
                 max_group_pixels=max_group_pixels,
             )
             info["source_image_groups"] = len(groups)

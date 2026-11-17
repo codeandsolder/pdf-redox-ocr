@@ -24,6 +24,7 @@ import tempfile
 import pikepdf
 from PIL import Image, ImageDraw, ImageFont
 from pikepdf import ContentStreamInstruction as Op, Operator
+from pdf_geometry import inverse_display_mapper
 
 
 CATEGORIES = (
@@ -351,41 +352,15 @@ def make_triptych(name, page, row, images, output):
     canvas.save(output, quality=88, optimize=True, subsampling=0)
 
 
-def inherited(page, key, default):
-    obj = page.obj
-    while obj is not None:
-        if key in obj:
-            return obj[key]
-        obj = obj.get("/Parent")
-    return default
-
-
 def page_mapper(pdf, page_no, width, height):
-    p = pdf.pages[page_no - 1]
-    crop = [float(v) for v in p.cropbox]
-    x0, y0, x1, y1 = crop
-    rotate = int(inherited(p, "/Rotate", 0)) % 360
-    if rotate == 0:
-        return lambda pt: (
-            (pt[0] - x0) / (x1 - x0) * width,
-            (y1 - pt[1]) / (y1 - y0) * height,
-        )
-    if rotate == 90:
-        return lambda pt: (
-            (pt[1] - y0) / (y1 - y0) * width,
-            (pt[0] - x0) / (x1 - x0) * height,
-        )
-    if rotate == 180:
-        return lambda pt: (
-            (x1 - pt[0]) / (x1 - x0) * width,
-            (pt[1] - y0) / (y1 - y0) * height,
-        )
-    if rotate == 270:
-        return lambda pt: (
-            (y1 - pt[1]) / (y1 - y0) * width,
-            (x1 - pt[0]) / (x1 - x0) * height,
-        )
-    raise ValueError("unsupported page rotation")
+    """Project PDF user-space quads onto the actual Poppler raster frame."""
+    inverse, _ = inverse_display_mapper(pdf.pages[page_no - 1])
+
+    def transform(point):
+        u, v = inverse(*point)
+        return (u * width, v * height)
+
+    return transform
 
 
 def render_page(pdf_path, page_no, output, max_side):

@@ -550,7 +550,7 @@ def run(
             )
             if small == 0:
                 continue
-            page_rect = tuple(float(x) for x in source.pages[n - 1].cropbox)
+            page_rect = tuple(float(x) for x in source.pages[n - 1].mediabox)
             groups = cluster_native_raster_paints(appearing, page_rect)
             covered = sum(len(g["placements"]) for g in groups)
             if covered != len(appearing):
