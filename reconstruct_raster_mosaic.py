@@ -56,6 +56,54 @@ def source_to_canvas(image_placement, region, pitch):
     return cv2.getAffineTransform(source, destination)
 
 
+def decode_mosaic_image(image_stream):
+    """Decode common 8-bit device rasters without repeated PdfImage metadata walks.
+
+    qpdf's stream reader already removes FlateDecode compression. For
+    indexed/ICC/CMYK images, predictor transforms, nonidentity Decode arrays,
+    transparency masks and other filters, retain the full PDF image decoder.
+    """
+    colorspace = str(image_stream.get("/ColorSpace", ""))
+    channels = {"/DeviceRGB": 3, "/DeviceGray": 1}.get(colorspace)
+    bits = image_stream.get("/BitsPerComponent")
+    filters = image_stream.get("/Filter")
+    if isinstance(filters, pikepdf.Array):
+        filters = filters[0] if len(filters) == 1 else filters
+    decode = image_stream.get("/Decode")
+    valid_decode = decode is None or (
+        channels is not None
+        and len(decode) == 2 * channels
+        and all(float(decode[i]) == (i % 2) for i in range(len(decode)))
+    )
+    if (
+        channels is not None
+        and bits == 8
+        and (filters is None or str(filters) == "/FlateDecode")
+        and image_stream.get("/DecodeParms") is None
+        and image_stream.get("/Mask") is None
+        and image_stream.get("/SMask") is None
+        and valid_decode
+    ):
+        width = int(image_stream["/Width"])
+        height = int(image_stream["/Height"])
+        if width > 0 and height > 0:
+            decoded = image_stream.read_bytes()
+            if len(decoded) == width * height * channels:
+                pixels = np.frombuffer(decoded, dtype=np.uint8).reshape(
+                    height, width, channels
+                )
+                result = np.empty((height, width, 4), dtype=np.uint8)
+                # Gray's singleton channel broadcasts to RGB unchanged.
+                result[:, :, :3] = pixels
+                result[:, :, 3] = 255
+                return result
+
+    with pikepdf.PdfImage(image_stream).as_pil_image(
+        apply_decode_array=True, apply_mask=True
+    ) as raw:
+        return np.asarray(raw.convert("RGBA"), dtype=np.uint8).copy()
+
+
 def composite(image_placements, images, region, pitch=0.48, max_pixels=12_000_000):
     left, bottom, right, top = map(float, region)
     if not (0 < pitch <= 10 and right > left and top > bottom):
@@ -87,11 +135,7 @@ def composite(image_placements, images, region, pitch=0.48, max_pixels=12_000_00
             continue
         if source not in parsed:
             try:
-                raw = pikepdf.PdfImage(images[source]).as_pil_image(
-                    apply_decode_array=True, apply_mask=True
-                )
-                rgba = np.asarray(raw.convert("RGBA"), dtype=np.uint8)
-                parsed[source] = rgba.copy()
+                parsed[source] = decode_mosaic_image(images[source])
             except (
                 TypeError,
                 ValueError,

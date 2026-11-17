@@ -20,8 +20,12 @@ transforms, then OCRs the mosaic rather than each stripe or a downscaled
 page. A sparse spatial index identifies adjoining fragments without an
 all-pairs scan; oversized source images use an exact bounded-memory fallback.
 Grouping uses symmetric pixel-pitch proximity, so the same geometry is grouped
-regardless of PDF image paint order. Repeated groups reuse recognition across pages, including translated
-placements; quarter-turn text is rectified and returned to PDF coordinates.
+regardless of PDF image paint order. For standard 8-bit RGB/grayscale rasters
+with raw or Flate-compressed pixels, mosaic composition uses the decoded stream
+directly; other PDF colour spaces, masks and decoding rules retain full
+pikepdf image decoding. Repeated groups reuse recognition across pages,
+including translated placements; quarter-turn text is rectified and returned
+to PDF coordinates.
 Pages containing only native searchable text bypass OCR. On mixed pages, the
 hybrid compares each embedded image's original pixel area against its projected
 page-OCR pixels. Images with substantial lost resolution are OCR'd directly,
