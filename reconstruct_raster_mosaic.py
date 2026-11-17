@@ -12,7 +12,8 @@ are explicitly reported so this mosaic is not a proof of visual identity.
 """
 
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict
+from itertools import chain
 import statistics
 import hashlib
 import json
@@ -25,6 +26,10 @@ import numpy as np
 from PIL import Image
 import pikepdf
 from pdf_image_placements import enumerate_image_paints, image_quad
+
+
+# Bound the per-image spatial index footprint for very large PDF XObjects.
+MAX_BUCKET_CELLS_PER_IMAGE = 256
 
 
 def inverse_canvas(point, region, pitch):
@@ -180,7 +185,12 @@ def cluster_native_raster_paints(
     of native pixels. A single large image needs no reconstruction.
     Unsafe/clipped-image uncertainties are not dropped silently.
     """
-    if proximity_pixels <= 0 or not 0 < scale_tolerance < 1:
+    if (
+        not math.isfinite(proximity_pixels)
+        or proximity_pixels <= 0
+        or not math.isfinite(scale_tolerance)
+        or not 0 < scale_tolerance < 1
+    ):
         raise ValueError("invalid image fragment cluster thresholds")
     items = []
     for p in placements:
@@ -212,20 +222,68 @@ def cluster_native_raster_paints(
         return i
 
     def union(i, j):
-        parents[root(j)] = root(i)
+        a, b = root(i), root(j)
+        if a != b:
+            parents[max(a, b)] = min(a, b)
 
-    for i, (p, a, pitch_a) in enumerate(items):
-        for j in range(i + 1, len(items)):
-            other, b, pitch_b = items[j]
+    # Index earlier footprints expanded by the largest gap they could
+    # admit under the pair's relative pitch tolerance. Query unexpanded
+    # current footprints; the final predicate is exact and order-independent.
+    # Unlike the original all-pairs scan, source paint order cannot change
+    # whether two geometrically identical fragments are grouped.
+    page_left, page_bottom, page_right, page_top = map(float, page_rect)
+    page_area = (page_right - page_left) * (page_top - page_bottom)
+    if not math.isfinite(page_area) or page_area <= 0:
+        raise ValueError("invalid raster clustering page rectangle")
+    cell_size = math.sqrt(page_area / max(1, len(items)))
+    buckets = defaultdict(list)
+    oversized = []
+
+    def cells(box):
+        x0 = math.floor((box[0] - page_left) / cell_size)
+        y0 = math.floor((box[1] - page_bottom) / cell_size)
+        x1 = math.floor((box[2] - page_left) / cell_size)
+        y1 = math.floor((box[3] - page_bottom) / cell_size)
+        # Do not materialize thousands of buckets for a single giant image.
+        # Such a query scans previous paints; a giant indexed paint is
+        # always considered by every subsequent query.
+        if (x1 - x0 + 1) * (y1 - y0 + 1) > MAX_BUCKET_CELLS_PER_IMAGE:
+            return None
+        return ((x, y) for x in range(x0, x1 + 1) for y in range(y0, y1 + 1))
+
+    for i, (_, a, pitch_a) in enumerate(items):
+        query = cells(a)
+        candidates = (
+            range(i)
+            if query is None
+            else chain(
+                oversized,
+                chain.from_iterable(buckets.get(key, ()) for key in query),
+            )
+        )
+        seen = set()
+        for j in candidates:
+            if j in seen:
+                continue
+            seen.add(j)
+            _, b, pitch_b = items[j]
             if abs(pitch_a - pitch_b) > scale_tolerance * max(pitch_a, pitch_b):
                 continue
             xgap = max(0, a[0] - b[2], b[0] - a[2])
             ygap = max(0, a[1] - b[3], b[1] - a[3])
-            if (
-                xgap <= proximity_pixels * pitch_a
-                and ygap <= proximity_pixels * pitch_a
-            ):
+            gap_limit = proximity_pixels * max(pitch_a, pitch_b)
+            if xgap <= gap_limit and ygap <= gap_limit:
                 union(i, j)
+        # A comparable later pitch cannot exceed pitch_a/(1-tolerance).
+        # This superset keeps the spatial prefilter sound for either order.
+        margin = proximity_pixels * pitch_a / (1 - scale_tolerance)
+        expanded = (a[0] - margin, a[1] - margin, a[2] + margin, a[3] + margin)
+        region = cells(expanded)
+        if region is None:
+            oversized.append(i)
+        else:
+            for key in region:
+                buckets[key].append(i)
     groups = {}
     for i, item in enumerate(items):
         groups.setdefault(root(i), []).append(item)
