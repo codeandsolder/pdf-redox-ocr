@@ -154,7 +154,30 @@ def test_quarter_turn_fragment_group():
         ]
 
 
+def test_fragment_dispatch_preserves_mediabox_outside_cropbox():
+    with TemporaryDirectory(prefix="pdf-redox-fragment-mediabox-") as temp:
+        base = Path(temp) / "base.pdf"
+        cropped = Path(temp) / "cropped.pdf"
+        split_pdf(base)
+        with pikepdf.Pdf.open(base) as pdf:
+            # Most stripes are outside this CropBox, but Poppler's default
+            # MediaBox raster still paints all of them and shows the text.
+            pdf.pages[0].cropbox = pikepdf.Array([275, 175, 525, 400])
+            pdf.save(cropped)
+        direct, report = pages_from_fragments(
+            cropped, [1], ocr_threads=4, min_score=0.97
+        )
+        assert report["pages"][0]["images_covered"] == 100, report
+        assert report["summary"]["eligible_pages"] == [1], report
+        assert "CAPACITOR 47uF 16V" in " ".join(
+            line["text"] for line in direct["pages"][0]["lines"]
+        )
+        _, dispatch = run_hybrid(cropped, [1], Path(temp), ocr_threads=4)
+        assert dispatch["summary"]["fragment_pages"] == [1], dispatch
+
+
 if __name__ == "__main__":
+    test_fragment_dispatch_preserves_mediabox_outside_cropbox()
     test_quarter_turn_fragment_group()
     test_mixed_fragment_page_fallback()
     test_repeated_fragment_group_cache()

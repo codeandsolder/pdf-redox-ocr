@@ -5,6 +5,13 @@ Standalone Python inference companion to [pdf-redox](https://github.com/codeands
 PDF optimization is Rust; OCR inference uses RapidOCR in an isolated uv
 environment; the Rust importer inserts invisible Unicode text.
 
+**Page geometry:** all raster extraction, native-word coordinates, paint
+clipping, fragment reconstruction and diagnostic overlays use the MediaBox,
+matching Poppler's default `pdftoppm` / `pdftotext` behavior. A smaller
+CropBox does not suppress material visible in the default MediaBox render.
+For an explicitly cropped render (`pdftoppm -cropbox`), request the matching
+`page_box="cropbox"` geometry explicitly; never mix the frames.
+
 **Current raster OCR (2026-11-17):** embedded PDF images are OCR'd at their
 original source-pixel resolution, once per reusable Image XObject. When an
 image-only page is assembled from many tiny bitmap fragments, the hybrid

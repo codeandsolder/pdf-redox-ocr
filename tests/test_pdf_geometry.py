@@ -18,6 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pdf_geometry import display_mapper, inverse_display_mapper
 from native_pdf_words import native_words_for_pages
 from select_raster_sources import choose_mixed_raster_sources
+from pdf_image_placements import enumerate_image_paints, image_quad, inside_convex
+from render_coverage import page_mapper
 
 
 def test_source_sampling_matches_poppler_mediabox():
@@ -114,8 +116,68 @@ def test_rendered_pixel_alignment_all_quarter_turns():
             )
 
 
+def test_media_only_image_paint_and_diagnostic_frame():
+    # With pdftoppm's default MediaBox rendering this image is *visible*
+    # even though it lies entirely outside the smaller CropBox.
+    for rotation in (0, 90, 180, 270):
+        with TemporaryDirectory(prefix="pdf-redox-media-only-image-") as td:
+            path = Path(td) / f"image-{rotation}.pdf"
+            with pikepdf.Pdf.new() as doc:
+                page = doc.add_blank_page(page_size=(800, 600))
+                page.cropbox = pikepdf.Array([200, 200, 600, 400])
+                page.obj["/Rotate"] = rotation
+                image = pikepdf.Stream(doc, bytes([230, 0, 0]) * (20 * 20))
+                image["/Type"] = pikepdf.Name("/XObject")
+                image["/Subtype"] = pikepdf.Name("/Image")
+                image["/Width"] = 20
+                image["/Height"] = 20
+                image["/BitsPerComponent"] = 8
+                image["/ColorSpace"] = pikepdf.Name("/DeviceRGB")
+                page.obj["/Resources"] = pikepdf.Dictionary(
+                    XObject=pikepdf.Dictionary(Im0=doc.make_indirect(image))
+                )
+                page.Contents = pikepdf.Stream(doc, b"q 100 0 0 80 60 80 cm /Im0 Do Q")
+                doc.save(path)
+
+            ppm = subprocess.check_output(
+                [
+                    "pdftoppm",
+                    "-f",
+                    "1",
+                    "-l",
+                    "1",
+                    "-scale-to",
+                    "800",
+                    "-singlefile",
+                    str(path),
+                ],
+                stderr=subprocess.DEVNULL,
+            )
+            with Image.open(io.BytesIO(ppm)) as raster:
+                width, height = raster.size
+                with pikepdf.Pdf.open(path) as doc:
+                    placements, _, reports = enumerate_image_paints(doc, [1])
+                    assert len(placements) == 1, reports
+                    paint = placements[0]
+                    assert reports[0]["image_only_after_native"], reports
+                    center = (110, 120)
+                    corners = image_quad(paint, [[0, 0], [20, 0], [20, 20], [0, 20]])
+                    assert all(
+                        all(inside_convex(p, clip) for clip in paint["clip_polygons"])
+                        for p in corners
+                    ), (rotation, paint["clip_polygons"])
+                    x, y = page_mapper(doc, 1, width, height)(center)
+                pixel = raster.convert("RGB").getpixel((round(x), round(y)))
+                assert pixel[0] > 220 and pixel[1] < 15 and pixel[2] < 15, (
+                    rotation,
+                    (x, y),
+                    pixel,
+                )
+
+
 if __name__ == "__main__":
     test_source_sampling_matches_poppler_mediabox()
     test_native_word_quads_match_poppler_nonzero_mediabox_origin()
     test_rendered_pixel_alignment_all_quarter_turns()
+    test_media_only_image_paint_and_diagnostic_frame()
     print("PDF_MEDIABOX_GEOMETRY_TESTS_PASS")

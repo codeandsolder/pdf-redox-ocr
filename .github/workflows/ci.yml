@@ -23,7 +23,7 @@ jobs:
         with:
           version: latest-known
       - name: Install Poppler
-        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils fonts-liberation
       - name: Lint and format
         run: |
           uvx ruff check --select E4,E7,E9,F .
@@ -36,3 +36,6 @@ jobs:
           uv run --python 3.12 tests/test_pdf_geometry.py
           uv run --python 3.12 tests/test_mask_native_text.py
           uv run --python 3.12 tests/test_mask_paint_invocations.py
+          uv run --python 3.12 tests/test_raster_mosaic.py
+          uv run --python 3.12 tests/test_ocr_fragment_groups.py
+          uv run --python 3.12 tests/test_raster_hybrid.py
