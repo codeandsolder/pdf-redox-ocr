@@ -15,10 +15,10 @@ jobs:
     with:
       command: |
         cd rust
-        cargo +stable fmt --all -- --check
-        cargo +stable clippy --locked --all-targets --no-default-features -- -D warnings
-        cargo +stable test --locked --no-default-features
-        RUSTDOCFLAGS=-Dwarnings cargo +stable doc --locked --no-default-features --no-deps
+        cargo fmt --all -- --check
+        cargo clippy --locked --all-targets --no-default-features -- -D warnings
+        cargo test --locked --no-default-features
+        RUSTDOCFLAGS=-Dwarnings cargo doc --locked --no-default-features --no-deps
       rust-toolchain: "1.100.0"
       rust-components: "rustfmt clippy"
   native-pdf:

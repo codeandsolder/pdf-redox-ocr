@@ -15,8 +15,11 @@ until the reference corpus and source/image-level visibility tests match.
 - Verified page geometry, polygon clipping, batching Poppler's existing native
   words, resource-budgeted native image selection, OCR draft v3 SHA-256 binding,
   source/paint-specific visibility proof admissions and native/fallback merging.
-- CPU PP-OCRv6 Small model via native oar-ocr, in-memory Poppler RGB raster
-  and a Rust CLI which can apply the OCR draft with pdf-redox.
+- CPU PP-OCRv6 Small model via native oar-ocr, in-memory Poppler RGB raster,
+  exact XObject-native source extraction with Poppler, one inference per distinct
+  source object, and conservative source-only page fast path.
+- Rust CLI which writes the importer draft and optionally applies the OCR draft
+  with pdf-redox, keeping original vector content unchanged.
 - Shared sccache CI, pinned central rust-skills2 strict gate.
 
 ## Current runner
@@ -26,8 +29,14 @@ After compilation, the prototype entrypoint is:
     pdf-redox-ocr --pdf input.pdf --output observations.json \
         --output-pdf searchable.pdf --pages 1-5 --confidence 0.97
 
-The CLI still runs whole-page OCR; it does not yet extract/recognize native
-Image XObjects or conduct differential source-paint visibility proofs. The
+Native source decoding is explicitly bounded by per-source, total-resident,
+source-count and single-extraction pixel ceilings. Those controls are exposed
+as CLI options. If an image cannot fit, its page uses ordinary page OCR.
+
+The CLI now recognizes native image XObjects once per source and skips page OCR
+on independently paint-safe raster-only pages. Mixed-content pages still use
+whole-page OCR; they do not incorporate native source observations until
+source/paint-isolated differential visibility proofs are implemented. The
 existing Python path remains the functional baseline.
 
 The source core is tested using stable Rust 1.100 with

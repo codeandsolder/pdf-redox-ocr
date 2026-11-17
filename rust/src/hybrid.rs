@@ -105,7 +105,7 @@ pub fn approve_raster_only_pages(pages: &[RasterPageEvidence]) -> Vec<RasterPage
             if page.paints.iter().enumerate().any(|(index, paint)| {
                 page.paints[index + 1..]
                     .iter()
-                    .any(|other| overlap_fraction(&paint.page_quad, &other.page_quad) > 0.02)
+                    .any(|other| overlap_fraction(&paint.page_quad, &other.page_quad) > 1e-9)
             }) {
                 reasons.push("overlapping_image_layers_require_page_compositing");
             }

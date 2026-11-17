@@ -1,7 +1,7 @@
 //! PDF-structure-aware Rust OCR with original vector page preservation.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     fs,
     io::{BufWriter, Write},
@@ -14,9 +14,14 @@ use pdf_redox_ocr::{
     PageNumber,
     draft::{DraftPage, OcrDraft},
     inference::OcrInference,
+    native_images::{NativeImageBudget, native_source_images},
     native_words::native_words_for_pages,
+    paint_scan::enumerate_image_paints,
     pdf_metadata::PdfMetadata,
     rasterize::{RenderPolicy, render_rgb_page},
+    source_ocr::{
+        SourceObservation, source_image_mapper, source_only_candidates, source_only_pages,
+    },
 };
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
@@ -49,6 +54,18 @@ struct Args {
     /// Poppler page-extraction batch size.
     #[arg(long, default_value_t = 24)]
     native_chunk: usize,
+    /// Maximum pixels allowed in a single decoded native-image OCR source.
+    #[arg(long, default_value_t = 8_000_000)]
+    max_native_source_pixels: u64,
+    /// Maximum aggregate pixels held by distinct native source images.
+    #[arg(long, default_value_t = 16_000_000)]
+    max_native_total_pixels: u64,
+    /// Maximum number of unique image sources recognized.
+    #[arg(long, default_value_t = 12)]
+    max_native_sources: usize,
+    /// Maximum aggregate pixels that one Poppler extraction may produce.
+    #[arg(long, default_value_t = 64_000_000)]
+    max_native_extraction_pixels: u64,
 }
 
 fn parse_page_selection(
@@ -104,16 +121,22 @@ fn normalized_existing(path: &Path) -> Result<Option<PathBuf>, std::io::Error> {
 
 fn check_paths(input: &Path, paths: &[&Path]) -> Result<(), Box<dyn Error>> {
     let input = fs::canonicalize(input)?;
+    let mut targets = BTreeSet::new();
     for output in paths {
-        if normalized_existing(output)?.is_some_and(|normalized| normalized == input) {
-            return Err("output path aliases the original source PDF".into());
-        }
         let parent = output
             .parent()
             .filter(|dir| !dir.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        if !parent.is_dir() {
-            return Err("output directory does not exist".into());
+        let file_name = output.file_name().ok_or("output must name a file")?;
+        let normalized = match normalized_existing(output)? {
+            Some(existing) => existing,
+            None => fs::canonicalize(parent)?.join(file_name),
+        };
+        if normalized == input {
+            return Err("output path aliases the original source PDF".into());
+        }
+        if !targets.insert(normalized) {
+            return Err("two output paths resolve to the same file".into());
         }
     }
     Ok(())
@@ -165,6 +188,54 @@ fn importer_document(draft: &OcrDraft) -> Result<OcrDocument, Box<dyn Error>> {
     })
 }
 
+/// Decode and recognize independent native-image sources before page fallback.
+fn recognize_native_source_pages(
+    engine: &OcrInference,
+    pdf: &Path,
+    doc: &PdfMetadata,
+    selection: &[PageNumber],
+    budget: NativeImageBudget,
+) -> Result<pdf_redox_ocr::source_ocr::SourceOnlyResult, Box<dyn Error>> {
+    let scanned = enumerate_image_paints(doc, selection)?;
+    let selected_source_ids = source_only_candidates(&scanned, budget.max_source_pixels);
+    let decoded_sources = match native_source_images(pdf, selection, &selected_source_ids, budget) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            eprintln!("Native source extraction unavailable: {error}; using page OCR");
+            BTreeMap::new()
+        }
+    };
+    let mut source_observations = BTreeMap::new();
+    for (source_id, rgb) in decoded_sources {
+        let width = rgb.width();
+        let height = rgb.height();
+        let mapper = source_image_mapper(width, height)?;
+        match engine.recognize_page(rgb, mapper) {
+            Ok(lines) => {
+                eprintln!("source {source_id}: {} OCR observations", lines.len());
+                source_observations.insert(
+                    source_id,
+                    SourceObservation {
+                        width,
+                        height,
+                        lines,
+                    },
+                );
+            }
+            Err(error) => {
+                eprintln!("source {source_id}: {error}; source-only OCR disabled for its pages");
+            }
+        }
+    }
+    let source_only = source_only_pages(&scanned, &source_observations)?;
+    eprintln!(
+        "source raster fast path approved {} of {} selected pages",
+        source_only.approved_pages.len(),
+        selection.len()
+    );
+    Ok(source_only)
+}
+
 fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     let mut paths = vec![args.output.as_path()];
     if let Some(pdf) = &args.output_pdf {
@@ -186,17 +257,33 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     let digest = hex::encode(Sha256::digest(doc.original_bytes()));
 
     let engine = OcrInference::pp_ocrv6_small()?;
+    let source_only = recognize_native_source_pages(
+        &engine,
+        &args.pdf,
+        &doc,
+        &selection,
+        NativeImageBudget {
+            max_source_pixels: args.max_native_source_pixels,
+            max_total_pixels: args.max_native_total_pixels,
+            max_sources: args.max_native_sources,
+            max_extraction_pixels: args.max_native_extraction_pixels,
+        },
+    )?;
     let mut pages = Vec::with_capacity(selection.len());
     for page in selection {
-        let image = render_rgb_page(&args.pdf, page, policy)?;
-        let mapper = doc.mapper(page)?;
-        let lines = engine.recognize_page(image, mapper)?;
+        let (lines, path) = if let Some(lines) = source_only.pages.get(&page) {
+            (lines.clone(), "native-source")
+        } else {
+            let image = render_rgb_page(&args.pdf, page, policy)?;
+            let mapper = doc.mapper(page)?;
+            (engine.recognize_page(image, mapper)?, "page-fallback")
+        };
         let native_text_regions = natives
             .get(&page)
             .cloned()
             .ok_or("Poppler native text omitted selected page")?;
         eprintln!(
-            "page {}: {} OCR lines, {} native words",
+            "page {} ({path}): {} OCR lines, {} native words",
             page.get(),
             lines.len(),
             native_text_regions.len()
@@ -207,7 +294,11 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
             native_text_regions,
         });
     }
-    let draft = OcrDraft::new(digest, "oar-ocr PP-OCRv6 Small (Rust)".into(), pages);
+    let draft = OcrDraft::new(
+        digest,
+        "oar-ocr PP-OCRv6 Small (Rust), native source and page fallback".into(),
+        pages,
+    );
     // Catch a source replacement or mutation while page images were rendered.
     draft.verify_pdf(&args.pdf)?;
 
@@ -243,7 +334,27 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_page_selection;
+    use super::{check_paths, parse_page_selection};
+    use std::fs;
+
+    #[test]
+    fn refuses_output_overwrites_and_aliases() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let input = dir.path().join("original.pdf");
+        let json = dir.path().join("result.json");
+        let output_pdf = dir.path().join("searchable.pdf");
+        fs::write(&input, b"untouched source")?;
+        assert!(check_paths(&input, &[&json, &output_pdf]).is_ok());
+        assert!(check_paths(&input, &[&input]).is_err());
+        assert!(check_paths(&input, &[&json, &json]).is_err());
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("alias.pdf");
+            std::os::unix::fs::symlink(&input, &link)?;
+            assert!(check_paths(&input, &[&link]).is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn parses_ranges_and_rejects_out_of_range_or_duplicate_pages()

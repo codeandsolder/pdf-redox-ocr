@@ -8,6 +8,7 @@ pub mod geometry;
 pub mod hybrid;
 #[cfg(feature = "native-inference")]
 pub mod inference;
+pub mod native_images;
 pub mod native_words;
 #[cfg(feature = "pdf-integration")]
 pub mod paint_scan;
@@ -15,6 +16,8 @@ pub mod paint_scan;
 pub mod pdf_metadata;
 pub mod polygon;
 pub mod rasterize;
+#[cfg(feature = "pdf-integration")]
+pub mod source_ocr;
 pub mod source_selection;
 
 use thiserror::Error;
