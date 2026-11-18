@@ -11,7 +11,9 @@ until the reference corpus and source/image-level visibility tests match.
   including inherited page rectangles and rotation.
 - PDF paint instruction parsing through Hayro, with nested Form XObjects,
   source/paint identity, effective CTMs, clip safety, searchable text and
-  conservative unsupported-instruction diagnostics.
+  conservative unsupported-instruction diagnostics. Form BBox corners are
+  normalized independently of page MediaBoxes; degenerate Form rectangles
+  disable source-visibility admission without aborting ordinary page OCR.
 - Verified page geometry, polygon clipping, batching Poppler's existing native
   words, resource-budgeted native image selection, OCR draft v3 SHA-256 binding,
   source/paint-specific visibility proof admissions and native/fallback merging.

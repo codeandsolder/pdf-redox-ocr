@@ -36,6 +36,25 @@ impl PageBox {
         Ok(Self { x0, y0, x1, y1 })
     }
 
+    /// Interpret a PDF rectangle as two corner coordinates in either order.
+    ///
+    /// PDF files encountered in practice include Form BBox coordinates in
+    /// descending X or Y order, even when their MediaBox is canonical.
+    /// A zero-area rectangle contains no usable clipping region.
+    ///
+    /// # Errors
+    /// Rejects non-finite coordinates instead of hiding malformed content.
+    pub fn from_unordered_corners(values: [f64; 4]) -> Result<Option<Self>, Error> {
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(Error::Invalid("non-finite PDF rectangle".into()));
+        }
+        let [x0, y0, x1, y1] = values;
+        if x0 == x1 || y0 == y1 {
+            return Ok(None);
+        }
+        Self::new([x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)]).map(Some)
+    }
+
     /// Width.
     #[must_use]
     pub fn width(self) -> f64 {
@@ -201,6 +220,27 @@ mod tests {
                 ((vertical.0 - origin.0).hypot(vertical.1 - origin.1) - expected.1).abs() < 1e-10
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn unordered_form_bbox_corners_normalize_and_empty_rectangles_are_distinguished()
+    -> Result<(), crate::Error> {
+        let sorted = PageBox::new([10.0, 20.0, 70.0, 120.0])?;
+        for candidate in [
+            [10.0, 20.0, 70.0, 120.0],
+            [70.0, 120.0, 10.0, 20.0],
+            [70.0, 20.0, 10.0, 120.0],
+            [10.0, 120.0, 70.0, 20.0],
+        ] {
+            assert_eq!(PageBox::from_unordered_corners(candidate)?, Some(sorted));
+        }
+        assert_eq!(
+            PageBox::from_unordered_corners([0.0, 0.0, 0.0, 80.0])?,
+            None
+        );
+        assert!(PageBox::from_unordered_corners([0.0, 0.0, f64::NAN, 80.0]).is_err());
+        assert!(PageBox::from_unordered_corners([0.0, 0.0, f64::INFINITY, 80.0]).is_err());
         Ok(())
     }
 

@@ -824,8 +824,13 @@ impl ScanContext<'_> {
                 .concat(PdfMatrix(array_numbers::<6>(self.source, matrix)?));
         }
         if let Some(bounds) = dict.get(b"BBox".as_slice()) {
-            let page_box = PageBox::new(array_numbers::<4>(self.source, bounds)?)?;
-            child.clips.push(child.ctm.rect_quad(page_box));
+            match PageBox::from_unordered_corners(array_numbers::<4>(self.source, bounds)?)? {
+                Some(page_box) => child.clips.push(child.ctm.rect_quad(page_box)),
+                // A degenerate Form BBox cannot justify visibility proof:
+                // still traverse the content but mark all contained paints
+                // unsafe for source-only or independently admitted OCR.
+                None => child.clip_unknown = true,
+            }
         } else {
             child.clip_unknown = true;
         }
