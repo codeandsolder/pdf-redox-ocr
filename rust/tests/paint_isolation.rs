@@ -169,7 +169,7 @@ fn isolated_paint_does_not_modify_other_visible_uses_or_reserved_aliases()
         for (index, (a, b)) in before.pixels().zip(after.pixels()).enumerate() {
             let x = index % usize::try_from(before.width())?;
             if a.0 != b.0 {
-                if x < 400 {
+                if x < usize::try_from(before.width())? / 2 {
                     left_changed += 1;
                 } else {
                     right_changed += 1;
