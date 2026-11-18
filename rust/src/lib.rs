@@ -24,6 +24,8 @@ pub mod rasterize;
 pub mod source_mask;
 #[cfg(feature = "pdf-integration")]
 pub mod source_ocr;
+#[cfg(feature = "pdf-integration")]
+mod source_samples;
 pub mod source_selection;
 
 use thiserror::Error;

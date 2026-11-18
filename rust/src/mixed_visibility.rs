@@ -161,6 +161,9 @@ impl PageProbe<'_> {
         source: &SourceObservation,
         masked: &MaskedSourceObject,
     ) -> Result<Option<ProbedSource>, Error> {
+        if source.width == 0 || source.height == 0 {
+            return Err(Error::Invalid("invalid source OCR dimensions".into()));
+        }
         let lines = source
             .lines
             .iter()
@@ -193,6 +196,31 @@ impl PageProbe<'_> {
             return Err(Error::Invalid("masked OCR metric/geometry mismatch".into()));
         }
         let display_mapper = self.document.mapper(self.page)?;
+        let page_box = self
+            .document
+            .media_boxes()
+            .get(&self.page)
+            .ok_or_else(|| Error::Invalid("page MediaBox missing".into()))?;
+        let dpi_scale = (f64::from(self.control.width()) / page_box.width())
+            .max(f64::from(self.control.height()) / page_box.height());
+        let [a, b, c, d, _, _] = paint.ctm;
+        let padding = (5.0
+            * (a.hypot(b) / f64::from(source.width) + c.hypot(d) / f64::from(source.height))
+            * dpi_scale)
+            .ceil()
+            + 3.0;
+        // A counterfactual is evidence only when *all* untargeted rendered
+        // pixels remain byte-identical. Codec color transforms can otherwise
+        // create false-positive visibility when an XObject is rewritten.
+        if !unchanged_outside_source_masks(
+            self.control,
+            &treatment,
+            &projections,
+            display_mapper,
+            padding,
+        ) {
+            return Ok(None);
+        }
         let source_pdf_to_pixel = pixel_density(self.control, self.document, self.page)?;
         let expected_scale = PdfMatrix(paint.ctm).area_scale() * source_pdf_to_pixel
             / (f64::from(source.width) * f64::from(source.height));
@@ -239,6 +267,50 @@ impl PageProbe<'_> {
             audit,
         }))
     }
+}
+
+/// Verify that all altered rendered pixels are confined to the selected
+/// native OCR quads, with a conservative resampling/edge padding.
+fn unchanged_outside_source_masks(
+    before: &RgbImage,
+    after: &RgbImage,
+    regions: &[crate::draft::OcrLine],
+    mapper: DisplayMapper,
+    padding: f64,
+) -> bool {
+    let width = f64::from(before.width());
+    let height = f64::from(before.height());
+    let bounds = regions
+        .iter()
+        .map(|line| {
+            let pixels = line.quad.map(|point| {
+                let Point(x, y) = mapper.to_raster(point);
+                Point(x * width, y * height)
+            });
+            let xmin = pixels.iter().map(|p| p.0).fold(f64::INFINITY, f64::min) - padding;
+            let xmax = pixels.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max) + padding;
+            let ymin = pixels.iter().map(|p| p.1).fold(f64::INFINITY, f64::min) - padding;
+            let ymax = pixels.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max) + padding;
+            [xmin, ymin, xmax, ymax]
+        })
+        .collect::<Vec<_>>();
+    for y in 0..before.height() {
+        for x in 0..before.width() {
+            let pixel = before.get_pixel(x, y);
+            let candidate = after.get_pixel(x, y);
+            if pixel.0 == candidate.0 {
+                continue;
+            }
+            let center = Point(f64::from(x) + 0.5, f64::from(y) + 0.5);
+            if !bounds
+                .iter()
+                .any(|b| (b[0]..=b[2]).contains(&center.0) && (b[1]..=b[3]).contains(&center.1))
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn pixel_density(image: &RgbImage, document: &PdfMetadata, page: PageNumber) -> Result<f64, Error> {
@@ -334,8 +406,47 @@ fn inside_convex(polygon: &Quad, point: Point) -> bool {
 mod tests {
     use image::{Rgb, RgbImage};
 
-    use super::changed_raster_pixels;
-    use crate::geometry::{DisplayMapper, PageBox, Point, Rotation};
+    use super::{changed_raster_pixels, unchanged_outside_source_masks};
+    use crate::{
+        draft::OcrLine,
+        geometry::{DisplayMapper, PageBox, Point, Rotation},
+    };
+
+    #[test]
+    fn counterfactual_rejects_any_untargeted_page_change() -> Result<(), crate::Error> {
+        let before = RgbImage::from_pixel(100, 100, Rgb([0, 0, 0]));
+        let mut after = before.clone();
+        let quad = [
+            Point(20.0, 60.0),
+            Point(60.0, 60.0),
+            Point(60.0, 80.0),
+            Point(20.0, 80.0),
+        ];
+        let region = OcrLine {
+            text: "bitmap text".into(),
+            confidence: 0.99,
+            quad,
+            reviewed: false,
+        };
+        let mapper = DisplayMapper::new(PageBox::new([0.0, 0.0, 100.0, 100.0])?, Rotation::Deg0);
+        after.put_pixel(30, 30, Rgb([255, 255, 255]));
+        assert!(unchanged_outside_source_masks(
+            &before,
+            &after,
+            &[region.clone()],
+            mapper,
+            4.0
+        ));
+        after.put_pixel(80, 80, Rgb([10, 10, 10]));
+        assert!(!unchanged_outside_source_masks(
+            &before,
+            &after,
+            &[region],
+            mapper,
+            4.0
+        ));
+        Ok(())
+    }
 
     #[test]
     fn diff_detects_visible_but_not_fully_occluded_sources() -> Result<(), crate::Error> {

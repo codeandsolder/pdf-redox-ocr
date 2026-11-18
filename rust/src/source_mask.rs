@@ -1,17 +1,19 @@
 //! Source-specific counterfactual image-text masks for PDF visibility proofs.
 //!
-//! The PDF is never edited in place: copy-on-write changes one image `XObject`,
-//! preserving all original paint operations and shared Form resource references.
-//! Unknown color decoding, transparency, alpha and non-8-bit pixels are refused.
+//! The PDF is never edited in place: copy-on-write changes one image `XObject`.
+//! Bit-exact packed samples retain the original `ColorSpace` and `Decode` mapping,
+//! including Indexed palettes and 16-bit samples. Alpha and unknown color
+//! spaces retain their normal page-OCR fallback.
 
-use image::{Rgb, RgbImage};
-use pdf_redox::{EditDocument, ObjectId, OwnedObject, StreamData};
+use pdf_redox::{EditDocument, ObjectId, OwnedObject, SourcePdf, StreamData};
 
 use crate::{
     Error,
     draft::OcrLine,
     geometry::{Point, Quad},
+    pdf_metadata::resolve_owned,
     polygon::area,
+    source_samples::PackedSamples,
 };
 
 /// Quantifies the specific source text modified by a counterfactual.
@@ -43,9 +45,9 @@ pub struct MaskedSourceObject {
 
 /// Create one source-specific counterfactual in Rust.
 ///
-/// The accepted source image must be an 8-bit device-RGB `XObject` whose
-/// stream decodes to exact native RGB pixels without color conversions.
-/// Other encodings return None and remain eligible for ordinary page OCR.
+/// Only source streams with resolved native sample layouts are modified.
+/// The original image `ColorSpace` and `Decode` mapping remain untouched;
+/// unsupported image encodings remain eligible for ordinary page OCR.
 ///
 /// # Errors
 /// Returns an error for malformed PDF objects or source OCR polygons that
@@ -91,49 +93,14 @@ pub fn mask_source_object(
     }
     let source = pdf_redox::SourcePdf::from_bytes(original.to_vec())?;
     let object = source.materialize(source_id)?;
-    let OwnedObject::Stream { dictionary, .. } = &object else {
-        return Ok(None);
-    };
-    let entry = |key: &[u8]| dictionary.get(key);
-    if !matches!(entry(b"Subtype"), Some(OwnedObject::Name(name)) if name == b"Image")
-        || !matches!(entry(b"ColorSpace"), Some(OwnedObject::Name(name)) if name == b"DeviceRGB")
-        || !matches!(entry(b"BitsPerComponent"), Some(OwnedObject::Integer(8)))
-        || [b"SMask".as_slice(), b"Mask", b"Decode", b"Alternates", b"F"]
-            .iter()
-            .any(|key| entry(key).is_some())
-        || matches!(entry(b"ImageMask"), Some(OwnedObject::Boolean(true)))
-    {
-        return Ok(None);
-    }
-    let width = match entry(b"Width") {
-        Some(OwnedObject::Integer(value)) => u32::try_from(*value).ok(),
-        _ => None,
-    };
-    let height = match entry(b"Height") {
-        Some(OwnedObject::Integer(value)) => u32::try_from(*value).ok(),
-        _ => None,
-    };
-    let (Some(width), Some(height)) = (width, height) else {
-        return Ok(None);
-    };
-    let pixels = u64::from(width) * u64::from(height);
-    if pixels == 0 || pixels > 30_000_000 {
-        return Ok(None);
-    }
-    let decoded = source.decoded_stream_data(source_id)?;
-    let Some(byte_count) = pixels
-        .checked_mul(3)
-        .and_then(|count| usize::try_from(count).ok())
-    else {
-        return Ok(None);
-    };
-    if decoded.len() != byte_count {
-        return Ok(None);
-    }
-    let Some(mut image) = RgbImage::from_raw(width, height, decoded.into_owned()) else {
+    let Some(mut image) = decode_native_samples(&source, source_id, &object)? else {
         return Ok(None);
     };
     let before = image.clone();
+    let width = u32::try_from(image.width)
+        .map_err(|_| Error::Invalid("source width exceeds u32".into()))?;
+    let height = u32::try_from(image.height)
+        .map_err(|_| Error::Invalid("source height exceeds u32".into()))?;
     let mut polygons = Vec::with_capacity(eligible.len());
     for line in &eligible {
         polygons.push(to_top_left(&line.quad, width, height)?);
@@ -156,7 +123,7 @@ pub fn mask_source_object(
     {
         return Ok(None);
     }
-    let payload = image.into_raw();
+    let payload = image.data;
     let length = i64::try_from(payload.len())
         .map_err(|_| Error::Invalid("source stream length exceeds i64".into()))?;
     let mut rewritten = object;
@@ -175,6 +142,138 @@ pub fn mask_source_object(
         object: rewritten,
         metrics,
     }))
+}
+
+/// Decode samples without changing their color-space interpretation.
+fn decode_native_samples(
+    source: &SourcePdf,
+    source_id: ObjectId,
+    object: &OwnedObject,
+) -> Result<Option<PackedSamples>, Error> {
+    let Some(dictionary) = object.as_dictionary() else {
+        return Ok(None);
+    };
+    let entry = |key: &[u8]| dictionary.get(key);
+    if !matches!(entry(b"Subtype"), Some(OwnedObject::Name(name)) if name == b"Image")
+        || [
+            b"SMask".as_slice(),
+            b"Mask",
+            b"Alternates",
+            b"F",
+            b"SMaskInData",
+        ]
+        .iter()
+        .any(|key| entry(key).is_some())
+        || matches!(entry(b"ImageMask"), Some(OwnedObject::Boolean(true)))
+    {
+        return Ok(None);
+    }
+    let Some(components) = entry(b"ColorSpace")
+        .map(|raw| color_components(source, raw))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    let Some(bits) = entry(b"BitsPerComponent").and_then(|raw| match raw {
+        OwnedObject::Integer(value) => u8::try_from(*value).ok(),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    let width = match entry(b"Width") {
+        Some(OwnedObject::Integer(value)) => u32::try_from(*value).ok(),
+        _ => None,
+    };
+    let height = match entry(b"Height") {
+        Some(OwnedObject::Integer(value)) => u32::try_from(*value).ok(),
+        _ => None,
+    };
+    let (Some(width), Some(height)) = (width, height) else {
+        return Ok(None);
+    };
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels == 0 || pixels > 30_000_000 {
+        return Ok(None);
+    }
+    // Validate the expected decoded size before invoking a stream codec.
+    let Some(row_bits) = u64::from(width)
+        .checked_mul(u64::try_from(components).unwrap_or(u64::MAX))
+        .and_then(|value| value.checked_mul(u64::from(bits)))
+    else {
+        return Ok(None);
+    };
+    let Some(expected_bytes) = row_bits
+        .checked_add(7)
+        .map(|value| value / 8)
+        .and_then(|value| value.checked_mul(u64::from(height)))
+    else {
+        return Ok(None);
+    };
+    if expected_bytes > 128 * 1024 * 1024 {
+        return Ok(None);
+    }
+    // Image codecs that cannot expose exact native samples are eligible for
+    // page OCR; unsupported source decoding must not abort the whole document.
+    let Ok(decoded) = source.decoded_stream_data(source_id) else {
+        return Ok(None);
+    };
+    Ok(PackedSamples::new(
+        width,
+        height,
+        components,
+        bits,
+        decoded.into_owned(),
+    ))
+}
+
+/// Count PDF color-space components without performing color conversion.
+/// Unknown named aliases require page/Form resources and cannot be guessed.
+fn color_components(source: &SourcePdf, raw: &OwnedObject) -> Result<Option<usize>, Error> {
+    let resolved = resolve_owned(source, raw.clone())?;
+    let OwnedObject::Array(items) = &resolved else {
+        return Ok(match resolved {
+            OwnedObject::Name(name) => match name.as_slice() {
+                b"DeviceGray" => Some(1),
+                b"DeviceRGB" => Some(3),
+                b"DeviceCMYK" => Some(4),
+                _ => None,
+            },
+            _ => None,
+        });
+    };
+    let Some(first) = items.first() else {
+        return Ok(None);
+    };
+    let OwnedObject::Name(kind) = resolve_owned(source, first.clone())? else {
+        return Ok(None);
+    };
+    let count = match kind.as_slice() {
+        b"CalGray" if items.len() == 2 => Some(1),
+        b"CalRGB" | b"Lab" if items.len() == 2 => Some(3),
+        b"Indexed" | b"I" | b"Separation" if items.len() == 4 => Some(1),
+        b"DeviceN" if items.len() >= 4 => match resolve_owned(source, items[1].clone())? {
+            OwnedObject::Array(names)
+                if names.iter().all(|n| matches!(n, OwnedObject::Name(_))) =>
+            {
+                Some(names.len())
+            }
+            _ => None,
+        },
+        b"ICCBased" if items.len() == 2 => {
+            let profile = resolve_owned(source, items[1].clone())?;
+            profile
+                .as_dictionary()
+                .and_then(|dict| dict.get(b"N".as_slice()))
+                .and_then(|value| match value {
+                    OwnedObject::Integer(value) => usize::try_from(*value).ok(),
+                    _ => None,
+                })
+                .filter(|channels| matches!(*channels, 1 | 3 | 4))
+        }
+        _ => None,
+    };
+    Ok(count.filter(|channels| (1..=32).contains(channels)))
 }
 
 fn to_top_left(quad: &Quad, width: u32, height: u32) -> Result<Quad, Error> {
@@ -221,13 +320,14 @@ fn within_quad(quad: &Quad, point: Point, pad: f64) -> bool {
     true
 }
 
-fn extent(quad: &Quad, width: u32, height: u32, pad: f64) -> (u32, u32, u32, u32) {
+fn extent(quad: &Quad, width: usize, height: usize, pad: f64) -> (usize, usize, usize, usize) {
     let min_x = quad.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
     let max_x = quad.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
     let min_y = quad.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
     let max_y = quad.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
-    let clamp = |v: f64, limit: u32| {
-        num_traits::ToPrimitive::to_u32(&v.clamp(0.0, f64::from(limit))).unwrap_or(limit)
+    let clamp = |value: f64, limit: usize| {
+        let bound = num_traits::ToPrimitive::to_f64(&limit).unwrap_or(f64::MAX);
+        num_traits::ToPrimitive::to_usize(&value.clamp(0.0, bound)).unwrap_or(limit)
     };
     (
         clamp((min_x - pad).floor(), width),
@@ -237,17 +337,23 @@ fn extent(quad: &Quad, width: u32, height: u32, pad: f64) -> (u32, u32, u32, u32
     )
 }
 
-fn cover_text(image: &mut RgbImage, polygon: &Quad, padding: u32) {
+fn pixel_center(x: usize, y: usize) -> Point {
+    Point(
+        num_traits::ToPrimitive::to_f64(&x).unwrap_or(f64::INFINITY) + 0.5,
+        num_traits::ToPrimitive::to_f64(&y).unwrap_or(f64::INFINITY) + 0.5,
+    )
+}
+
+fn cover_text(image: &mut PackedSamples, polygon: &Quad, padding: u32) {
     let pad = f64::from(padding);
-    let (x0, y0, x1, y1) = extent(polygon, image.width(), image.height(), pad + 5.0);
-    let mut channels: [Vec<u8>; 3] = std::array::from_fn(|_| Vec::new());
+    let (x0, y0, x1, y1) = extent(polygon, image.width, image.height, pad + 5.0);
+    let mut channels = vec![Vec::<u16>::new(); image.components];
     for y in y0..y1 {
         for x in x0..x1 {
-            let point = Point(f64::from(x) + 0.5, f64::from(y) + 0.5);
+            let point = pixel_center(x, y);
             if within_quad(polygon, point, pad + 5.0) && !within_quad(polygon, point, pad) {
-                let pixel = image.get_pixel(x, y);
-                for (index, samples) in channels.iter_mut().enumerate() {
-                    samples.push(pixel[index]);
+                for (channel, samples) in channels.iter_mut().enumerate() {
+                    samples.push(image.get(x, y, channel));
                 }
             }
         }
@@ -255,39 +361,30 @@ fn cover_text(image: &mut RgbImage, polygon: &Quad, padding: u32) {
     if channels[0].is_empty() {
         return;
     }
-    for samples in &mut channels {
-        samples.sort_unstable();
-    }
-    let median = channels[0].len() / 2;
-    let color = Rgb([
-        channels[0][median],
-        channels[1][median],
-        channels[2][median],
-    ]);
+    let color = channels
+        .iter_mut()
+        .map(|samples| {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        })
+        .collect::<Vec<_>>();
     for y in y0..y1 {
         for x in x0..x1 {
-            if within_quad(polygon, Point(f64::from(x) + 0.5, f64::from(y) + 0.5), pad) {
-                *image.get_pixel_mut(x, y) = color;
+            if within_quad(polygon, pixel_center(x, y), pad) {
+                for (channel, &sample) in color.iter().enumerate() {
+                    image.set(x, y, channel, sample);
+                }
             }
         }
     }
 }
 
-fn changed_in_polygon(before: &RgbImage, after: &RgbImage, quad: &Quad) -> u64 {
-    let (x0, y0, x1, y1) = extent(quad, before.width(), before.height(), 0.0);
+fn changed_in_polygon(before: &PackedSamples, after: &PackedSamples, quad: &Quad) -> u64 {
+    let (x0, y0, x1, y1) = extent(quad, before.width, before.height, 0.0);
     let mut count = 0_u64;
     for y in y0..y1 {
         for x in x0..x1 {
-            if !within_quad(quad, Point(f64::from(x) + 0.5, f64::from(y) + 0.5), 0.0) {
-                continue;
-            }
-            if before
-                .get_pixel(x, y)
-                .0
-                .iter()
-                .zip(after.get_pixel(x, y).0)
-                .any(|(left, right)| left.abs_diff(right) > 8)
-            {
+            if within_quad(quad, pixel_center(x, y), 0.0) && before.pixel_changed(after, x, y) {
                 count += 1;
             }
         }

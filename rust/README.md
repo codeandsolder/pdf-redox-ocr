@@ -40,15 +40,23 @@ image Do invocation through its nested Form chain to independently masked
 source pixels, and a differential final-page render proves the change survives
 the full painting stack. The result carries source, expanded paint identity
 and full invocation path through a provenance-gated merge with page OCR.
-Repeated source and Form invocations on the same page are independently audited. Currently only losslessly decoded 8-bit
-DeviceRGB sources can be used for the counterfactual; other encodings keep
-ordinary page OCR. The original PDF is never modified.
+Repeated source and Form invocations on the same page are independently
+audited. Counterfactual image masks work on the original packed sample values
+(1/2/4/8/16 bits per component), including Gray, RGB, CMYK, Indexed and
+ICC-based color spaces, without changing the original ColorSpace or Decode
+mapping. Unresolved color aliases, alpha, unsupported sample codecs and
+incomplete source data keep ordinary page OCR. A differential proof also
+requires every pixel outside the selected OCR region to remain unchanged.
+The original PDF is never modified.
 
 The real-PDF regression corpus covers repeated image extraction, masked source
 rewriting, a source visible on one page but occluded on another, and
 repeated direct/once-nested/twice-nested source painting on the same page,
-with one occurrence covered by later opaque vector paint. The existing Python pipeline remains the functional
-reference for corpus parity, performance, image mosaics and additional formats.
+with one occurrence covered by later opaque vector paint. A ten-page
+real-PDF corpus checks native packed pixel round trips and absence of unrelated
+render changes across 1/2/4/8/16-bit device and calibrated color spaces.
+The existing Python pipeline remains the functional reference for corpus
+parity, performance and image mosaics.
 
 The source core is tested using stable Rust 1.100 with
 cargo +stable test --locked --no-default-features. The integrated crate
