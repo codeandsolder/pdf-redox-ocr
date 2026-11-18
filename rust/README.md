@@ -33,11 +33,21 @@ Native source decoding is explicitly bounded by per-source, total-resident,
 source-count and single-extraction pixel ceilings. Those controls are exposed
 as CLI options. If an image cannot fit, its page uses ordinary page OCR.
 
-The CLI now recognizes native image XObjects once per source and skips page OCR
-on independently paint-safe raster-only pages. Mixed-content pages still use
-whole-page OCR; they do not incorporate native source observations until
-source/paint-isolated differential visibility proofs are implemented. The
-existing Python path remains the functional baseline.
+The CLI recognizes native image XObjects once per source and skips page OCR
+on independently paint-safe raster-only pages. On mixed pages, native source
+labels are admitted only when a detached copy-on-write PDF masks their source
+pixels and a differential final-page render proves the change survives the
+full painting stack. The result carries source and expanded paint identity
+through a provenance-gated merge with page OCR. Repeated occurrences of one
+source on the same page remain on page fallback until individual Do/Form
+invocation isolation is supported. Currently only losslessly decoded 8-bit
+DeviceRGB sources can be used for the counterfactual; other encodings keep
+ordinary page OCR. The original PDF is never modified.
+
+The real-PDF regression corpus covers repeated image extraction, masked source
+rewriting, and a source visible on one page but fully occluded by later opaque
+vector painting on another. The existing Python pipeline remains the functional
+reference for corpus parity, performance, image mosaics and additional formats.
 
 The source core is tested using stable Rust 1.100 with
 cargo +stable test --locked --no-default-features. The integrated crate

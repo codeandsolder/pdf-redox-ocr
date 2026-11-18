@@ -13,15 +13,19 @@ use pdf_redox::{OcrDocument, OcrLine as PdfOcrLine, OcrOverlayOptions, OcrPage};
 use pdf_redox_ocr::{
     PageNumber,
     draft::{DraftPage, OcrDraft},
+    hybrid::{MergeInput, merge_ocr},
     inference::OcrInference,
+    mixed_visibility::{MixedVisibility, prove_mixed_source_text},
     native_images::{NativeImageBudget, native_source_images},
     native_words::native_words_for_pages,
     paint_scan::enumerate_image_paints,
     pdf_metadata::PdfMetadata,
     rasterize::{RenderPolicy, render_rgb_page},
     source_ocr::{
-        SourceObservation, source_image_mapper, source_only_candidates, source_only_pages,
+        SourceObservation, SourceOnlyResult, source_image_mapper, source_only_candidates,
+        source_only_pages,
     },
+    source_selection::{ImagePlacement, SourcePolicy, choose_mixed_raster_sources},
 };
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
@@ -188,24 +192,66 @@ fn importer_document(draft: &OcrDraft) -> Result<OcrDocument, Box<dyn Error>> {
     })
 }
 
-/// Decode and recognize independent native-image sources before page fallback.
-fn recognize_native_source_pages(
+/// Distinct source paints proved independently before the final OCR merge.
+struct NativePreparation {
+    source_only: SourceOnlyResult,
+    mixed: MixedVisibility,
+}
+
+/// Decode and recognize source images once, then verify mixed-page paint
+/// visibility by changing only one source in a detached counterfactual PDF.
+fn prepare_native_sources(
     engine: &OcrInference,
     pdf: &Path,
     doc: &PdfMetadata,
-    selection: &[PageNumber],
+    selected: &[PageNumber],
     budget: NativeImageBudget,
-) -> Result<pdf_redox_ocr::source_ocr::SourceOnlyResult, Box<dyn Error>> {
-    let scanned = enumerate_image_paints(doc, selection)?;
-    let selected_source_ids = source_only_candidates(&scanned, budget.max_source_pixels);
-    let decoded_sources = match native_source_images(pdf, selection, &selected_source_ids, budget) {
+    render: RenderPolicy,
+    minimum_confidence: f64,
+) -> Result<NativePreparation, Box<dyn Error>> {
+    let scanned = enumerate_image_paints(doc, selected)?;
+    let mut source_ids = source_only_candidates(&scanned, budget.max_source_pixels);
+    let sampling = scanned
+        .placements
+        .iter()
+        .map(|paint| ImagePlacement {
+            page: paint.page,
+            source_id: paint.source_id.clone(),
+            width: paint.width,
+            height: paint.height,
+            ctm: paint.ctm,
+            unsafe_reasons: paint
+                .unsafe_reasons
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    let (mixed_ids, sampling_report) = choose_mixed_raster_sources(
+        &sampling,
+        doc.media_boxes(),
+        SourcePolicy {
+            max_side: render.max_side,
+            max_inference_pixels: budget.max_total_pixels,
+            max_sources: budget.max_sources,
+            minimum_source_pixels: 20_000,
+            min_gain: 2.25,
+        },
+    )?;
+    eprintln!(
+        "source candidates: {} high-detail sources, {} native-only sources",
+        sampling_report.native_resolution_candidates,
+        source_ids.len(),
+    );
+    source_ids.extend(mixed_ids);
+    let decoded_sources = match native_source_images(pdf, selected, &source_ids, budget) {
         Ok(decoded) => decoded,
         Err(error) => {
             eprintln!("Native source extraction unavailable: {error}; using page OCR");
             BTreeMap::new()
         }
     };
-    let mut source_observations = BTreeMap::new();
+    let mut recognized = BTreeMap::new();
     for (source_id, rgb) in decoded_sources {
         let width = rgb.width();
         let height = rgb.height();
@@ -213,7 +259,7 @@ fn recognize_native_source_pages(
         match engine.recognize_page(rgb, mapper) {
             Ok(lines) => {
                 eprintln!("source {source_id}: {} OCR observations", lines.len());
-                source_observations.insert(
+                recognized.insert(
                     source_id,
                     SourceObservation {
                         width,
@@ -223,17 +269,77 @@ fn recognize_native_source_pages(
                 );
             }
             Err(error) => {
-                eprintln!("source {source_id}: {error}; source-only OCR disabled for its pages");
+                eprintln!("source {source_id}: {error}; using page OCR");
             }
         }
     }
-    let source_only = source_only_pages(&scanned, &source_observations)?;
+    let source_only = source_only_pages(&scanned, &recognized)?;
     eprintln!(
-        "source raster fast path approved {} of {} selected pages",
+        "source-only fast path approved {} of {} selected pages",
         source_only.approved_pages.len(),
-        selection.len()
+        selected.len()
     );
-    Ok(source_only)
+    let fallback_selected = selected
+        .iter()
+        .copied()
+        .filter(|page| !source_only.approved_pages.contains(page))
+        .collect::<Vec<_>>();
+    let mixed = match prove_mixed_source_text(
+        pdf,
+        doc,
+        &scanned,
+        &recognized,
+        &fallback_selected,
+        render,
+        minimum_confidence,
+    ) {
+        Ok(mixed) => mixed,
+        Err(error) => {
+            eprintln!("Differential proof unavailable: {error}; using page OCR");
+            MixedVisibility::default()
+        }
+    };
+    eprintln!(
+        "mixed source visibility: {} proven labels across {} source paint audits",
+        mixed.proofs.len(),
+        mixed.audited.len()
+    );
+    Ok(NativePreparation { source_only, mixed })
+}
+
+/// Bind OCR observations to their original PDF and atomically publish outputs.
+fn write_draft_and_overlay(
+    args: &Args,
+    doc: &PdfMetadata,
+    draft: &OcrDraft,
+) -> Result<(), Box<dyn Error>> {
+    // Catch a source replacement or mutation while page images were rendered.
+    draft.verify_pdf(&args.pdf)?;
+
+    let mut serialized = serde_json::to_vec_pretty(draft)?;
+    serialized.push(b'\n');
+    let annotated = if args.output_pdf.is_some() {
+        let (pdf, report) = pdf_redox::apply_ocr_overlay(
+            doc.original_bytes(),
+            &importer_document(draft)?,
+            OcrOverlayOptions {
+                apply_unreviewed: true,
+                min_confidence: args.confidence,
+            },
+        )?;
+        eprintln!(
+            "OCR overlay: {} accepted, {} native duplicates suppressed",
+            report.accepted_lines, report.skipped_native_text_overlap
+        );
+        Some(pdf)
+    } else {
+        None
+    };
+    write_atomic(&args.output, &serialized)?;
+    if let (Some(output_path), Some(bytes)) = (args.output_pdf.as_ref(), annotated) {
+        write_atomic(output_path, &bytes)?;
+    }
+    Ok(())
 }
 
 fn run(args: &Args) -> Result<(), Box<dyn Error>> {
@@ -257,7 +363,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     let digest = hex::encode(Sha256::digest(doc.original_bytes()));
 
     let engine = OcrInference::pp_ocrv6_small()?;
-    let source_only = recognize_native_source_pages(
+    let prepared = prepare_native_sources(
         &engine,
         &args.pdf,
         &doc,
@@ -268,64 +374,72 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
             max_sources: args.max_native_sources,
             max_extraction_pixels: args.max_native_extraction_pixels,
         },
+        policy,
+        args.confidence,
     )?;
-    let mut pages = Vec::with_capacity(selection.len());
-    for page in selection {
-        let (lines, path) = if let Some(lines) = source_only.pages.get(&page) {
-            (lines.clone(), "native-source")
-        } else {
-            let image = render_rgb_page(&args.pdf, page, policy)?;
-            let mapper = doc.mapper(page)?;
-            (engine.recognize_page(image, mapper)?, "page-fallback")
-        };
+    let mut raster_pages = Vec::with_capacity(selection.len());
+    let mut fallback_pages = Vec::new();
+    for &page in &selection {
         let native_text_regions = natives
             .get(&page)
             .cloned()
             .ok_or("Poppler native text omitted selected page")?;
-        eprintln!(
-            "page {} ({path}): {} OCR lines, {} native words",
-            page.get(),
-            lines.len(),
-            native_text_regions.len()
-        );
-        pages.push(DraftPage {
+        let native_lines = prepared
+            .source_only
+            .pages
+            .get(&page)
+            .cloned()
+            .unwrap_or_default();
+        raster_pages.push(DraftPage {
             page: page.get(),
-            lines,
-            native_text_regions,
+            lines: native_lines,
+            native_text_regions: native_text_regions.clone(),
         });
+        if !prepared.source_only.approved_pages.contains(&page) {
+            let image = render_rgb_page(&args.pdf, page, policy)?;
+            let mapper = doc.mapper(page)?;
+            let lines = engine.recognize_page(image, mapper)?;
+            eprintln!(
+                "page {} (fallback): {} OCR lines, {} native words",
+                page.get(),
+                lines.len(),
+                native_text_regions.len()
+            );
+            fallback_pages.push(DraftPage {
+                page: page.get(),
+                lines,
+                native_text_regions,
+            });
+        }
     }
-    let draft = OcrDraft::new(
-        digest,
-        "oar-ocr PP-OCRv6 Small (Rust), native source and page fallback".into(),
-        pages,
+    let raster_draft = OcrDraft::new(
+        digest.clone(),
+        "oar-ocr PP-OCRv6 Small native-source".into(),
+        raster_pages,
     );
-    // Catch a source replacement or mutation while page images were rendered.
-    draft.verify_pdf(&args.pdf)?;
-
-    let mut serialized = serde_json::to_vec_pretty(&draft)?;
-    serialized.push(b'\n');
-    let annotated = if args.output_pdf.is_some() {
-        let (pdf, report) = pdf_redox::apply_ocr_overlay(
-            doc.original_bytes(),
-            &importer_document(&draft)?,
-            OcrOverlayOptions {
-                apply_unreviewed: true,
-                min_confidence: args.confidence,
-            },
-        )?;
-        eprintln!(
-            "OCR overlay: {} accepted, {} native duplicates suppressed",
-            report.accepted_lines, report.skipped_native_text_overlap
-        );
-        Some(pdf)
-    } else {
-        None
-    };
-    write_atomic(&args.output, &serialized)?;
-    if let (Some(output_path), Some(bytes)) = (args.output_pdf.as_ref(), annotated) {
-        write_atomic(output_path, &bytes)?;
-    }
-    Ok(())
+    let fallback_draft = OcrDraft::new(
+        digest,
+        "oar-ocr PP-OCRv6 Small page-fallback".into(),
+        fallback_pages,
+    );
+    let (draft, stats, _proposals) = merge_ocr(MergeInput {
+        pdf: &args.pdf,
+        selected: &selection,
+        raster: &raster_draft,
+        image_observations: &prepared.mixed.observations,
+        baseline: &fallback_draft,
+        raster_only: &prepared.source_only.approved_pages,
+        proven_pages: &prepared.mixed.proven_pages,
+        visibility_proofs: &prepared.mixed.proofs,
+        threshold: args.confidence,
+    })?;
+    eprintln!(
+        "OCR merge: {} source-only pages, {} fallback pages, {} verified native labels added",
+        stats.image_source_only_pages,
+        stats.page_fallback_pages,
+        stats.nonoverlapping_image_lines_added,
+    );
+    write_draft_and_overlay(args, &doc, &draft)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {

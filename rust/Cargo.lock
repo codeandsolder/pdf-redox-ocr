@@ -1895,6 +1895,7 @@ dependencies = [
  "hayro-syntax 0.8.0 (git+https://github.com/codeandsolder/hayro?rev=eed95c5a)",
  "hex",
  "image",
+ "num-traits",
  "oar-ocr",
  "pdf-redox",
  "quick-xml",

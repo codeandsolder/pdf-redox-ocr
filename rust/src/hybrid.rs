@@ -317,7 +317,9 @@ fn merge_fallback_page(
         .iter()
         .filter(|image| image.page == page.get())
     {
-        let page_overlap = baseline_page
+        // Include lines already admitted from other native-image paints:
+        // two individually visible sources can still overlap at page level.
+        let page_overlap = output_page
             .lines
             .iter()
             .map(|line| overlap_fraction(&image.line.quad, &line.quad))
@@ -468,6 +470,52 @@ mod tests {
             })
             .collect::<Vec<_>>();
         (raster, baseline, observations)
+    }
+
+    #[test]
+    fn independently_verified_overlapping_source_labels_are_deduplicated()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let sample = tempfile::NamedTempFile::new()?;
+        fs::write(
+            sample.path(),
+            b"distinct source identity, same visible OCR region",
+        )?;
+        let (raster, baseline, observations) = merge_fixture(sha256_file(sample.path())?);
+        let original = observations[0].clone();
+        let mut other = original.clone();
+        other.source_id = Some("37:0".into());
+        other.paint_index = Some(12);
+        let candidates = [original, other];
+        let proofs = candidates
+            .iter()
+            .map(|candidate| VisibilityProof {
+                page: candidate.page,
+                source_id: candidate.source_id.clone(),
+                paint_index: candidate.paint_index,
+                text: candidate.line.text.clone(),
+                quad: candidate.line.quad,
+                visible: true,
+            })
+            .collect::<Vec<_>>();
+        let selected = [PageNumber::new(1)?, PageNumber::new(2)?];
+        let (merged, stats, audit) = merge_ocr(MergeInput {
+            pdf: sample.path(),
+            selected: &selected,
+            raster: &raster,
+            image_observations: &candidates,
+            baseline: &baseline,
+            raster_only: &BTreeSet::from([selected[0]]),
+            proven_pages: &BTreeSet::from([selected[1]]),
+            visibility_proofs: &proofs,
+            threshold: 0.97,
+        })?;
+        assert_eq!(stats.nonoverlapping_image_lines_added, 1);
+        assert_eq!(stats.raster_candidates_kept_in_audit_only, 1);
+        assert_eq!(audit.len(), 2);
+        assert!(audit[0].included_as_extra);
+        assert!(!audit[1].included_as_extra);
+        assert_eq!(merged.pages[1].lines.len(), 2);
+        Ok(())
     }
 
     #[test]

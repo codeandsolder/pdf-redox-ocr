@@ -714,7 +714,7 @@ impl ScanContext<'_> {
         state: &State,
         depth: usize,
     ) -> Result<(), Error> {
-        let Some(reference) = named_resource(self.source, resources, b"`XObject`", resource_name)?
+        let Some(reference) = named_resource(self.source, resources, b"XObject", resource_name)?
         else {
             self.summary.unknown_paint += 1;
             return Ok(());
@@ -1027,9 +1027,9 @@ mod tests {
         let dicts = [
             b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
             b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 600 800] >>".to_vec(),
-            b"<< /Type /Page /Parent 2 0 R /Resources << /`XObject` << /Im0 5 0 R >> >> /Contents 6 0 R >>".to_vec(),
-            b"<< /Type /Page /Parent 2 0 R /Resources << /`XObject` << /Im0 5 0 R >> >> /Contents 6 0 R >>".to_vec(),
-            [&b"<< /Type /`XObject` /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 12 >>\nstream\n"[..],
+            b"<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Im0 5 0 R >> >> /Contents 6 0 R >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Im0 5 0 R >> >> /Contents 6 0 R >>".to_vec(),
+            [&b"<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 12 >>\nstream\n"[..],
                 &image_bytes, &b"\nendstream"[..]].concat(),
             [format!("<< /Length {} >>\nstream\n", paint.len()).as_bytes(), paint, b"endstream"].concat(),
         ];

@@ -122,6 +122,30 @@ impl NativeImageBudget {
     }
 }
 
+fn list_native_images(pdf: &Path, arguments: &[String]) -> Result<Vec<ImageInventoryEntry>, Error> {
+    let mut args = arguments.to_vec();
+    args.push("-list".to_owned());
+    let result = Command::new("pdfimages")
+        .args(&args)
+        .arg(pdf)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    if !result.status.success() {
+        return Err(Error::Poppler(format!(
+            "pdfimages inventory failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        )));
+    }
+    let lines = std::str::from_utf8(&result.stdout)
+        .map_err(|error| Error::Invalid(format!("pdfimages inventory is not UTF-8: {error}")))?;
+    lines
+        .lines()
+        .map(parse_inventory_line)
+        .collect::<Result<Vec<_>, _>>()
+        .map(|entries| entries.into_iter().flatten().collect())
+}
+
 /// Extract and normalize native source images for selected pages.
 ///
 /// The same PDF image resource may appear on hundreds of pages. Its pixels are
@@ -156,29 +180,7 @@ pub fn native_source_images(
         let first = run[0].get().to_string();
         let end_page = run[run.len() - 1].get().to_string();
         let mut arguments = vec!["-f".to_owned(), first, "-l".to_owned(), end_page];
-        let mut list_args = arguments.clone();
-        list_args.push("-list".to_owned());
-        let list = Command::new("pdfimages")
-            .args(&list_args)
-            .arg(pdf)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?;
-        if !list.status.success() {
-            return Err(Error::Poppler(format!(
-                "pdfimages inventory failed: {}",
-                String::from_utf8_lossy(&list.stderr)
-            )));
-        }
-        let list = std::str::from_utf8(&list.stdout)
-            .map_err(|e| Error::Invalid(format!("pdfimages inventory is not UTF-8: {e}")))?;
-        let inventory = list
-            .lines()
-            .map(parse_inventory_line)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
+        let inventory = list_native_images(pdf, &arguments)?;
         let extraction_pixels = inventory.iter().fold(0_u64, |acc, entry| {
             acc.saturating_add(u64::from(entry.width) * u64::from(entry.height))
         });
