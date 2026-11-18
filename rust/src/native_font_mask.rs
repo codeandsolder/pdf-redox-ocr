@@ -401,18 +401,17 @@ pub fn mask_native_fonts(
 
 #[cfg(test)]
 mod tests {
-    use super::{FormRewriter, TextState};
+    use super::{FormRewriter, NativeFontMaskStats, TextState};
     use crate::paint_scan::inherited_page_resources;
     use pdf_redox::{EditDocument, SourcePdf};
 
-    #[test]
-    fn every_pdf_text_show_preserves_operands_and_graphics_state() -> Result<(), crate::Error> {
-        let source = SourcePdf::from_bytes(
-            include_bytes!("../tests/fixtures/native-font-form-masking.pdf").to_vec(),
-        )?;
+    fn rewrite_fixture(
+        pdf: &[u8],
+        content: &[u8],
+    ) -> Result<(Option<Vec<u8>>, NativeFontMaskStats), crate::Error> {
+        let source = SourcePdf::from_bytes(pdf.to_vec())?;
         let resources = inherited_page_resources(&source, source.page_ids()[0])?;
-        let input = br#"q BT /Normal 12 Tf 2 Tr (A) Tj [(B) -120 (C)] TJ (D) ' 0 0 (E) " /Glyphs 20 Tf (X) Tj /Normal 12 Tf 7 Tr (CLIP) Tj 3 Tr (HIDDEN) Tj ET Q"#;
-        let mut stats = super::NativeFontMaskStats::default();
+        let mut stats = NativeFontMaskStats::default();
         let mut edited = EditDocument::from_bytes(source.bytes().to_vec())?;
         let mut rewriter = FormRewriter {
             source: &source,
@@ -421,10 +420,21 @@ mod tests {
             visits: 0,
             stats: &mut stats,
         };
-        let rewritten = rewriter
-            .rewrite_stream(input, resources, TextState::default(), 0)?
-            .bytes
-            .ok_or_else(|| crate::Error::Invalid("native text was not masked".into()))?;
+        let changed = rewriter
+            .rewrite_stream(content, resources, TextState::default(), 0)?
+            .bytes;
+        Ok((changed, stats))
+    }
+
+    #[test]
+    fn every_pdf_text_show_preserves_operands_and_graphics_state() -> Result<(), crate::Error> {
+        let input = br#"q BT /Normal 12 Tf 2 Tr (A) Tj [(B) -120 (C)] TJ (D) ' 0 0 (E) " /Glyphs 20 Tf (X) Tj /Normal 12 Tf 7 Tr (CLIP) Tj 3 Tr (HIDDEN) Tj ET Q"#;
+        let (changed, stats) = rewrite_fixture(
+            include_bytes!("../tests/fixtures/native-font-form-masking.pdf"),
+            input,
+        )?;
+        let rewritten =
+            changed.ok_or_else(|| crate::Error::Invalid("native text was not masked".into()))?;
         assert_eq!(stats.hidden_native_shows, 4);
         assert_eq!(stats.preserved_clipping_shows, 1);
         assert_eq!(stats.already_invisible_shows, 1);
@@ -449,22 +459,11 @@ mod tests {
 
     #[test]
     fn pdf_content_operators_preserve_original_bytes_and_kerning() -> Result<(), crate::Error> {
-        let pdf = include_bytes!("../tests/fixtures/repeated-nested-paint-occlusion.pdf").to_vec();
-        let source = SourcePdf::from_bytes(pdf)?;
-        let resources = inherited_page_resources(&source, source.page_ids()[0])?;
         let content = b"BT /Normal 12 Tf 0 Tr (HELLO) Tj [<41> -120 (B)] TJ 7 Tr (CLIP) Tj 3 Tr (INVISIBLE) Tj ET";
-        let mut stats = super::NativeFontMaskStats::default();
-        let mut edited = EditDocument::from_bytes(source.bytes().to_vec())?;
-        let mut rewriter = FormRewriter {
-            source: &source,
-            edited: &mut edited,
-            active: std::collections::BTreeSet::new(),
-            visits: 0,
-            stats: &mut stats,
-        };
-        let changed = rewriter
-            .rewrite_stream(content, resources, TextState::default(), 0)?
-            .bytes;
+        let (changed, stats) = rewrite_fixture(
+            include_bytes!("../tests/fixtures/repeated-nested-paint-occlusion.pdf"),
+            content,
+        )?;
         // The chosen fixture intentionally does not define /Normal: unknown
         // fonts are preserved, not erased on the assumption they are valid.
         assert!(changed.is_none());
