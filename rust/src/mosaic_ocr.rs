@@ -13,7 +13,7 @@ use crate::{
     draft::OcrLine,
     geometry::{DisplayMapper, Point, Quad},
     inference::OcrInference,
-    mosaic::{MosaicBudget, MosaicPlan, orient_raster, unrotate_pixel},
+    mosaic::{MosaicAxes, MosaicBudget, MosaicPlan},
     paint_scan::ImagePaint,
     rasterize::{CropPixelMapper, render_rgb_region},
 };
@@ -142,6 +142,114 @@ fn group_dpi(pitch: f64, max_dpi: u32) -> Option<u32> {
     (dpi <= max_dpi).then_some(dpi)
 }
 
+/// Exact image-space mapping for the oriented mosaic raster.
+///
+/// Pixel positions refer to *corners*. The same affine transform creates
+/// pixels and converts the OCR model's detected polygon into original PDF
+/// space, avoiding a second independent transform calculation.
+#[derive(Clone, Copy, Debug)]
+struct OrientedFrame {
+    axes: MosaicAxes,
+    start: Point,
+}
+
+impl OrientedFrame {
+    fn to_input(self, Point(x, y): Point) -> Point {
+        self.axes
+            .unproject(Point(self.start.0 + x, self.start.1 + y))
+    }
+}
+
+fn oriented_bounds(
+    paints: &[&ImagePaint],
+    mapper: CropPixelMapper,
+    axes: MosaicAxes,
+) -> Option<(OrientedFrame, u32, u32)> {
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for paint in paints {
+        for point in paint.page_quad {
+            let corner = axes.project(mapper.to_raster(point));
+            min_x = min_x.min(corner.0);
+            max_x = max_x.max(corner.0);
+            min_y = min_y.min(corner.1);
+            max_y = max_y.max(corner.1);
+        }
+    }
+    if ![min_x, max_x, min_y, max_y]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return None;
+    }
+    // Two source-pixel guards allow bilinear interpolation near the outer
+    // paint boundary without cutting off antialiased glyph strokes.
+    let x0 = min_x.floor() - 2.0;
+    let y0 = min_y.floor() - 2.0;
+    let x1 = max_x.ceil() + 2.0;
+    let y1 = max_y.ceil() + 2.0;
+    Some((
+        OrientedFrame {
+            axes,
+            start: Point(x0, y0),
+        },
+        num_traits::ToPrimitive::to_u32(&(x1 - x0))?,
+        num_traits::ToPrimitive::to_u32(&(y1 - y0))?,
+    ))
+}
+
+fn sample_whitened(image: &RgbImage, Point(x, y): Point) -> Rgb<u8> {
+    // Pixel centers are at i+0.5; sample in that convention. Sampling
+    // outside the region contributes white exactly as Poppler's backdrop.
+    let x = x - 0.5;
+    let y = y - 0.5;
+    let left = x.floor();
+    let top = y.floor();
+    let dx = x - left;
+    let dy = y - top;
+    let mut channels = [0.0_f64; 3];
+    for (offset_y, weight_y) in [(0.0, 1.0 - dy), (1.0, dy)] {
+        for (offset_x, weight_x) in [(0.0, 1.0 - dx), (1.0, dx)] {
+            let rgba = num_traits::ToPrimitive::to_u32(&(left + offset_x))
+                .zip(num_traits::ToPrimitive::to_u32(&(top + offset_y)))
+                .filter(|(column, row)| *column < image.width() && *row < image.height())
+                .map_or([255, 255, 255], |(column, row)| {
+                    image.get_pixel(column, row).0
+                });
+            let weight = weight_x * weight_y;
+            for index in 0..3 {
+                channels[index] = f64::from(rgba[index]).mul_add(weight, channels[index]);
+            }
+        }
+    }
+    Rgb(channels.map(|channel| num_traits::ToPrimitive::to_u8(&channel.round()).unwrap_or(255)))
+}
+
+/// Rectify a PDF-composited crop into a native-text-upright affine frame.
+///
+/// Rejects degenerate or out-of-budget resulting raster dimensions.
+fn rectify_group(
+    input: &RgbImage,
+    mapper: CropPixelMapper,
+    paints: &[&ImagePaint],
+    axes: MosaicAxes,
+    max_pixels: u64,
+) -> Option<(RgbImage, OrientedFrame)> {
+    let (frame, width, height) = oriented_bounds(paints, mapper, axes)?;
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels == 0 || pixels > max_pixels {
+        return None;
+    }
+    let mut output = RgbImage::new(width, height);
+    for (x, y, pixel) in output.enumerate_pixels_mut() {
+        let source = frame.to_input(Point(f64::from(x) + 0.5, f64::from(y) + 0.5));
+        *pixel = sample_whitened(input, source);
+    }
+    Some((output, frame))
+}
+
 /// Perform complete native-pitch OCR on a fragmented, image-only page.
 ///
 /// The caller supplies OCR over mapped pixels; this also allows deterministic
@@ -198,18 +306,22 @@ pub fn reconstruct_native_mosaics(
         }
         let mapper = crop.pixel_mapper();
         paint_clip_mask(&mut crop.rgb, mapper, &members)?;
-        let (width, height) = (crop.rgb.width(), crop.rgb.height());
-        let rotated = orient_raster(crop.rgb, group.clockwise_turns, group.flip_vertical);
-        let pixel_to_pdf = |point| {
-            mapper.to_pdf(unrotate_pixel(
-                point,
-                width,
-                height,
-                group.clockwise_turns,
-                group.flip_vertical,
-            ))
+        let Some((oriented, frame)) = rectify_group(
+            &crop.rgb,
+            mapper,
+            &members,
+            group.axes,
+            budget.max_group_pixels,
+        ) else {
+            return Ok(None);
         };
-        let mut result = recognize(rotated, &pixel_to_pdf)?;
+        let output_pixels = u64::from(oriented.width()) * u64::from(oriented.height());
+        total_pixels = total_pixels.saturating_add(output_pixels);
+        if total_pixels > budget.max_page_pixels {
+            return Ok(None);
+        }
+        let pixel_to_pdf = |point| mapper.to_pdf(frame.to_input(point));
+        let mut result = recognize(oriented, &pixel_to_pdf)?;
         lines.append(&mut result);
     }
     if seen.len() != paints.len() {

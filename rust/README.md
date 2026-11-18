@@ -52,8 +52,9 @@ image paint invocations using scale-aware, spatially indexed connected
 components. Adjacent strips are recognized in bounded native-pitch PDF crops,
 not as isolated text fragments. Poppler renders the final paint stack, so soft
 masks, ICC color, clipping and nested Form paints use the genuine PDF
-compositor. Group-specific clip masks, source-axes orientation, page rotation,
-reflection and exact crop-pixel-to-PDF geometry preserve provenance.
+compositor. Group-specific clip masks, exact affine source-axes rectification (including
+arbitrary rotations, reflection and modest source shear), and one shared
+inverse crop-pixel-to-PDF transform preserve provenance.
 Pages are promoted only after all image paints have been reconstructed and
 recognized. Failed geometric, compositing, resource or inference checks use
 ordinary full-page OCR rather than the independent strip shortcut. CLI knobs
@@ -67,7 +68,8 @@ with one occurrence covered by later opaque vector paint. A ten-page
 real-PDF corpus checks native packed pixel round trips and absence of unrelated
 render changes across 1/2/4/8/16-bit device and calibrated color spaces.
 The real-PDF fragment regression corpus covers split raster text, soft masks,
-clip paths, rotated pages and nonzero MediaBox origins. The existing Python
+clip paths, rotated pages and nonzero MediaBox origins, plus arbitrary 17° and
+37° rotations, mirrored −28° raster and sheared 13° input. The existing Python
 pipeline remains the functional reference for corpus and performance parity.
 
 The source core is tested using stable Rust 1.100 with

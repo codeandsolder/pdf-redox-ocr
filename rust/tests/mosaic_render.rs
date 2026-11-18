@@ -1,7 +1,7 @@
 //! Real PDF native-resolution crops agree exactly with complete page painting,
 //! including clipping, alpha masks, rotated pages and nonzero page origins.
 
-#![cfg(feature = "pdf-integration")]
+#![cfg(all(feature = "pdf-integration", feature = "native-inference"))]
 
 use std::{fs, process::Command};
 
@@ -131,10 +131,17 @@ fn group_estimate_or_source_orientation_does_not_bypass_resource_limits()
         let plan = plan_raster_mosaics(page, &group, box_, mapper, MosaicBudget::default())?
             .ok_or("valid fragment group not found")?;
         assert_eq!(plan.groups[0].paint_indices.len(), 20);
-        assert_eq!(
-            plan.groups[0].clockwise_turns,
-            if page.get() == 3 { 3 } else { 0 }
-        );
+        let x_axis = plan.groups[0].axes.x;
+        let y_axis = plan.groups[0].axes.y;
+        let (expected_x, expected_y) = if page.get() == 3 {
+            (Point(0.0, 1.0), Point(-1.0, 0.0))
+        } else {
+            (Point(1.0, 0.0), Point(0.0, 1.0))
+        };
+        assert!((x_axis.0 - expected_x.0).abs() < 1e-9);
+        assert!((x_axis.1 - expected_x.1).abs() < 1e-9);
+        assert!((y_axis.0 - expected_y.0).abs() < 1e-9);
+        assert!((y_axis.1 - expected_y.1).abs() < 1e-9);
         assert!(
             plan_raster_mosaics(
                 page,
@@ -221,6 +228,127 @@ fn complete_fragment_group_reconstructs_text_geometry_without_model_download()
                 point.1
             );
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn arbitrary_source_angles_and_reflection_rectify_original_pdf_coordinates()
+-> Result<(), Box<dyn std::error::Error>> {
+    let original = include_bytes!("fixtures/affine-native-mosaics.pdf");
+    let dir = tempfile::tempdir()?;
+    let pdf = dir.path().join("affine.pdf");
+    fs::write(&pdf, original)?;
+    let doc = PdfMetadata::open(&pdf)?;
+    for (number, angle, reflected) in [
+        (1, 17.0_f64, false),
+        (2, 37.0, false),
+        (3, -28.0, true),
+        (4, 13.0, false),
+    ] {
+        let page = PageNumber::new(number)?;
+        let report = enumerate_image_paints(&doc, &[page])?;
+        assert_eq!(report.placements.len(), 20);
+        let mapper = doc.mapper(page)?;
+        let page_box = *doc.media_boxes().get(&page).ok_or("missing MediaBox")?;
+        let plan = plan_raster_mosaics(
+            page,
+            &report.placements,
+            page_box,
+            mapper,
+            MosaicBudget::default(),
+        )?
+        .ok_or_else(|| format!("page {number}: no affine mosaic"))?;
+        assert_eq!(plan.groups.len(), 1);
+        assert_eq!(plan.groups[0].paint_indices.len(), 20);
+        let axes = plan.groups[0].axes;
+        let origin = mapper.to_pdf(0.0, 0.0);
+        let right = mapper.to_pdf(1.0, 0.0);
+        let down = mapper.to_pdf(0.0, 1.0);
+        let display_width = (right.0 - origin.0).hypot(right.1 - origin.1);
+        let display_height = (down.0 - origin.0).hypot(down.1 - origin.1);
+        let mut observed = 0_usize;
+        let lines = reconstruct_native_mosaics(
+            &pdf,
+            mapper,
+            &plan,
+            &report.placements,
+            MosaicBudget::default(),
+            |raster, to_pdf| {
+                observed += 1;
+                assert!(
+                    (500..=670).contains(&raster.width()),
+                    "page {number}: width {}",
+                    raster.width()
+                );
+                assert!(
+                    (120..=220).contains(&raster.height()),
+                    "page {number}: height {}",
+                    raster.height()
+                );
+                assert!(
+                    raster.pixels().filter(|pixel| pixel.0[0] < 120).count() > 700,
+                    "page {number}: native ink not recovered",
+                );
+                // The exact inverse pixel mapping must point both axes
+                // along the true native-image directions, irrespective of
+                // page rotation, mirror or arbitrary affine skew.
+                let p0 = mapper.to_raster(to_pdf(Point(0.0, 0.0)));
+                let px = mapper.to_raster(to_pdf(Point(30.0, 0.0)));
+                let py = mapper.to_raster(to_pdf(Point(0.0, 30.0)));
+                let ux = Point(
+                    (px.0 - p0.0) * display_width,
+                    (px.1 - p0.1) * display_height,
+                );
+                let uy = Point(
+                    (py.0 - p0.0) * display_width,
+                    (py.1 - p0.1) * display_height,
+                );
+                let norm = |point: Point| {
+                    let len = point.0.hypot(point.1);
+                    Point(point.0 / len, point.1 / len)
+                };
+                let nx = norm(ux);
+                let ny = norm(uy);
+                assert!((nx.0 - axes.x.0).abs() < 1e-10);
+                assert!((nx.1 - axes.x.1).abs() < 1e-10);
+                assert!((ny.0 - axes.y.0).abs() < 1e-10);
+                assert!((ny.1 - axes.y.1).abs() < 1e-10);
+                let midpoint = to_pdf(Point(
+                    f64::from(raster.width()) * 0.5,
+                    f64::from(raster.height()) * 0.5,
+                ));
+                assert!((60.0..=370.0).contains(&midpoint.0));
+                assert!((90.0..=280.0).contains(&midpoint.1));
+                let expected = angle.to_radians();
+                let (s, c) = expected.sin_cos();
+                let target = if reflected {
+                    Point(-c, s)
+                } else {
+                    Point(c, -s)
+                };
+                assert!(
+                    nx.0.mul_add(target.0, nx.1 * target.1) > 0.99999,
+                    "page {number}: incorrect source-text orientation"
+                );
+                Ok(vec![OcrLine {
+                    text: "AFFINE RASTER".into(),
+                    confidence: 0.99,
+                    quad: [
+                        to_pdf(Point(40.0, 90.0)),
+                        to_pdf(Point(480.0, 90.0)),
+                        to_pdf(Point(480.0, 40.0)),
+                        to_pdf(Point(40.0, 40.0)),
+                    ],
+                    reviewed: false,
+                }])
+            },
+        )?
+        .ok_or("rectified native OCR rejected")?;
+        assert_eq!(observed, 1);
+        assert_eq!(lines.len(), 1);
+        let n = mapper.to_raster(lines[0].quad[0]);
+        assert!(n.0.is_finite() && n.1.is_finite());
     }
     Ok(())
 }

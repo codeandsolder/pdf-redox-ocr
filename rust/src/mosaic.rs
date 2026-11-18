@@ -8,8 +8,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use image::{RgbImage, imageops};
-
 use crate::{
     Error, PageNumber,
     geometry::{DisplayMapper, PageBox, Point},
@@ -72,10 +70,8 @@ pub struct MosaicGroup {
     pub region: PageBox,
     /// Median native sample pitch, in PDF user-space units per pixel.
     pub pitch: f64,
-    /// Rotation applied clockwise to the resulting PDF display crop.
-    pub clockwise_turns: u8,
-    /// PDF image sample axes are reflected relative to the display frame.
-    pub flip_vertical: bool,
+    /// Original image's native x/y axes in PDF display coordinates.
+    pub axes: MosaicAxes,
     /// Conservative estimated target pixels before rasterization.
     pub estimated_pixels: u64,
 }
@@ -94,36 +90,71 @@ struct Item {
     paint_index: u32,
     box_: PageBox,
     pitch: f64,
-    turn: u8,
-    flip_vertical: bool,
+    axes: MosaicAxes,
 }
 
-fn oriented_turn(paint: &ImagePaint, mapper: DisplayMapper) -> Option<(u8, bool)> {
+/// Source image directions in page display coordinates, where Y increases
+/// downward and each basis column has unit Euclidean length.
+///
+/// An affine image's native horizontal/vertical axes are independent; this
+/// also represents reflected and sheared paints without discrete rotations.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MosaicAxes {
+    /// Direction of increasing native image column.
+    pub x: Point,
+    /// Direction of increasing native image row.
+    pub y: Point,
+}
+
+impl MosaicAxes {
+    /// Project a page-display vector into source-aligned coordinates.
+    #[must_use]
+    pub fn project(self, Point(x, y): Point) -> Point {
+        let det = self.x.0.mul_add(self.y.1, -(self.x.1 * self.y.0));
+        Point(
+            self.y.1.mul_add(x, -(self.y.0 * y)) / det,
+            self.x.0.mul_add(y, -(self.x.1 * x)) / det,
+        )
+    }
+
+    /// Convert source-aligned coordinates to page-display vector.
+    #[must_use]
+    pub fn unproject(self, Point(x, y): Point) -> Point {
+        Point(
+            self.x.0.mul_add(x, self.y.0 * y),
+            self.x.1.mul_add(x, self.y.1 * y),
+        )
+    }
+
+    fn similar(self, other: Self) -> bool {
+        const MIN_ALIGNMENT: f64 = 0.992_546_151_641_322; // cos(7°)
+        self.x.0.mul_add(other.x.0, self.x.1 * other.x.1) >= MIN_ALIGNMENT
+            && self.y.0.mul_add(other.y.0, self.y.1 * other.y.1) >= MIN_ALIGNMENT
+    }
+}
+
+fn native_axes(paint: &ImagePaint, mapper: DisplayMapper) -> Option<MosaicAxes> {
     let transform = PdfMatrix(paint.ctm);
-    let first = mapper.to_raster(transform.point(Point(0.0, 0.0)));
-    let second = mapper.to_raster(transform.point(Point(1.0, 0.0)));
-    let page_right = mapper.to_pdf(1.0, 0.0);
-    let page_down = mapper.to_pdf(0.0, 1.0);
-    let page_origin = mapper.to_pdf(0.0, 0.0);
-    let width = (page_right.0 - page_origin.0).hypot(page_right.1 - page_origin.1);
-    let height = (page_down.0 - page_origin.0).hypot(page_down.1 - page_origin.1);
-    let direction = Point((second.0 - first.0) * width, (second.1 - first.1) * height);
-    if !direction.0.is_finite()
-        || !direction.1.is_finite()
-        || direction.0.hypot(direction.1) <= 1e-9
-    {
-        return None;
-    }
-    let quarter = direction.1.atan2(direction.0) / std::f64::consts::FRAC_PI_2;
-    let nearest = quarter.round();
-    if (quarter - nearest).abs() > 7.0 / 90.0 {
-        return None;
-    }
-    // Source x-axis pointing down requires a counterclockwise raster turn
-    // (three clockwise quarter-turns) to make OCR source text upright.
-    let clockwise = (-(num_traits::ToPrimitive::to_i32(&nearest)?)).rem_euclid(4);
-    let [a, b, c, d, _, _] = paint.ctm;
-    Some((u8::try_from(clockwise).ok()?, a.mul_add(d, -b * c) < 0.0))
+    // PDF image sample rows point down from user-space (0,1) to (0,0).
+    let origin = mapper.to_raster(transform.point(Point(0.0, 1.0)));
+    let source_right = mapper.to_raster(transform.point(Point(1.0, 1.0)));
+    let source_down = mapper.to_raster(transform.point(Point(0.0, 0.0)));
+    let first = mapper.to_pdf(0.0, 0.0);
+    let right = mapper.to_pdf(1.0, 0.0);
+    let down = mapper.to_pdf(0.0, 1.0);
+    let width = (right.0 - first.0).hypot(right.1 - first.1);
+    let height = (down.0 - first.0).hypot(down.1 - first.1);
+    let vector = |point: Point| Point((point.0 - origin.0) * width, (point.1 - origin.1) * height);
+    let unit = |Point(x, y): Point| {
+        let length = x.hypot(y);
+        (length > 1e-9 && length.is_finite()).then_some(Point(x / length, y / length))
+    };
+    let axes = MosaicAxes {
+        x: unit(vector(source_right))?,
+        y: unit(vector(source_down))?,
+    };
+    let determinant = axes.x.0.mul_add(axes.y.1, -(axes.x.1 * axes.y.0));
+    (determinant.abs() > 0.15).then_some(axes)
 }
 
 /// Composite-only image effects can be rendered without interpreting
@@ -215,13 +246,11 @@ fn clipped_item(paint: &ImagePaint, page: PageBox, mapper: DisplayMapper) -> Opt
         .map(|p| p.1)
         .fold(f64::NEG_INFINITY, f64::max)
         .min(page.y1);
-    let (turn, flip_vertical) = oriented_turn(paint, mapper)?;
     Some(Item {
         paint_index: paint.paint_index,
         box_: PageBox::new([x0, y0, x1, y1]).ok()?,
         pitch,
-        turn,
-        flip_vertical,
+        axes: native_axes(paint, mapper)?,
     })
 }
 
@@ -369,46 +398,6 @@ pub fn contains_native_fragments(
         .any(|group| group.len() > 1)
 }
 
-/// Rotate the actual PDF-painted crop until its source x-axis points right.
-#[must_use]
-pub fn orient_raster(rgb: RgbImage, clockwise_turns: u8, flip_vertical: bool) -> RgbImage {
-    let rotated = match clockwise_turns % 4 {
-        0 => rgb,
-        1 => imageops::rotate90(&rgb),
-        2 => imageops::rotate180(&rgb),
-        _ => imageops::rotate270(&rgb),
-    };
-    if flip_vertical {
-        imageops::flip_vertical(&rotated)
-    } else {
-        rotated
-    }
-}
-
-/// Map an oriented OCR pixel corner back to the original PDF-painted crop.
-#[must_use]
-pub fn unrotate_pixel(
-    point: Point,
-    original_width: u32,
-    original_height: u32,
-    clockwise_turns: u8,
-    flip_vertical: bool,
-) -> Point {
-    let (w, h) = (f64::from(original_width), f64::from(original_height));
-    let oriented_height = if clockwise_turns % 2 == 0 { h } else { w };
-    let point = if flip_vertical {
-        Point(point.0, oriented_height - point.1)
-    } else {
-        point
-    };
-    match clockwise_turns % 4 {
-        0 => point,
-        1 => Point(point.1, h - point.0),
-        2 => Point(w - point.0, h - point.1),
-        _ => Point(w - point.1, point.0),
-    }
-}
-
 /// Partition every image invocation into source-scale connected mosaics.
 ///
 /// A page is eligible only if every image paint has sane, compatible
@@ -443,12 +432,8 @@ pub fn plan_raster_mosaics(
     let mut groups = Vec::with_capacity(components.len());
     let mut total_pixels = 0_u64;
     for component in components.values() {
-        let turn = component[0].turn;
-        let flip_vertical = component[0].flip_vertical;
-        if component
-            .iter()
-            .any(|item| item.turn != turn || item.flip_vertical != flip_vertical)
-        {
+        let axes = component[0].axes;
+        if component.iter().any(|item| !axes.similar(item.axes)) {
             return Ok(None);
         }
         let mut pitches = component.iter().map(|item| item.pitch).collect::<Vec<_>>();
@@ -483,8 +468,7 @@ pub fn plan_raster_mosaics(
             paint_indices: component.iter().map(|p| p.paint_index).collect(),
             region,
             pitch,
-            clockwise_turns: turn,
-            flip_vertical,
+            axes,
             estimated_pixels: pixels,
         });
     }
@@ -527,33 +511,28 @@ mod tests {
     }
 
     #[test]
-    fn pixel_corner_rotation_mapping_covers_all_quarter_turns() {
-        use super::{orient_raster, unrotate_pixel};
-        use image::{Rgb, RgbImage};
-        let original = RgbImage::from_fn(3, 5, |x, y| {
-            Rgb([
-                u8::try_from(x).unwrap_or(0),
-                u8::try_from(y).unwrap_or(0),
-                255,
-            ])
-        });
-        for flip_vertical in [false, true] {
-            for turns in 0..=3 {
-                let rotated = orient_raster(original.clone(), turns, flip_vertical);
-                for y in 0..rotated.height() {
-                    for x in 0..rotated.width() {
-                        let source = unrotate_pixel(
-                            crate::geometry::Point(f64::from(x) + 0.5, f64::from(y) + 0.5),
-                            original.width(),
-                            original.height(),
-                            turns,
-                            flip_vertical,
-                        );
-                        let orig_x =
-                            num_traits::ToPrimitive::to_u32(&source.0.floor()).unwrap_or(999);
-                        let orig_y =
-                            num_traits::ToPrimitive::to_u32(&source.1.floor()).unwrap_or(999);
-                        assert_eq!(rotated.get_pixel(x, y), original.get_pixel(orig_x, orig_y));
+    fn arbitrary_affine_axes_roundtrip_rotation_reflection_and_shear() {
+        use super::MosaicAxes;
+        for degrees in [0.0_f64, 11.0, 17.0, 31.0, 45.0, 89.0, 173.0, 270.0] {
+            let angle = degrees.to_radians();
+            let (s, c) = angle.sin_cos();
+            for reflect in [1.0, -1.0] {
+                for shear in [0.0, 0.07] {
+                    let axes = MosaicAxes {
+                        x: crate::geometry::Point(c, s),
+                        y: crate::geometry::Point(
+                            c.mul_add(shear, -s) * reflect,
+                            s.mul_add(shear, c) * reflect,
+                        ),
+                    };
+                    for point in [
+                        crate::geometry::Point(0.0, 0.0),
+                        crate::geometry::Point(3.5, 17.25),
+                        crate::geometry::Point(-135.0, 42.0),
+                    ] {
+                        let rebuilt = axes.unproject(axes.project(point));
+                        assert!((rebuilt.0 - point.0).abs() < 1e-10);
+                        assert!((rebuilt.1 - point.1).abs() < 1e-10);
                     }
                 }
             }
