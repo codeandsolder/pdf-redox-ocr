@@ -8,8 +8,10 @@ use std::{fs, process::Command};
 use image::ImageFormat;
 use pdf_redox_ocr::{
     PageNumber,
+    draft::OcrLine,
     geometry::{PageBox, Point},
-    mosaic::{MosaicBudget, plan_raster_mosaics},
+    mosaic::{MosaicBudget, mosaic_page_eligible, plan_raster_mosaics},
+    mosaic_ocr::reconstruct_native_mosaics,
     paint_scan::enumerate_image_paints,
     pdf_metadata::PdfMetadata,
     rasterize::render_rgb_region,
@@ -40,13 +42,29 @@ fn native_mosaic_crop_matches_poppler_full_page_across_real_pdf_effects()
             .collect::<Vec<_>>();
         let expected = if page.get() == 2 { 1 } else { 20 };
         assert_eq!(paints.len(), expected, "page {}", page.get());
+        let summary = report
+            .pages
+            .iter()
+            .find(|s| s.page == page.get())
+            .ok_or("missing paint summary")?;
+        assert!(
+            mosaic_page_eligible(summary, &paints),
+            "page {} mosaic eligibility",
+            page.get()
+        );
+        if page.get() == 4 {
+            assert!(
+                !summary.image_only_after_native,
+                "alpha source should remain unsafe for direct OCR"
+            );
+        }
         let region = if page.get() == 2 {
             PageBox::new([80.0, 130.0, 224.0, 168.4])?
         } else {
-            let plan =
-                plan_raster_mosaics(page, &paints, media, mapper, MosaicBudget::default())?.ok_or(
-                    format!("missing source-resolution mosaic on page {}", page.get()),
-                )?;
+            let plan = plan_raster_mosaics(page, &paints, media, mapper, MosaicBudget::default())?
+                .ok_or_else(|| {
+                    format!("missing source-resolution mosaic on page {}", page.get())
+                })?;
             assert_eq!(plan.groups.len(), 1);
             assert_eq!(plan.groups[0].paint_indices.len(), 20);
             assert!(plan.estimated_pixels <= 12_000_000);
@@ -74,13 +92,15 @@ fn native_mosaic_crop_matches_poppler_full_page_across_real_pdf_effects()
             .hypot(mapper.to_pdf(0.0, 1.0).1 - mapper.to_pdf(0.0, 0.0).1);
         for (x, y, pixel) in crop.rgb.enumerate_pixels() {
             let source = crop.pixel_to_pdf(Point(f64::from(x) + 0.5, f64::from(y) + 0.5));
-            let mapped = mapper.to_raster(source);
-            let full_x =
-                num_traits::ToPrimitive::to_u32(&(mapped.0 * width_points * 300.0 / 72.0).floor())
-                    .ok_or("full page coordinate X out of bounds")?;
-            let full_y =
-                num_traits::ToPrimitive::to_u32(&(mapped.1 * height_points * 300.0 / 72.0).floor())
-                    .ok_or("full page coordinate Y out of bounds")?;
+            let normalized = mapper.to_raster(source);
+            let full_x = num_traits::ToPrimitive::to_u32(
+                &(normalized.0 * width_points * 300.0 / 72.0).floor(),
+            )
+            .ok_or("full page coordinate X out of bounds")?;
+            let full_y = num_traits::ToPrimitive::to_u32(
+                &(normalized.1 * height_points * 300.0 / 72.0).floor(),
+            )
+            .ok_or("full page coordinate Y out of bounds")?;
             assert_eq!(
                 pixel,
                 reference.get_pixel(full_x, full_y),
@@ -128,6 +148,79 @@ fn group_estimate_or_source_orientation_does_not_bypass_resource_limits()
             )?
             .is_none()
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn complete_fragment_group_reconstructs_text_geometry_without_model_download()
+-> Result<(), Box<dyn std::error::Error>> {
+    let original = include_bytes!("fixtures/fragmented-native-mosaics.pdf");
+    let dir = tempfile::tempdir()?;
+    let file = dir.path().join("mosaics.pdf");
+    fs::write(&file, original)?;
+    let doc = PdfMetadata::open(&file)?;
+    for number in [1, 3, 4, 5] {
+        let page = PageNumber::new(number)?;
+        let report = enumerate_image_paints(&doc, &[page])?;
+        assert_eq!(report.placements.len(), 20);
+        let mapper = doc.mapper(page)?;
+        let bounds = *doc.media_boxes().get(&page).ok_or("missing MediaBox")?;
+        let plan = plan_raster_mosaics(
+            page,
+            &report.placements,
+            bounds,
+            mapper,
+            MosaicBudget::default(),
+        )?
+        .ok_or("fragment plan missing")?;
+        let mut calls = 0_usize;
+        let found = reconstruct_native_mosaics(
+            &file,
+            mapper,
+            &plan,
+            &report.placements,
+            MosaicBudget::default(),
+            |rgb, to_pdf| {
+                calls += 1;
+                // The caller receives only one source-native crop for all 20
+                // strips, including the true PDF paint stack alpha and clip.
+                let dark = rgb.pixels().filter(|p| p.0[0] < 205).count();
+                assert!(
+                    dark > 50,
+                    "page {number} has no recovered source ink ({dark})"
+                );
+                let w = f64::from(rgb.width());
+                let h = f64::from(rgb.height());
+                let corners = [
+                    to_pdf(Point(w * 0.25, h * 0.75)),
+                    to_pdf(Point(w * 0.75, h * 0.75)),
+                    to_pdf(Point(w * 0.75, h * 0.25)),
+                    to_pdf(Point(w * 0.25, h * 0.25)),
+                ];
+                Ok(vec![OcrLine {
+                    text: "FRAGMENTED OCR".into(),
+                    confidence: 0.99,
+                    quad: corners,
+                    reviewed: false,
+                }])
+            },
+        )?
+        .ok_or("fragment recognition admission failed")?;
+        assert_eq!(calls, 1, "expected one model call for twenty source strips");
+        assert_eq!(found.len(), 1);
+        for point in found[0].quad {
+            assert!(
+                (75.0..=230.0).contains(&point.0),
+                "page {number} PDF x {}",
+                point.0
+            );
+            assert!(
+                (125.0..=175.0).contains(&point.1),
+                "page {number} PDF y {}",
+                point.1
+            );
+        }
     }
     Ok(())
 }

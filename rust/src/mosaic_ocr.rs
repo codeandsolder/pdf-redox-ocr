@@ -144,19 +144,22 @@ fn group_dpi(pitch: f64, max_dpi: u32) -> Option<u32> {
 
 /// Perform complete native-pitch OCR on a fragmented, image-only page.
 ///
+/// The caller supplies OCR over mapped pixels; this also allows deterministic
+/// renderer/coordinate tests without requiring ONNX model downloads.
+///
 /// Each group is rasterized from the actual PDF stack, but pixels outside
 /// the selected group's image paints are cleared to prevent nearby groups
 /// contaminating detections. One rejected group retains full-page fallback.
 ///
 /// # Errors
 /// Returns an error when native renderer, OCR model, or crop masks fail.
-pub fn recognize_native_mosaics(
-    engine: &OcrInference,
+pub fn reconstruct_native_mosaics(
     pdf: &Path,
     page_mapper: DisplayMapper,
     plan: &MosaicPlan,
     paints: &[ImagePaint],
     budget: MosaicBudget,
+    mut recognize: impl FnMut(RgbImage, &dyn Fn(Point) -> Point) -> Result<Vec<OcrLine>, Error>,
 ) -> Result<Option<Vec<OcrLine>>, Error> {
     let budget = budget.validate()?;
     if !disjoint_groups(plan, paints) {
@@ -197,7 +200,7 @@ pub fn recognize_native_mosaics(
         paint_clip_mask(&mut crop.rgb, mapper, &members)?;
         let (width, height) = (crop.rgb.width(), crop.rgb.height());
         let rotated = orient_raster(crop.rgb, group.clockwise_turns, group.flip_vertical);
-        let mut result = engine.recognize_mapped(rotated, |point| {
+        let pixel_to_pdf = |point| {
             mapper.to_pdf(unrotate_pixel(
                 point,
                 width,
@@ -205,7 +208,8 @@ pub fn recognize_native_mosaics(
                 group.clockwise_turns,
                 group.flip_vertical,
             ))
-        })?;
+        };
+        let mut result = recognize(rotated, &pixel_to_pdf)?;
         lines.append(&mut result);
     }
     if seen.len() != paints.len() {
@@ -217,6 +221,23 @@ pub fn recognize_native_mosaics(
         return Ok(None);
     }
     Ok(Some(lines))
+}
+
+/// Run the native OCR model on complete source-resolution PDF paint mosaics.
+///
+/// # Errors
+/// Returns an error for unsuccessful Poppler reconstruction or OCR inference.
+pub fn recognize_native_mosaics(
+    engine: &OcrInference,
+    pdf: &Path,
+    page_mapper: DisplayMapper,
+    plan: &MosaicPlan,
+    paints: &[ImagePaint],
+    budget: MosaicBudget,
+) -> Result<Option<Vec<OcrLine>>, Error> {
+    reconstruct_native_mosaics(pdf, page_mapper, plan, paints, budget, |rgb, mapper| {
+        engine.recognize_mapped(rgb, mapper)
+    })
 }
 
 #[cfg(test)]

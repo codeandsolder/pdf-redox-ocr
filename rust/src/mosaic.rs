@@ -13,7 +13,7 @@ use image::{RgbImage, imageops};
 use crate::{
     Error, PageNumber,
     geometry::{DisplayMapper, PageBox, Point},
-    paint_scan::{ImagePaint, PdfMatrix},
+    paint_scan::{ImagePaint, PagePaintSummary, PdfMatrix},
 };
 
 const MAX_BUCKETS_PER_PAINT: u64 = 256;
@@ -126,8 +126,54 @@ fn oriented_turn(paint: &ImagePaint, mapper: DisplayMapper) -> Option<(u8, bool)
     Some((u8::try_from(clockwise).ok()?, a.mul_add(d, -b * c) < 0.0))
 }
 
+/// Composite-only image effects can be rendered without interpreting
+/// the source samples ourselves. Unknown source geometry remains unsupported.
+fn compositor_handles_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "source_alpha_or_color_key_requires_compositing"
+            | "nonrectangular_or_untracked_clip"
+            | "unsupported_transparency_or_graphics_state"
+            | "image_stencil_mask"
+    )
+}
+
+/// A page containing only actual source image paints can be reconstructed
+/// through Poppler even when the raw-source-only path rejects alpha or blends.
+///
+/// # Notes
+/// Unknown content, image placements, inline images and annotations remain
+/// excluded because the raster-only merger requires every painted mark to
+/// be accounted for by an image paint.
+#[must_use]
+pub fn mosaic_page_eligible(summary: &PagePaintSummary, paints: &[ImagePaint]) -> bool {
+    summary.image_paints > 0
+        && summary.image_paints == paints.len()
+        && summary.native_searchable_shows == 0
+        && summary.non_image_visual_paint == 0
+        && summary.unknown_paint == 0
+        && summary.unsupported_inline_images == 0
+        && summary.unsafe_form_recursion == 0
+        && summary.unbalanced_q == 0
+        && summary.unbalanced_stream == 0
+        && summary.annotations == 0
+        && paints.iter().all(|paint| {
+            paint.page == summary.page
+                && paint
+                    .unsafe_reasons
+                    .iter()
+                    .all(|reason| compositor_handles_reason(reason))
+        })
+}
+
 fn clipped_item(paint: &ImagePaint, page: PageBox, mapper: DisplayMapper) -> Option<Item> {
-    if !paint.unsafe_reasons.is_empty() || paint.width == 0 || paint.height == 0 {
+    if paint
+        .unsafe_reasons
+        .iter()
+        .any(|reason| !compositor_handles_reason(reason))
+        || paint.width == 0
+        || paint.height == 0
+    {
         return None;
     }
     let [a, b, c, d, _, _] = paint.ctm;
@@ -555,6 +601,88 @@ mod tests {
             .collect::<Vec<_>>();
         actual.sort();
         assert_eq!(actual, vec![vec![0, 1, 2], vec![3]]);
+        Ok(())
+    }
+
+    fn draw(state: &mut u64) -> u32 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        u32::try_from(*state >> 32).unwrap_or(u32::MAX)
+    }
+
+    fn sorted_components(items: &[super::Item], page: PageBox, indexed: bool) -> Vec<Vec<u32>> {
+        let mut components = if indexed {
+            super::connected_components(items, page)
+        } else {
+            let mut parents = (0..items.len()).collect::<Vec<_>>();
+            for (i, &item) in items.iter().enumerate() {
+                for (j, &other) in items.iter().enumerate().skip(i + 1) {
+                    if super::compatible(item, other) {
+                        super::connect(&mut parents, i, j);
+                    }
+                }
+            }
+            let mut result = std::collections::BTreeMap::new();
+            for (i, &item) in items.iter().enumerate() {
+                result
+                    .entry(super::root(&mut parents, i))
+                    .or_insert_with(Vec::new)
+                    .push(item);
+            }
+            result
+        }
+        .into_values()
+        .map(|group| {
+            let mut ids = group
+                .into_iter()
+                .map(|item| item.paint_index)
+                .collect::<Vec<_>>();
+            ids.sort_unstable();
+            ids
+        })
+        .collect::<Vec<_>>();
+        components.sort();
+        components
+    }
+
+    #[test]
+    fn spatial_union_matches_quadratic_reference_under_permutation() -> Result<(), crate::Error> {
+        let page = PageBox::new([-50.0, -50.0, 850.0, 650.0])?;
+        let mapper = DisplayMapper::new(page, Rotation::Deg0);
+        let mut seed = 314_159_u64;
+        for trial in 0..12 {
+            let mut paints = Vec::new();
+            for index in 0..220 {
+                let pitch = [0.6, 0.62, 0.65, 0.75, 1.0, 1.05, 1.1, 1.3]
+                    [usize::try_from(draw(&mut seed) % 8).unwrap_or(0)];
+                let width = [12, 24, 60, 180][usize::try_from(draw(&mut seed) % 4).unwrap_or(0)];
+                let height = [6, 12, 40, 200][usize::try_from(draw(&mut seed) % 4).unwrap_or(0)];
+                let x = f64::from(i32::try_from(draw(&mut seed) % 1100).unwrap_or(0) - 150);
+                let y = f64::from(i32::try_from(draw(&mut seed) % 900).unwrap_or(0) - 150);
+                let mut candidate = paint(index, x, y, width, height, pitch);
+                if trial % 3 == 0 && index % 23 == 0 {
+                    candidate.unsafe_reasons.push("unsupported");
+                }
+                paints.push(candidate);
+            }
+            let mut items = paints
+                .iter()
+                .filter_map(|paint| super::clipped_item(paint, page, mapper))
+                .collect::<Vec<_>>();
+            let expected = sorted_components(&items, page, false);
+            assert_eq!(
+                sorted_components(&items, page, true),
+                expected,
+                "trial {trial}"
+            );
+            items.reverse();
+            assert_eq!(
+                sorted_components(&items, page, true),
+                expected,
+                "reverse trial {trial}"
+            );
+        }
         Ok(())
     }
 

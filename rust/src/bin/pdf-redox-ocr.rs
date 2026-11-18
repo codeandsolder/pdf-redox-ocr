@@ -16,7 +16,10 @@ use pdf_redox_ocr::{
     hybrid::{MergeInput, merge_ocr},
     inference::OcrInference,
     mixed_visibility::{MixedVisibility, prove_mixed_source_text},
-    mosaic::{MosaicBudget, MosaicPlan, contains_native_fragments, plan_raster_mosaics},
+    mosaic::{
+        MosaicBudget, MosaicPlan, contains_native_fragments, mosaic_page_eligible,
+        plan_raster_mosaics,
+    },
     mosaic_ocr::recognize_native_mosaics,
     native_images::{NativeImageBudget, native_source_images},
     native_words::native_words_for_pages,
@@ -212,6 +215,8 @@ struct NativePreparation {
     mixed: MixedVisibility,
 }
 
+type FragmentPlans = (BTreeSet<PageNumber>, BTreeMap<PageNumber, MosaicPlan>);
+
 #[derive(Clone, Copy)]
 struct NativePolicies {
     source_budget: NativeImageBudget,
@@ -220,17 +225,33 @@ struct NativePolicies {
     minimum_confidence: f64,
 }
 
+const fn configured_native_policies(args: &Args, render: RenderPolicy) -> NativePolicies {
+    NativePolicies {
+        source_budget: NativeImageBudget {
+            max_source_pixels: args.max_native_source_pixels,
+            max_total_pixels: args.max_native_total_pixels,
+            max_sources: args.max_native_sources,
+            max_extraction_pixels: args.max_native_extraction_pixels,
+        },
+        mosaic_budget: MosaicBudget {
+            max_group_pixels: args.max_mosaic_group_pixels,
+            max_page_pixels: args.max_mosaic_page_pixels,
+            max_groups: args.max_mosaic_groups,
+            max_dpi: args.max_mosaic_dpi,
+        },
+        render,
+        minimum_confidence: args.confidence,
+    }
+}
+
 fn plan_native_fragment_pages(
     scanned: &PaintReport,
     doc: &PdfMetadata,
     budget: MosaicBudget,
-) -> Result<(BTreeSet<PageNumber>, BTreeMap<PageNumber, MosaicPlan>), Box<dyn Error>> {
+) -> Result<FragmentPlans, Box<dyn Error>> {
     let mut fragmented = BTreeSet::new();
     let mut plans = BTreeMap::new();
     for summary in &scanned.pages {
-        if !summary.image_only_after_native {
-            continue;
-        }
         let page = PageNumber::new(summary.page)?;
         let paints = scanned
             .placements
@@ -238,6 +259,9 @@ fn plan_native_fragment_pages(
             .filter(|p| p.page == summary.page)
             .cloned()
             .collect::<Vec<_>>();
+        if !mosaic_page_eligible(summary, &paints) {
+            continue;
+        }
         let box_ = *doc
             .media_boxes()
             .get(&page)
@@ -520,22 +544,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
         &args.pdf,
         &doc,
         &selection,
-        NativePolicies {
-            source_budget: NativeImageBudget {
-                max_source_pixels: args.max_native_source_pixels,
-                max_total_pixels: args.max_native_total_pixels,
-                max_sources: args.max_native_sources,
-                max_extraction_pixels: args.max_native_extraction_pixels,
-            },
-            mosaic_budget: MosaicBudget {
-                max_group_pixels: args.max_mosaic_group_pixels,
-                max_page_pixels: args.max_mosaic_page_pixels,
-                max_groups: args.max_mosaic_groups,
-                max_dpi: args.max_mosaic_dpi,
-            },
-            render: policy,
-            minimum_confidence: args.confidence,
-        },
+        configured_native_policies(args, policy),
     )?;
     let mut raster_pages = Vec::with_capacity(selection.len());
     let mut fallback_pages = Vec::new();
