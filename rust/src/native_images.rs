@@ -23,7 +23,7 @@ pub struct ImageInventoryEntry {
     pub page: PageNumber,
     /// Extraction file ordinal within one Poppler invocation.
     pub number: u32,
-    /// Stable PDF XObject ID, absent for inline image paints.
+    /// Stable PDF `XObject` ID, absent for inline image paints.
     pub source_id: Option<String>,
     /// Image type (ordinary image, alpha mask, stencil or inline).
     pub kind: String,
