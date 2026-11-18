@@ -1,4 +1,4 @@
-//! Isolated source masking when one XObject appears twice on a page,
+//! Isolated source masking when one `XObject` appears twice on a page,
 //! twice through one reused Form, and twice through nested Forms.
 
 #![cfg(feature = "pdf-integration")]
