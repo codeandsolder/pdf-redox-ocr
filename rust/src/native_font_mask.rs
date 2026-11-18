@@ -143,7 +143,7 @@ impl FormRewriter<'_> {
                 }
                 b"Tr" => current.render_mode = set_render_mode(&instruction)?,
                 b"Tj" | b"TJ" | b"'" | b"\"" => {
-                    self.rewrite_show(&instruction, bytes, &current, &mut edits)?;
+                    self.rewrite_show(&instruction, bytes, &current, &mut edits);
                 }
                 b"Do" => {
                     if let Some(name) =
@@ -197,7 +197,7 @@ impl FormRewriter<'_> {
         bytes: &[u8],
         state: &TextState,
         edits: &mut Vec<ByteEdit>,
-    ) -> Result<(), Error> {
+    ) {
         if !state.font_searchable {
             self.stats.preserved_nonsearchable_shows += 1;
         } else if state.render_mode >= 4 {
@@ -217,7 +217,6 @@ impl FormRewriter<'_> {
             });
             self.stats.hidden_native_shows += 1;
         }
-        Ok(())
     }
 
     fn rewrite_do(

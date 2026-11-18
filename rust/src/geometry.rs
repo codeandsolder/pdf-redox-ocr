@@ -193,8 +193,13 @@ mod tests {
             let origin = mapper.to_pdf(0.0, 0.0);
             let horizontal = mapper.to_pdf(1.0, 0.0);
             let vertical = mapper.to_pdf(0.0, 1.0);
-            assert!((horizontal.0 - origin.0).hypot(horizontal.1 - origin.1) == expected.0);
-            assert!((vertical.0 - origin.0).hypot(vertical.1 - origin.1) == expected.1);
+            assert!(
+                ((horizontal.0 - origin.0).hypot(horizontal.1 - origin.1) - expected.0).abs()
+                    < 1e-10
+            );
+            assert!(
+                ((vertical.0 - origin.0).hypot(vertical.1 - origin.1) - expected.1).abs() < 1e-10
+            );
         }
         Ok(())
     }
