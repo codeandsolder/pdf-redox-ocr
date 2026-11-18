@@ -38,8 +38,8 @@ impl PageBox {
 
     /// Interpret a PDF rectangle as two corner coordinates in either order.
     ///
-    /// PDF files encountered in practice include Form BBox coordinates in
-    /// descending X or Y order, even when their MediaBox is canonical.
+    /// PDF files encountered in practice include Form `BBox` coordinates in
+    /// descending X or Y order, even when their `MediaBox` is canonical.
     /// A zero-area rectangle contains no usable clipping region.
     ///
     /// # Errors
@@ -49,10 +49,12 @@ impl PageBox {
             return Err(Error::Invalid("non-finite PDF rectangle".into()));
         }
         let [x0, y0, x1, y1] = values;
-        if x0 == x1 || y0 == y1 {
+        let (left, right) = (x0.min(x1), x0.max(x1));
+        let (bottom, top) = (y0.min(y1), y0.max(y1));
+        if right <= left || top <= bottom {
             return Ok(None);
         }
-        Self::new([x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)]).map(Some)
+        Self::new([left, bottom, right, top]).map(Some)
     }
 
     /// Width.
