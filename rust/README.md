@@ -59,6 +59,15 @@ Pages are promoted only after all image paints have been reconstructed and
 recognized. Failed geometric, compositing, resource or inference checks use
 ordinary full-page OCR rather than the independent strip shortcut. CLI knobs
 bound per-group and per-page rendered pixels, group count and native DPI.
+For fallback page OCR, a temporary Rust-generated PDF makes native searchable
+font shows invisible using mode 3 while retaining the original text-show
+operands, advances and geometry. Type3 glyphs, unresolved fonts, existing
+invisible shows and text-clipping modes remain as originally painted. Nested
+and reused Form XObjects are cloned copy-on-write for their inherited page
+resource context, rather than modifying shared source objects. Existing
+native text extraction, source visibility proofs, the input SHA-256 and the
+final vector overlay still use the **original PDF**. The diagnostic CLI option
+`--keep-native-text` disables only this render-time native font suppression.
 The original PDF is never modified.
 
 The real-PDF regression corpus covers repeated image extraction, masked source
@@ -69,8 +78,12 @@ real-PDF corpus checks native packed pixel round trips and absence of unrelated
 render changes across 1/2/4/8/16-bit device and calibrated color spaces.
 The real-PDF fragment regression corpus covers split raster text, soft masks,
 clip paths, rotated pages and nonzero MediaBox origins, plus arbitrary 17° and
-37° rotations, mirrored −28° raster and sheared 13° input. The existing Python
-pipeline remains the functional reference for corpus and performance parity.
+37° rotations, mirrored −28° raster and sheared 13° input. The five-page native-font
+regression verifies that shared Forms with context-dependent inherited fonts
+do not hide Type3 ink on sibling pages, and that extracted text and unselected
+pages remain unchanged. This fixes a cross-page Form mutation bug in the
+current Python reference, which remains the production baseline until corpus
+and performance parity is demonstrated.
 
 The source core is tested using stable Rust 1.100 with
 cargo +stable test --locked --no-default-features. The integrated crate
