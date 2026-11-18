@@ -1,11 +1,9 @@
 //! Counterfactual PDF paint verification for native source text on mixed pages.
 //!
-//! All image observations begin in the source bitmap frame. Exactly one image
-//! resource is masked in an isolated copy-on-write PDF, with all other PDF
-//! objects and paint occurrences left intact. The original rendered page is
-//! compared against that altered PDF in each candidate OCR polygon. A source
-//! painted more than once on the same page cannot yield an occurrence-specific
-//! proof without separate Do-invocation aliasing and remains on page fallback.
+//! Every observation begins in the source bitmap frame. A single invocation
+//! path is aliased through the enclosing Form chain into a copy-on-write PDF,
+//! leaving other invocations of the same source unchanged. Final rendered page
+//! pixels then prove visibility for that exact occurrence.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -21,10 +19,11 @@ use crate::{
     Error, PageNumber,
     geometry::{DisplayMapper, Point, Quad},
     hybrid::{ImageObservation, VisibilityProof},
+    paint_isolation::isolate_source_paint,
     paint_scan::{ImagePaint, PaintReport, PdfMatrix},
     pdf_metadata::PdfMetadata,
     rasterize::{RenderPolicy, render_rgb_page},
-    source_mask::mask_source_text,
+    source_mask::{MaskedSourceObject, mask_source_object},
     source_ocr::{SourceObservation, map_observations_to_paint},
 };
 
@@ -52,16 +51,14 @@ pub struct MixedVisibility {
     pub proofs: Vec<VisibilityProof>,
     /// Pages with completed proof comparisons.
     pub proven_pages: BTreeSet<PageNumber>,
-    /// Detailed attempted unique-source treatments.
+    /// Detailed attempted source-paint treatments.
     pub audited: Vec<SourceVisibilityAudit>,
 }
 
 /// Build real differential source proofs for candidate mixed pages.
 ///
-/// All missing/unsupported image decoders and duplicate occurrences remain
-/// on the page OCR fallback. No proof is constructed from an absent render.
-/// Source-wide masking is intentionally never attributed to a particular
-/// repeated paint occurrence on the same page.
+/// Unsupported encodings remain on page OCR fallback. Every treatment changes
+/// only its selected image paint path, including repeated Form invocations.
 ///
 /// # Errors
 /// Returns an error if a candidate PDF render cannot be completed, the masked
@@ -81,6 +78,10 @@ pub fn prove_mixed_source_text(
         ));
     }
     let mut result = MixedVisibility::default();
+    // A source can occur on many pages and through arbitrarily reused Forms.
+    // Decode and mask its native raster once, then alias the cached replacement
+    // independently into each counterfactual document.
+    let mut masked_cache = BTreeMap::<String, Option<MaskedSourceObject>>::new();
     let approved = selected.iter().copied().collect::<BTreeSet<_>>();
     for &page in &approved {
         let relevant = painted
@@ -92,19 +93,7 @@ pub fn prove_mixed_source_text(
                     && recognized.contains_key(&paint.source_id)
             })
             .collect::<Vec<_>>();
-        let unique = relevant
-            .iter()
-            .filter(|paint| {
-                painted
-                    .placements
-                    .iter()
-                    .filter(|other| other.page == page.get() && other.source_id == paint.source_id)
-                    .count()
-                    == 1
-            })
-            .copied()
-            .collect::<Vec<_>>();
-        if unique.is_empty() {
+        if relevant.is_empty() {
             continue;
         }
         let control = render_rgb_page(original_pdf, page, policy)?;
@@ -115,11 +104,30 @@ pub fn prove_mixed_source_text(
             minimum_confidence,
             control: &control,
         };
-        for paint in unique {
+        for paint in relevant {
             let source = recognized
                 .get(&paint.source_id)
                 .ok_or_else(|| Error::Invalid("source recognition vanished during proof".into()))?;
-            if let Some(proven) = probe.examine(paint, source)? {
+            if !masked_cache.contains_key(&paint.source_id) {
+                let source_object = ObjectId::new(
+                    i32::try_from(paint.object_number)
+                        .map_err(|_| Error::Invalid("source object number outside i32".into()))?,
+                    i32::from(paint.generation),
+                );
+                masked_cache.insert(
+                    paint.source_id.clone(),
+                    mask_source_object(
+                        document.original_bytes(),
+                        source_object,
+                        &source.lines,
+                        minimum_confidence,
+                    )?,
+                );
+            }
+            let Some(masked) = masked_cache.get(&paint.source_id).and_then(Option::as_ref) else {
+                continue;
+            };
+            if let Some(proven) = probe.examine(paint, source, masked)? {
                 if !proven.proofs.is_empty() {
                     result.proven_pages.insert(page);
                 }
@@ -151,6 +159,7 @@ impl PageProbe<'_> {
         &self,
         paint: &ImagePaint,
         source: &SourceObservation,
+        masked: &MaskedSourceObject,
     ) -> Result<Option<ProbedSource>, Error> {
         let lines = source
             .lines
@@ -163,22 +172,11 @@ impl PageProbe<'_> {
         if lines.is_empty() {
             return Ok(None);
         }
-        let source_object = ObjectId::new(
-            i32::try_from(paint.object_number)
-                .map_err(|_| Error::Invalid("source object number outside i32".into()))?,
-            i32::from(paint.generation),
-        );
-        let Some(masked) = mask_source_text(
-            self.document.original_bytes(),
-            source_object,
-            &lines,
-            self.minimum_confidence,
-        )?
-        else {
-            return Ok(None);
-        };
         let temp = NamedTempFile::new()?;
-        fs::write(temp.path(), &masked.bytes)?;
+        fs::write(
+            temp.path(),
+            isolate_source_paint(self.document, paint, masked.object.clone())?,
+        )?;
         let treatment = render_rgb_page(temp.path(), self.page, self.policy)?;
         if treatment.dimensions() != self.control.dimensions() {
             return Err(Error::Invalid(

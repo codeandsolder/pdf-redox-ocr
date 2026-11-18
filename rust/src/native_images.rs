@@ -23,8 +23,8 @@ pub struct ImageInventoryEntry {
     pub page: PageNumber,
     /// Extraction file ordinal within one Poppler invocation.
     pub number: u32,
-    /// Stable PDF `XObject` ID.
-    pub source_id: String,
+    /// Stable PDF XObject ID, absent for inline image paints.
+    pub source_id: Option<String>,
     /// Image type (ordinary image, alpha mask, stencil or inline).
     pub kind: String,
     /// Source-native width.
@@ -61,20 +61,22 @@ pub fn parse_inventory_line(line: &str) -> Result<Option<ImageInventoryEntry>, E
     let height = fields[4]
         .parse::<u32>()
         .map_err(|_| Error::Invalid("non-numeric pdfimages height".into()))?;
-    // Inline images use object ID -1 and have no reusable XObject identity.
-    if fields[10] == "-1" {
-        return Ok(None);
-    }
-    let object = fields[10]
-        .parse::<u32>()
-        .map_err(|_| Error::Invalid("non-numeric pdfimages `XObject` ID".into()))?;
-    let generation = fields[11]
-        .parse::<u16>()
-        .map_err(|_| Error::Invalid("non-numeric pdfimages `XObject` generation".into()))?;
+    // Inline images consume extraction memory but have no reusable XObject ID.
+    let source_id = if matches!(fields[10], "-1" | "[inline]") {
+        None
+    } else {
+        let object = fields[10]
+            .parse::<u32>()
+            .map_err(|_| Error::Invalid("non-numeric pdfimages XObject ID".into()))?;
+        let generation = fields[11]
+            .parse::<u16>()
+            .map_err(|_| Error::Invalid("non-numeric pdfimages XObject generation".into()))?;
+        Some(format!("{object}:{generation}"))
+    };
     Ok(Some(ImageInventoryEntry {
         page,
         number,
-        source_id: format!("{object}:{generation}"),
+        source_id,
         kind: fields[2].to_owned(),
         width,
         height,
@@ -192,8 +194,10 @@ pub fn native_source_images(
         let candidates = inventory
             .iter()
             .filter(|entry| {
-                wanted_ids.contains(&entry.source_id)
-                    && !decoded.contains_key(&entry.source_id)
+                entry
+                    .source_id
+                    .as_ref()
+                    .is_some_and(|id| wanted_ids.contains(id) && !decoded.contains_key(id))
                     && entry.kind == "image"
                     && u64::from(entry.width) * u64::from(entry.height) <= budget.max_source_pixels
                     && entry.width > 0
@@ -222,7 +226,10 @@ pub fn native_source_images(
             )));
         }
         for entry in candidates {
-            if decoded.contains_key(&entry.source_id) || decoded.len() >= budget.max_sources {
+            let Some(source_id) = &entry.source_id else {
+                continue;
+            };
+            if decoded.contains_key(source_id) || decoded.len() >= budget.max_sources {
                 continue;
             }
             let pixels = u64::from(entry.width) * u64::from(entry.height);
@@ -234,20 +241,16 @@ pub fn native_source_images(
             let file = prefix.with_file_name(format!("image-{:03}.png", entry.number));
             let rgb = image::open(&file)
                 .map_err(|error| {
-                    Error::Invalid(format!(
-                        "unable to decode source {}: {error}",
-                        entry.source_id
-                    ))
+                    Error::Invalid(format!("unable to decode source {source_id}: {error}"))
                 })?
                 .into_rgb8();
             if rgb.width() != entry.width || rgb.height() != entry.height {
                 return Err(Error::Invalid(format!(
-                    "pdfimages source {} raster dimensions do not match inventory",
-                    entry.source_id
+                    "pdfimages source {source_id} raster dimensions do not match inventory"
                 )));
             }
             used_pixels += pixels;
-            decoded.insert(entry.source_id.clone(), rgb);
+            decoded.insert(source_id.clone(), rgb);
         }
     }
     Ok(decoded)
@@ -266,7 +269,7 @@ mod tests {
             "   2     1 image    1200   300  rgb     3   8  image  no         9  0   173   173 13.8K 1.3%"
         )?.ok_or_else(|| crate::Error::Invalid("missing inventory".into()))?;
         assert_eq!(first.source_id, second.source_id);
-        assert_eq!(first.source_id, "9:0");
+        assert_eq!(first.source_id.as_deref(), Some("9:0"));
         assert_eq!(first.width, 1200);
         assert_eq!(first.height, 300);
         assert_eq!(first.page.get(), 1);
@@ -274,10 +277,18 @@ mod tests {
         assert_eq!(second.number, 1);
         assert!(parse_inventory_line("-------")?.is_none());
         assert!(parse_inventory_line("page num type width")?.is_none());
-        assert!(
-            parse_inventory_line("1 1 image 100 100 rgb 3 8 image no -1 0 300 300 1K 1%")?
-                .is_none()
-        );
+        let inline = parse_inventory_line("1 1 image 100 100 rgb 3 8 image no -1 0 300 300 1K 1%")?
+            .ok_or_else(|| crate::Error::Invalid("inline image is absent".into()))?;
+        assert_eq!(inline.source_id, None);
+        assert_eq!((inline.width, inline.height), (100, 100));
+        assert_eq!(inline.number, 1);
+        let tagged_inline =
+            parse_inventory_line("1 0 image 400 400 rgb 3 8 image no [inline] 360 360 484B 0.1%")?
+                .ok_or_else(|| {
+                    crate::Error::Invalid("Poppler tagged inline image absent".into())
+                })?;
+        assert_eq!(tagged_inline.source_id, None);
+        assert_eq!((tagged_inline.width, tagged_inline.height), (400, 400));
         Ok(())
     }
 }

@@ -33,6 +33,14 @@ pub struct MaskedSourcePdf {
     pub metrics: Vec<MaskMetric>,
 }
 
+/// An isolated replacement image `XObject`, not yet attached to a page paint.
+pub struct MaskedSourceObject {
+    /// Replacement image COS stream with decoded and changed native pixels.
+    pub object: OwnedObject,
+    /// Per-line source pixel-change expectations.
+    pub metrics: Vec<MaskMetric>,
+}
+
 /// Create one source-specific counterfactual in Rust.
 ///
 /// The accepted source image must be an 8-bit device-RGB `XObject` whose
@@ -48,6 +56,29 @@ pub fn mask_source_text(
     lines: &[OcrLine],
     min_confidence: f64,
 ) -> Result<Option<MaskedSourcePdf>, Error> {
+    let mut doc = EditDocument::from_bytes(original.to_vec())?;
+    let Some(masked) = mask_source_object(original, source_id, lines, min_confidence)? else {
+        return Ok(None);
+    };
+    *doc.edit_object(source_id)? = masked.object;
+    Ok(Some(MaskedSourcePdf {
+        bytes: doc.write_compact()?,
+        metrics: masked.metrics,
+    }))
+}
+
+/// Mask an original image into an unattached `XObject`, leaving all paint sites intact.
+///
+/// Returns None for image encodings that cannot be safely decoded to exact pixels.
+///
+/// # Errors
+/// Returns an error for invalid source polygons or a malformed source PDF.
+pub fn mask_source_object(
+    original: &[u8],
+    source_id: ObjectId,
+    lines: &[OcrLine],
+    min_confidence: f64,
+) -> Result<Option<MaskedSourceObject>, Error> {
     if !min_confidence.is_finite() || !(0.0..=1.0).contains(&min_confidence) {
         return Err(Error::Invalid("invalid source mask confidence".into()));
     }
@@ -58,9 +89,7 @@ pub fn mask_source_text(
     if eligible.is_empty() {
         return Ok(None);
     }
-
-    let mut doc = EditDocument::from_bytes(original.to_vec())?;
-    let source = doc.source();
+    let source = pdf_redox::SourcePdf::from_bytes(original.to_vec())?;
     let object = source.materialize(source_id)?;
     let OwnedObject::Stream { dictionary, .. } = &object else {
         return Ok(None);
@@ -130,11 +159,9 @@ pub fn mask_source_text(
     let payload = image.into_raw();
     let length = i64::try_from(payload.len())
         .map_err(|_| Error::Invalid("source stream length exceeds i64".into()))?;
-    let object = doc.edit_object(source_id)?;
-    let OwnedObject::Stream { dictionary, data } = object else {
-        return Err(Error::Invalid(
-            "image object changed during copy-on-write edit".into(),
-        ));
+    let mut rewritten = object;
+    let OwnedObject::Stream { dictionary, data } = &mut rewritten else {
+        return Err(Error::Invalid("image object is not a PDF stream".into()));
     };
     dictionary.retain(|key, _| {
         !matches!(
@@ -144,8 +171,8 @@ pub fn mask_source_text(
     });
     dictionary.insert(b"Length".to_vec(), OwnedObject::Integer(length));
     *data = StreamData::Owned(payload);
-    Ok(Some(MaskedSourcePdf {
-        bytes: doc.write_compact()?,
+    Ok(Some(MaskedSourceObject {
+        object: rewritten,
         metrics,
     }))
 }

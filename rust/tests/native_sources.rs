@@ -76,3 +76,41 @@ fn one_native_image_decodes_once_across_six_paints() -> Result<(), Box<dyn std::
     assert!(over_extraction_limit.is_empty());
     Ok(())
 }
+
+#[test]
+fn inline_images_consume_extraction_ceiling_without_becoming_sources()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pdf_bytes = include_bytes!("fixtures/inline-plus-source-budget.pdf");
+    let temp = tempfile::tempdir()?;
+    let pdf = temp.path().join("inline-plus-image.pdf");
+    fs::write(&pdf, pdf_bytes)?;
+    let page = PageNumber::new(1)?;
+    let painted = enumerate_image_paints(&PdfMetadata::open(&pdf)?, &[page])?;
+    assert_eq!(painted.placements.len(), 1, "{painted:#?}");
+    let wanted = BTreeSet::from([painted.placements[0].source_id.clone()]);
+    let too_small = native_source_images(
+        &pdf,
+        &[page],
+        &wanted,
+        NativeImageBudget {
+            max_extraction_pixels: 519_999,
+            ..NativeImageBudget::default()
+        },
+    )?;
+    assert!(too_small.is_empty());
+    let fits = native_source_images(
+        &pdf,
+        &[page],
+        &wanted,
+        NativeImageBudget {
+            max_extraction_pixels: 520_000,
+            ..NativeImageBudget::default()
+        },
+    )?;
+    assert_eq!(fits.len(), 1);
+    let source = fits
+        .get(&painted.placements[0].source_id)
+        .ok_or("native source missing after inline extraction")?;
+    assert_eq!((source.width(), source.height()), (1200, 300));
+    Ok(())
+}

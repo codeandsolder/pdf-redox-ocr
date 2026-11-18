@@ -13,6 +13,8 @@ pub mod mixed_visibility;
 pub mod native_images;
 pub mod native_words;
 #[cfg(feature = "pdf-integration")]
+pub mod paint_isolation;
+#[cfg(feature = "pdf-integration")]
 pub mod paint_scan;
 #[cfg(feature = "pdf-integration")]
 pub mod pdf_metadata;

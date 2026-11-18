@@ -204,6 +204,7 @@ mod tests {
         let paint = |page, tx| ImagePaint {
             page,
             paint_index: 0,
+            paint_path: vec![0],
             source_id: "9:0".into(),
             object_number: 9,
             generation: 0,
@@ -263,6 +264,7 @@ mod tests {
             placements: vec![ImagePaint {
                 page: 1,
                 paint_index: 0,
+                paint_path: vec![0],
                 source_id: "9:0".into(),
                 object_number: 9,
                 generation: 0,

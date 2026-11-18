@@ -93,6 +93,8 @@ pub struct ImagePaint {
     pub page: u32,
     /// Paint invocation index expanded through nested Forms.
     pub paint_index: u32,
+    /// Zero-based Do ordinal at each invocation from the page through nested Forms.
+    pub paint_path: Vec<u32>,
     /// Original image `XObject` identifier.
     pub source_id: String,
     /// Resolved source object number.
@@ -394,6 +396,7 @@ struct ScanContext<'a> {
     summary: PagePaintSummary,
     paintings: Vec<ImagePaint>,
     active_forms: BTreeSet<ObjectId>,
+    do_path: Vec<u32>,
 }
 
 fn numeric(value: &OwnedObject) -> Option<f64> {
@@ -427,14 +430,20 @@ fn array_numbers<const COUNT: usize>(
         .map_err(|_| Error::Invalid("incorrect PDF numeric array".into()))
 }
 
-fn resolve_dictionary(source: &SourcePdf, value: &OwnedObject) -> Result<OwnedDictionary, Error> {
+pub(crate) fn resolve_dictionary(
+    source: &SourcePdf,
+    value: &OwnedObject,
+) -> Result<OwnedDictionary, Error> {
     resolve_owned(source, value.clone())?
         .as_dictionary()
         .cloned()
         .ok_or_else(|| Error::Invalid("PDF dictionary resource expected".into()))
 }
 
-fn inherited_page_resources(source: &SourcePdf, first: ObjectId) -> Result<OwnedDictionary, Error> {
+pub(crate) fn inherited_page_resources(
+    source: &SourcePdf,
+    first: ObjectId,
+) -> Result<OwnedDictionary, Error> {
     let mut visited = BTreeSet::new();
     let mut next = Some(first);
     while let Some(id) = next {
@@ -636,7 +645,7 @@ fn append_content(
     Ok(())
 }
 
-fn page_content(source: &SourcePdf, page: ObjectId) -> Result<Vec<u8>, Error> {
+pub(crate) fn page_content(source: &SourcePdf, page: ObjectId) -> Result<Vec<u8>, Error> {
     let object = source.materialize(page)?;
     let dict = object
         .as_dictionary()
@@ -781,6 +790,7 @@ impl ScanContext<'_> {
         self.paintings.push(ImagePaint {
             page: self.page.get(),
             paint_index,
+            paint_path: self.do_path.clone(),
             source_id: image_source_id(id),
             object_number,
             generation,
@@ -856,6 +866,25 @@ impl ScanContext<'_> {
         Ok(())
     }
 
+    fn visit_do(
+        &mut self,
+        instruction: &hayro_syntax::content::Instruction<'_, '_>,
+        resources: &OwnedDictionary,
+        state: &State,
+        depth: usize,
+        ordinal: u32,
+    ) -> Result<(), Error> {
+        self.do_path.push(ordinal);
+        let result = if let Some(name) = instruction_name(instruction) {
+            self.visit_xobject(&name, resources, state, depth)
+        } else {
+            self.summary.unknown_paint += 1;
+            Ok(())
+        };
+        self.do_path.pop();
+        result
+    }
+
     fn visit_stream(
         &mut self,
         bytes: &[u8],
@@ -866,6 +895,7 @@ impl ScanContext<'_> {
         let mut iter = UntypedIter::new(bytes);
         let mut saved_states = Vec::new();
         let mut path = PathState::default();
+        let mut next_do = 0_u32;
 
         while let Some(instruction) = iter.next() {
             let op: &[u8] = &instruction.operator[..];
@@ -938,11 +968,10 @@ impl ScanContext<'_> {
                 b"Tj" | b"TJ" | b"'" | b"\"" => self.handle_text_show(resources, &state)?,
                 b"sh" => self.summary.non_image_visual_paint += 1,
                 b"Do" => {
-                    if let Some(name) = instruction_name(&instruction) {
-                        self.visit_xobject(&name, resources, &state, depth)?;
-                    } else {
-                        self.summary.unknown_paint += 1;
-                    }
+                    self.visit_do(&instruction, resources, &state, depth, next_do)?;
+                    next_do = next_do
+                        .checked_add(1)
+                        .ok_or_else(|| Error::Invalid("excessive Do invocations".into()))?;
                 }
                 b"BI" | b"ID" | b"EI" => self.summary.unsupported_inline_images += 1,
                 b"w" | b"J" | b"j" | b"M" | b"d" | b"ri" | b"i" | b"g" | b"G" | b"rg" | b"RG"
@@ -997,6 +1026,7 @@ pub fn enumerate_image_paints(
             },
             paintings: Vec::new(),
             active_forms: BTreeSet::new(),
+            do_path: Vec::new(),
         };
         let page_object = source.materialize(id)?;
         if let Some(dict) = page_object.as_dictionary()
