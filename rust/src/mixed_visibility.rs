@@ -155,6 +155,26 @@ struct PageProbe<'a> {
 }
 
 impl PageProbe<'_> {
+    fn mask_pixel_margin(
+        &self,
+        paint: &ImagePaint,
+        source: &SourceObservation,
+    ) -> Result<f64, Error> {
+        let page_box = self
+            .document
+            .media_boxes()
+            .get(&self.page)
+            .ok_or_else(|| Error::Invalid("page MediaBox missing".into()))?;
+        let dpi_scale = (f64::from(self.control.width()) / page_box.width())
+            .max(f64::from(self.control.height()) / page_box.height());
+        let [a, b, c, d, _, _] = paint.ctm;
+        Ok((5.0
+            * (a.hypot(b) / f64::from(source.width) + c.hypot(d) / f64::from(source.height))
+            * dpi_scale)
+            .ceil()
+            + 3.0)
+    }
+
     fn examine(
         &self,
         paint: &ImagePaint,
@@ -196,19 +216,7 @@ impl PageProbe<'_> {
             return Err(Error::Invalid("masked OCR metric/geometry mismatch".into()));
         }
         let display_mapper = self.document.mapper(self.page)?;
-        let page_box = self
-            .document
-            .media_boxes()
-            .get(&self.page)
-            .ok_or_else(|| Error::Invalid("page MediaBox missing".into()))?;
-        let dpi_scale = (f64::from(self.control.width()) / page_box.width())
-            .max(f64::from(self.control.height()) / page_box.height());
-        let [a, b, c, d, _, _] = paint.ctm;
-        let padding = (5.0
-            * (a.hypot(b) / f64::from(source.width) + c.hypot(d) / f64::from(source.height))
-            * dpi_scale)
-            .ceil()
-            + 3.0;
+        let padding = self.mask_pixel_margin(paint, source)?;
         // A counterfactual is evidence only when *all* untargeted rendered
         // pixels remain byte-identical. Codec color transforms can otherwise
         // create false-positive visibility when an XObject is rewritten.
@@ -433,7 +441,7 @@ mod tests {
         assert!(unchanged_outside_source_masks(
             &before,
             &after,
-            &[region.clone()],
+            std::slice::from_ref(&region),
             mapper,
             4.0
         ));

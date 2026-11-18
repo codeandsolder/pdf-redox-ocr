@@ -92,7 +92,7 @@ pub fn mask_source_object(
         return Ok(None);
     }
     let object = source.materialize(source_id)?;
-    let Some(mut image) = decode_native_samples(&source, source_id, &object)? else {
+    let Some(mut image) = decode_native_samples(source, source_id, &object)? else {
         return Ok(None);
     };
     let before = image.clone();
