@@ -2,17 +2,19 @@
 
 #![cfg(feature = "pdf-integration")]
 
-use std::{fs, path::Path};
+use std::{collections::BTreeMap, fs, path::Path};
 
 use pdf_redox::{ObjectId, SourcePdf};
 use pdf_redox_ocr::{
     PageNumber,
     draft::OcrLine,
     geometry::Point,
+    mixed_visibility::prove_mixed_source_text,
     paint_scan::enumerate_image_paints,
     pdf_metadata::PdfMetadata,
     rasterize::{RenderPolicy, render_rgb_page},
     source_mask::mask_source_text,
+    source_ocr::SourceObservation,
 };
 
 fn original_line() -> OcrLine {
@@ -115,5 +117,58 @@ fn source_mask_preserves_pdf_color_semantics_across_ten_sample_formats()
             "{name}: rewriting changed {outside} pixels outside the OCR source region"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn native_formats_admit_exclusively_pixel_verified_source_labels()
+-> Result<(), Box<dyn std::error::Error>> {
+    let original = include_bytes!("fixtures/source-sample-formats.pdf");
+    let temp = tempfile::tempdir()?;
+    let pdf = temp.path().join("ten-formats.pdf");
+    fs::write(&pdf, original)?;
+    let document = PdfMetadata::open(&pdf)?;
+    let pages = (1..=10)
+        .map(PageNumber::new)
+        .collect::<Result<Vec<_>, _>>()?;
+    let painted = enumerate_image_paints(&document, &pages)?;
+    assert_eq!(painted.placements.len(), 10);
+    let recognized = painted
+        .placements
+        .iter()
+        .map(|paint| {
+            (
+                paint.source_id.clone(),
+                SourceObservation {
+                    width: paint.width,
+                    height: paint.height,
+                    lines: vec![original_line()],
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(recognized.len(), 10);
+    let verified = prove_mixed_source_text(
+        &pdf,
+        &document,
+        &painted,
+        &recognized,
+        &pages,
+        RenderPolicy {
+            dpi: 72,
+            max_side: 450,
+        },
+        0.97,
+    )?;
+    assert_eq!(verified.audited.len(), 10, "{:#?}", verified.audited);
+    assert_eq!(verified.proofs.len(), 10, "{:#?}", verified.audited);
+    assert_eq!(verified.observations.len(), 10);
+    assert_eq!(verified.proven_pages.len(), 10);
+    assert!(
+        verified
+            .audited
+            .iter()
+            .all(|audit| audit.visible_lines == 1)
+    );
     Ok(())
 }
