@@ -47,6 +47,17 @@ ICC-based color spaces, without changing the original ColorSpace or Decode
 mapping. Unresolved color aliases, alpha, unsupported sample codecs and
 incomplete source data keep ordinary page OCR. A differential proof also
 requires every pixel outside the selected OCR region to remain unchanged.
+For fragmented image-only pages, the Rust path now clusters actual native
+image paint invocations using scale-aware, spatially indexed connected
+components. Adjacent strips are recognized in bounded native-pitch PDF crops,
+not as isolated text fragments. Poppler renders the final paint stack, so soft
+masks, ICC color, clipping and nested Form paints use the genuine PDF
+compositor. Group-specific clip masks, source-axes orientation, page rotation,
+reflection and exact crop-pixel-to-PDF geometry preserve provenance.
+Pages are promoted only after all image paints have been reconstructed and
+recognized. Failed geometric, compositing, resource or inference checks use
+ordinary full-page OCR rather than the independent strip shortcut. CLI knobs
+bound per-group and per-page rendered pixels, group count and native DPI.
 The original PDF is never modified.
 
 The real-PDF regression corpus covers repeated image extraction, masked source
@@ -55,8 +66,9 @@ repeated direct/once-nested/twice-nested source painting on the same page,
 with one occurrence covered by later opaque vector paint. A ten-page
 real-PDF corpus checks native packed pixel round trips and absence of unrelated
 render changes across 1/2/4/8/16-bit device and calibrated color spaces.
-The existing Python pipeline remains the functional reference for corpus
-parity, performance and image mosaics.
+The real-PDF fragment regression corpus covers split raster text, soft masks,
+clip paths, rotated pages and nonzero MediaBox origins. The existing Python
+pipeline remains the functional reference for corpus and performance parity.
 
 The source core is tested using stable Rust 1.100 with
 cargo +stable test --locked --no-default-features. The integrated crate

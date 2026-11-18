@@ -10,6 +10,10 @@ pub mod hybrid;
 pub mod inference;
 #[cfg(feature = "pdf-integration")]
 pub mod mixed_visibility;
+#[cfg(feature = "pdf-integration")]
+pub mod mosaic;
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+pub mod mosaic_ocr;
 pub mod native_images;
 pub mod native_words;
 #[cfg(feature = "pdf-integration")]

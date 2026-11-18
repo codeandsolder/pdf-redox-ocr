@@ -16,9 +16,11 @@ use pdf_redox_ocr::{
     hybrid::{MergeInput, merge_ocr},
     inference::OcrInference,
     mixed_visibility::{MixedVisibility, prove_mixed_source_text},
+    mosaic::{MosaicBudget, MosaicPlan, contains_native_fragments, plan_raster_mosaics},
+    mosaic_ocr::recognize_native_mosaics,
     native_images::{NativeImageBudget, native_source_images},
     native_words::native_words_for_pages,
-    paint_scan::enumerate_image_paints,
+    paint_scan::{PaintReport, enumerate_image_paints},
     pdf_metadata::PdfMetadata,
     rasterize::{RenderPolicy, render_rgb_page},
     source_ocr::{
@@ -67,6 +69,18 @@ struct Args {
     /// Maximum number of unique image sources recognized.
     #[arg(long, default_value_t = 12)]
     max_native_sources: usize,
+    /// Largest native-resolution mosaic crop, in pixels.
+    #[arg(long, default_value_t = 12_000_000)]
+    max_mosaic_group_pixels: u64,
+    /// Per-page aggregate native-resolution mosaic pixels.
+    #[arg(long, default_value_t = 24_000_000)]
+    max_mosaic_page_pixels: u64,
+    /// Largest number of independent mosaic groups rendered on one page.
+    #[arg(long, default_value_t = 24)]
+    max_mosaic_groups: usize,
+    /// Upper Poppler renderer DPI for native-resolution mosaic crops.
+    #[arg(long, default_value_t = 2400)]
+    max_mosaic_dpi: u32,
     /// Maximum aggregate pixels that one Poppler extraction may produce.
     #[arg(long, default_value_t = 64_000_000)]
     max_native_extraction_pixels: u64,
@@ -198,19 +212,58 @@ struct NativePreparation {
     mixed: MixedVisibility,
 }
 
-/// Decode and recognize source images once, then verify mixed-page paint
-/// visibility by changing only one source in a detached counterfactual PDF.
-fn prepare_native_sources(
-    engine: &OcrInference,
-    pdf: &Path,
-    doc: &PdfMetadata,
-    selected: &[PageNumber],
-    budget: NativeImageBudget,
+#[derive(Clone, Copy)]
+struct NativePolicies {
+    source_budget: NativeImageBudget,
+    mosaic_budget: MosaicBudget,
     render: RenderPolicy,
     minimum_confidence: f64,
-) -> Result<NativePreparation, Box<dyn Error>> {
-    let scanned = enumerate_image_paints(doc, selected)?;
-    let mut source_ids = source_only_candidates(&scanned, budget.max_source_pixels);
+}
+
+fn plan_native_fragment_pages(
+    scanned: &PaintReport,
+    doc: &PdfMetadata,
+    budget: MosaicBudget,
+) -> Result<(BTreeSet<PageNumber>, BTreeMap<PageNumber, MosaicPlan>), Box<dyn Error>> {
+    let mut fragmented = BTreeSet::new();
+    let mut plans = BTreeMap::new();
+    for summary in &scanned.pages {
+        if !summary.image_only_after_native {
+            continue;
+        }
+        let page = PageNumber::new(summary.page)?;
+        let paints = scanned
+            .placements
+            .iter()
+            .filter(|p| p.page == summary.page)
+            .cloned()
+            .collect::<Vec<_>>();
+        let box_ = *doc
+            .media_boxes()
+            .get(&page)
+            .ok_or("selected page missing MediaBox")?;
+        let mapper = doc.mapper(page)?;
+        if !contains_native_fragments(&paints, box_, mapper) {
+            continue;
+        }
+        fragmented.insert(page);
+        if summary.native_searchable_shows == 0
+            && let Some(plan) = plan_raster_mosaics(page, &paints, box_, mapper, budget)?
+        {
+            plans.insert(page, plan);
+        }
+    }
+    Ok((fragmented, plans))
+}
+
+fn native_source_ids(
+    scanned: &PaintReport,
+    doc: &PdfMetadata,
+    fragmented: &BTreeSet<PageNumber>,
+    source_budget: NativeImageBudget,
+    render: RenderPolicy,
+) -> Result<BTreeSet<String>, Box<dyn Error>> {
+    let mut source_ids = source_only_candidates(scanned, source_budget.max_source_pixels);
     let sampling = scanned
         .placements
         .iter()
@@ -227,34 +280,52 @@ fn prepare_native_sources(
                 .collect(),
         })
         .collect::<Vec<_>>();
-    let (mixed_ids, sampling_report) = choose_mixed_raster_sources(
+    let (mixed, report) = choose_mixed_raster_sources(
         &sampling,
         doc.media_boxes(),
         SourcePolicy {
             max_side: render.max_side,
-            max_inference_pixels: budget.max_total_pixels,
-            max_sources: budget.max_sources,
+            max_inference_pixels: source_budget.max_total_pixels,
+            max_sources: source_budget.max_sources,
             minimum_source_pixels: 20_000,
             min_gain: 2.25,
         },
     )?;
     eprintln!(
         "source candidates: {} high-detail sources, {} native-only sources",
-        sampling_report.native_resolution_candidates,
-        source_ids.len(),
+        report.native_resolution_candidates,
+        source_ids.len()
     );
-    source_ids.extend(mixed_ids);
-    let decoded_sources = match native_source_images(pdf, selected, &source_ids, budget) {
-        Ok(decoded) => decoded,
+    source_ids.extend(mixed);
+    // Native source OCR is insufficient on a page where a text line can cross
+    // neighboring fragments; recognize the complete native-pitch group instead.
+    let eligible_elsewhere = scanned
+        .placements
+        .iter()
+        .filter(|paint| !fragmented.iter().any(|page| page.get() == paint.page))
+        .map(|paint| paint.source_id.as_str())
+        .collect::<BTreeSet<_>>();
+    source_ids.retain(|id| eligible_elsewhere.contains(id.as_str()));
+    Ok(source_ids)
+}
+
+fn recognize_native_sources(
+    engine: &OcrInference,
+    pdf: &Path,
+    selected: &[PageNumber],
+    source_ids: &BTreeSet<String>,
+    budget: NativeImageBudget,
+) -> Result<BTreeMap<String, SourceObservation>, Box<dyn Error>> {
+    let decoded = match native_source_images(pdf, selected, source_ids, budget) {
+        Ok(images) => images,
         Err(error) => {
             eprintln!("Native source extraction unavailable: {error}; using page OCR");
             BTreeMap::new()
         }
     };
     let mut recognized = BTreeMap::new();
-    for (source_id, rgb) in decoded_sources {
-        let width = rgb.width();
-        let height = rgb.height();
+    for (source_id, rgb) in decoded {
+        let (width, height) = (rgb.width(), rgb.height());
         let mapper = source_image_mapper(width, height)?;
         match engine.recognize_page(rgb, mapper) {
             Ok(lines) => {
@@ -268,12 +339,93 @@ fn prepare_native_sources(
                     },
                 );
             }
-            Err(error) => {
-                eprintln!("source {source_id}: {error}; using page OCR");
-            }
+            Err(error) => eprintln!("source {source_id}: {error}; using page OCR"),
         }
     }
-    let source_only = source_only_pages(&scanned, &recognized)?;
+    Ok(recognized)
+}
+
+fn add_reconstructed_mosaics(
+    engine: &OcrInference,
+    pdf: &Path,
+    doc: &PdfMetadata,
+    scanned: &PaintReport,
+    plans: &BTreeMap<PageNumber, MosaicPlan>,
+    budget: MosaicBudget,
+    source_only: &mut SourceOnlyResult,
+) -> Result<usize, Box<dyn Error>> {
+    let mut count = 0;
+    for (&page, plan) in plans {
+        let paints = scanned
+            .placements
+            .iter()
+            .filter(|paint| paint.page == page.get())
+            .cloned()
+            .collect::<Vec<_>>();
+        match recognize_native_mosaics(engine, pdf, doc.mapper(page)?, plan, &paints, budget) {
+            Ok(Some(lines)) => {
+                eprintln!(
+                    "page {} native mosaic: {} OCR lines from {} groups",
+                    page.get(),
+                    lines.len(),
+                    plan.groups.len()
+                );
+                source_only.approved_pages.insert(page);
+                source_only.pages.insert(page, lines);
+                count += 1;
+            }
+            Ok(None) => eprintln!(
+                "page {} native mosaic incomplete; using page OCR",
+                page.get()
+            ),
+            Err(error) => eprintln!(
+                "page {} native mosaic rejected: {error}; using page OCR",
+                page.get()
+            ),
+        }
+    }
+    Ok(count)
+}
+
+/// Decode and recognize original source images, source-resolution fragment
+/// mosaics, and verify exact mixed-page source paint visibility.
+fn prepare_native_sources(
+    engine: &OcrInference,
+    pdf: &Path,
+    doc: &PdfMetadata,
+    selected: &[PageNumber],
+    policies: NativePolicies,
+) -> Result<NativePreparation, Box<dyn Error>> {
+    let NativePolicies {
+        source_budget,
+        mosaic_budget,
+        render,
+        minimum_confidence,
+    } = policies;
+    mosaic_budget.validate()?;
+    let scanned = enumerate_image_paints(doc, selected)?;
+    let (fragmented, plans) = plan_native_fragment_pages(&scanned, doc, mosaic_budget)?;
+    let source_ids = native_source_ids(&scanned, doc, &fragmented, source_budget, render)?;
+    let recognized = recognize_native_sources(engine, pdf, selected, &source_ids, source_budget)?;
+    let mut source_only = source_only_pages(&scanned, &recognized)?;
+    for &page in &fragmented {
+        source_only.approved_pages.remove(&page);
+        source_only.pages.remove(&page);
+    }
+    let mosaics = add_reconstructed_mosaics(
+        engine,
+        pdf,
+        doc,
+        &scanned,
+        &plans,
+        mosaic_budget,
+        &mut source_only,
+    )?;
+    eprintln!(
+        "native mosaics: {} fragment pages, {} reconstructed",
+        fragmented.len(),
+        mosaics
+    );
     eprintln!(
         "source-only fast path approved {} of {} selected pages",
         source_only.approved_pages.len(),
@@ -368,14 +520,22 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
         &args.pdf,
         &doc,
         &selection,
-        NativeImageBudget {
-            max_source_pixels: args.max_native_source_pixels,
-            max_total_pixels: args.max_native_total_pixels,
-            max_sources: args.max_native_sources,
-            max_extraction_pixels: args.max_native_extraction_pixels,
+        NativePolicies {
+            source_budget: NativeImageBudget {
+                max_source_pixels: args.max_native_source_pixels,
+                max_total_pixels: args.max_native_total_pixels,
+                max_sources: args.max_native_sources,
+                max_extraction_pixels: args.max_native_extraction_pixels,
+            },
+            mosaic_budget: MosaicBudget {
+                max_group_pixels: args.max_mosaic_group_pixels,
+                max_page_pixels: args.max_mosaic_page_pixels,
+                max_groups: args.max_mosaic_groups,
+                max_dpi: args.max_mosaic_dpi,
+            },
+            render: policy,
+            minimum_confidence: args.confidence,
         },
-        policy,
-        args.confidence,
     )?;
     let mut raster_pages = Vec::with_capacity(selection.len());
     let mut fallback_pages = Vec::new();
