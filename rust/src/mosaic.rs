@@ -139,11 +139,7 @@ fn native_axes(paint: &ImagePaint, mapper: DisplayMapper) -> Option<MosaicAxes> 
     let origin = mapper.to_raster(transform.point(Point(0.0, 1.0)));
     let source_right = mapper.to_raster(transform.point(Point(1.0, 1.0)));
     let source_down = mapper.to_raster(transform.point(Point(0.0, 0.0)));
-    let first = mapper.to_pdf(0.0, 0.0);
-    let right = mapper.to_pdf(1.0, 0.0);
-    let down = mapper.to_pdf(0.0, 1.0);
-    let width = (right.0 - first.0).hypot(right.1 - first.1);
-    let height = (down.0 - first.0).hypot(down.1 - first.1);
+    let Point(width, height) = mapper.display_dimensions();
     let vector = |point: Point| Point((point.0 - origin.0) * width, (point.1 - origin.1) * height);
     let unit = |Point(x, y): Point| {
         let length = x.hypot(y);

@@ -49,7 +49,10 @@ pub struct NativeFontMask {
 
 #[derive(Clone, Default)]
 struct TextState {
-    font: Option<Vec<u8>>,
+    // PDF graphics state holds an already resolved font object, *not* the
+    // name from the caller's resource dictionary. A Form with its own /F
+    // alias cannot change the inherited font until it executes another Tf.
+    font_searchable: bool,
     render_mode: u8,
 }
 
@@ -77,115 +80,23 @@ fn set_font(instruction: &hayro_syntax::content::Instruction<'_, '_>) -> Option<
     }
 }
 
-/// Insert temporary text modes around original byte spans, preserving all
-/// original operands, clipping, `CMaps` and matrix operators byte-for-byte.
-fn rewrite_native_stream(
-    source: &SourcePdf,
-    stream: &[u8],
-    resources: &OwnedDictionary,
-    stats: &mut NativeFontMaskStats,
-) -> Result<Option<Vec<u8>>, Error> {
-    let mut iter = UntypedIter::new(stream);
-    let mut current = TextState::default();
-    let mut stack = Vec::new();
-    let mut cached_fonts = BTreeMap::<Vec<u8>, bool>::new();
-    let mut replacement = Vec::with_capacity(stream.len());
-    let mut cursor = 0_usize;
-    while let Some(instruction) = iter.next() {
-        let op: &[u8] = &instruction.operator[..];
-        match op {
-            b"q" => stack.push(current.clone()),
-            b"Q" => {
-                current = stack
-                    .pop()
-                    .ok_or_else(|| Error::Invalid("unbalanced Q in native font content".into()))?;
-            }
-            b"Tf" => current.font = set_font(&instruction),
-            b"Tr" => current.render_mode = set_render_mode(&instruction)?,
-            b"Tj" | b"TJ" | b"'" | b"\"" => {
-                // Fonts are immutable inside this content stream's resource
-                // context; resolve each indirect dictionary only once.
-                let searchable = if let Some(font) = current.font.as_deref() {
-                    if let Some(&cached) = cached_fonts.get(font) {
-                        cached
-                    } else {
-                        let resolved = font_searchable(source, resources, font)?;
-                        cached_fonts.insert(font.to_vec(), resolved);
-                        resolved
-                    }
-                } else {
-                    false
-                };
-                if !searchable {
-                    stats.preserved_nonsearchable_shows += 1;
-                } else if current.render_mode >= 4 {
-                    stats.preserved_clipping_shows += 1;
-                } else if current.render_mode == 3 {
-                    stats.already_invisible_shows += 1;
-                } else {
-                    let span = instruction.span();
-                    if span.start < cursor || span.end > stream.len() {
-                        return Err(Error::Invalid(
-                            "overlapping native text operator spans".into(),
-                        ));
-                    }
-                    replacement.extend_from_slice(&stream[cursor..span.start]);
-                    replacement.extend_from_slice(b"\n3 Tr\n");
-                    replacement.extend_from_slice(&stream[span]);
-                    replacement
-                        .extend_from_slice(format!("\n{} Tr\n", current.render_mode).as_bytes());
-                    cursor = instruction.span().end;
-                    stats.hidden_native_shows += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-    if !iter.is_at_end() || !stack.is_empty() {
-        return Err(Error::Invalid(
-            "native text stream did not parse completely".into(),
-        ));
-    }
-    if cursor == 0 {
-        return Ok(None);
-    }
-    replacement.extend_from_slice(&stream[cursor..]);
-    Ok(Some(replacement))
+/// One source-content instruction replaced without losing neighboring bytes.
+struct ByteEdit {
+    span: std::ops::Range<usize>,
+    replacement: Vec<u8>,
 }
 
-/// Only invoked Form names are relevant: a Form inheriting page resources
-/// commonly inherits its own `XObject` entry, but that is *not* recursive paint.
-fn invoked_xobjects(stream: &[u8]) -> Result<BTreeSet<Vec<u8>>, Error> {
-    let mut iter = UntypedIter::new(stream);
-    let mut names = BTreeSet::new();
-    while let Some(instruction) = iter.next() {
-        if &instruction.operator[..] != b"Do" {
-            continue;
-        }
-        let mut operands = instruction.operands();
-        let Some(HayroObject::Name(name)) = operands.next() else {
-            return Err(Error::Invalid(
-                "native Form Do missing resource name".into(),
-            ));
-        };
-        if operands.next().is_some() {
-            return Err(Error::Invalid(
-                "native Form Do has excessive operands".into(),
-            ));
-        }
-        names.insert(name.as_ref().to_vec());
-    }
-    if !iter.is_at_end() {
-        return Err(Error::Invalid(
-            "native Form Do stream did not parse completely".into(),
-        ));
-    }
-    Ok(names)
+struct StreamRewrite {
+    /// None means the original contents and resource bindings are untouched.
+    bytes: Option<Vec<u8>>,
+    /// The call-site-local resource table, including any new Form aliases.
+    resources: OwnedDictionary,
+    /// True only if some exact Form invocation was retargeted.
+    aliased: bool,
 }
 
-/// One page's complete Form graph is cloned only along changed resources.
-/// Inherited resources are materialized per invocation context, not changed
-/// at their original shared indirect objects.
+/// Every rewritten Form is specific to its *actual* invocation's inherited
+/// text/graphics state and resources; no global Form-ID rewrite cache.
 struct FormRewriter<'a> {
     source: &'a SourcePdf,
     edited: &'a mut EditDocument,
@@ -195,59 +106,189 @@ struct FormRewriter<'a> {
 }
 
 impl FormRewriter<'_> {
-    fn resource_forms(
+    fn rewrite_stream(
         &mut self,
+        bytes: &[u8],
         mut resources: OwnedDictionary,
-        stream: &[u8],
+        initial: TextState,
         depth: usize,
-    ) -> Result<(OwnedDictionary, bool), Error> {
-        let names = invoked_xobjects(stream)?;
-        if names.is_empty() {
-            return Ok((resources, false));
+    ) -> Result<StreamRewrite, Error> {
+        let mut iter = UntypedIter::new(bytes);
+        let mut current = initial;
+        let mut saved = Vec::new();
+        let mut cached_fonts = BTreeMap::<Vec<u8>, bool>::new();
+        let mut edits = Vec::new();
+        let mut aliased = false;
+        while let Some(instruction) = iter.next() {
+            match &instruction.operator[..] {
+                b"q" => saved.push(current.clone()),
+                b"Q" => {
+                    current = saved.pop().ok_or_else(|| {
+                        Error::Invalid("unbalanced Q in native font content".into())
+                    })?;
+                }
+                b"Tf" => {
+                    current.font_searchable = match set_font(&instruction) {
+                        Some(name) => {
+                            if let Some(&cached) = cached_fonts.get(&name) {
+                                cached
+                            } else {
+                                let resolved = font_searchable(self.source, &resources, &name)?;
+                                cached_fonts.insert(name, resolved);
+                                resolved
+                            }
+                        }
+                        None => false,
+                    };
+                }
+                b"Tr" => current.render_mode = set_render_mode(&instruction)?,
+                b"Tj" | b"TJ" | b"'" | b"\"" => {
+                    self.rewrite_show(&instruction, bytes, &current, &mut edits)?;
+                }
+                b"Do" => {
+                    if let Some(name) =
+                        self.rewrite_do(&instruction, &mut resources, &current, depth)?
+                    {
+                        edits.push(ByteEdit {
+                            span: instruction.operand_spans().next().ok_or_else(|| {
+                                Error::Invalid("native Form Do lacks operand byte span".into())
+                            })?,
+                            replacement: name,
+                        });
+                        aliased = true;
+                    }
+                }
+                _ => {}
+            }
         }
+        if !iter.is_at_end() || !saved.is_empty() {
+            return Err(Error::Invalid(
+                "native font stream did not parse completely".into(),
+            ));
+        }
+        let mut cursor = 0_usize;
+        let mut rewritten = Vec::with_capacity(bytes.len() + edits.len() * 12);
+        for edit in &edits {
+            if edit.span.start < cursor || edit.span.end > bytes.len() {
+                return Err(Error::Invalid("overlapping native font byte spans".into()));
+            }
+            rewritten.extend_from_slice(&bytes[cursor..edit.span.start]);
+            rewritten.extend_from_slice(&edit.replacement);
+            cursor = edit.span.end;
+        }
+        if edits.is_empty() {
+            return Ok(StreamRewrite {
+                bytes: None,
+                resources,
+                aliased: false,
+            });
+        }
+        rewritten.extend_from_slice(&bytes[cursor..]);
+        Ok(StreamRewrite {
+            bytes: Some(rewritten),
+            resources,
+            aliased,
+        })
+    }
+
+    fn rewrite_show(
+        &mut self,
+        instruction: &hayro_syntax::content::Instruction<'_, '_>,
+        bytes: &[u8],
+        state: &TextState,
+        edits: &mut Vec<ByteEdit>,
+    ) -> Result<(), Error> {
+        if !state.font_searchable {
+            self.stats.preserved_nonsearchable_shows += 1;
+        } else if state.render_mode >= 4 {
+            self.stats.preserved_clipping_shows += 1;
+        } else if state.render_mode == 3 {
+            self.stats.already_invisible_shows += 1;
+        } else {
+            let mut replacement = Vec::new();
+            replacement.extend_from_slice(b"\n3 Tr\n");
+            // Preserve exact original show operands, kerning, glyph offsets
+            // and source token encoding in the selected PDF stream.
+            replacement.extend_from_slice(&bytes[instruction.span()]);
+            replacement.extend_from_slice(format!("\n{} Tr\n", state.render_mode).as_bytes());
+            edits.push(ByteEdit {
+                span: instruction.span(),
+                replacement,
+            });
+            self.stats.hidden_native_shows += 1;
+        }
+        Ok(())
+    }
+
+    fn rewrite_do(
+        &mut self,
+        instruction: &hayro_syntax::content::Instruction<'_, '_>,
+        resources: &mut OwnedDictionary,
+        state: &TextState,
+        depth: usize,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let mut operands = instruction.operands();
+        let Some(HayroObject::Name(name)) = operands.next() else {
+            return Err(Error::Invalid("native Form Do lacks resource name".into()));
+        };
+        if operands.next().is_some() || instruction.operand_spans().len() != 1 {
+            return Err(Error::Invalid(
+                "native Form Do has malformed operands".into(),
+            ));
+        }
+        let name = name.as_ref();
         let Some(table) = resources.get(b"XObject".as_slice()) else {
-            return Ok((resources, false));
+            return Ok(None);
         };
         let mut xobjects = resolve_dictionary(self.source, table)?;
-        let mut changed = false;
-        for name in names {
-            let Some(OwnedObject::Reference(ObjectHandle::Existing(id))) =
-                xobjects.get(name.as_slice())
-            else {
-                continue;
-            };
-            let id = *id;
-            let obj = self.source.materialize(id)?;
-            if !matches!(
-                obj.as_dictionary().and_then(|dict| dict.get(b"Subtype".as_slice())),
-                Some(OwnedObject::Name(name)) if name == b"Form"
-            ) {
-                continue;
-            }
-            if let Some(new_id) = self.rewrite_form(id, &resources, depth + 1)? {
-                xobjects.insert(name, OwnedObject::Reference(ObjectHandle::New(new_id)));
-                changed = true;
-            }
+        let Some(OwnedObject::Reference(ObjectHandle::Existing(id))) = xobjects.get(name) else {
+            return Ok(None);
+        };
+        let object = *id;
+        let original = self.source.materialize(object)?;
+        if !matches!(
+            original.as_dictionary().and_then(|dict| dict.get(b"Subtype".as_slice())),
+            Some(OwnedObject::Name(subtype)) if subtype == b"Form"
+        ) {
+            return Ok(None);
         }
-        if changed {
-            resources.insert(b"XObject".to_vec(), OwnedObject::Dictionary(xobjects));
-        }
-        Ok((resources, changed))
+        let Some(new_object) = self.rewrite_form(object, resources, state.clone(), depth + 1)?
+        else {
+            return Ok(None);
+        };
+        let mut suffix = 0_u32;
+        let alias = loop {
+            let candidate = format!("OcrNativeFont{suffix}").into_bytes();
+            if !xobjects.contains_key(candidate.as_slice()) {
+                break candidate;
+            }
+            suffix = suffix
+                .checked_add(1)
+                .ok_or_else(|| Error::Invalid("native font alias space exhausted".into()))?;
+        };
+        let handle = ObjectHandle::New(new_object);
+        xobjects.insert(alias.clone(), OwnedObject::Reference(handle));
+        resources.insert(b"XObject".to_vec(), OwnedObject::Dictionary(xobjects));
+        let mut replacement = Vec::with_capacity(alias.len() + 1);
+        replacement.push(b'/');
+        replacement.extend_from_slice(&alias);
+        Ok(Some(replacement))
     }
 
     fn rewrite_form(
         &mut self,
         id: ObjectId,
         inherited: &OwnedDictionary,
+        state: TextState,
         depth: usize,
     ) -> Result<Option<pdf_redox::NewObjectId>, Error> {
         if depth > MAX_FORM_DEPTH || self.visits >= MAX_FORM_VISITS || !self.active.insert(id) {
             return Err(Error::Invalid(
-                "cyclic or excessive native Form resource graph".into(),
+                "cyclic or excessive native Form invocation graph".into(),
             ));
         }
         self.visits += 1;
-        let result = self.rewrite_form_inner(id, inherited, depth);
+        let result = self.rewrite_form_inner(id, inherited, state, depth);
         self.active.remove(&id);
         result
     }
@@ -256,6 +297,7 @@ impl FormRewriter<'_> {
         &mut self,
         id: ObjectId,
         inherited: &OwnedDictionary,
+        state: TextState,
         depth: usize,
     ) -> Result<Option<pdf_redox::NewObjectId>, Error> {
         let existing = self.source.materialize(id)?;
@@ -264,24 +306,27 @@ impl FormRewriter<'_> {
             ..
         } = existing
         else {
-            return Err(Error::Invalid("native font Form not a stream".into()));
+            return Err(Error::Invalid("native font Form is not a stream".into()));
         };
         let resources = match form.get(b"Resources".as_slice()) {
             Some(raw) => resolve_dictionary(self.source, raw)?,
             None => inherited.clone(),
         };
         let source_bytes = self.source.decoded_stream_data(id)?;
-        let (resources, descendants_changed) =
-            self.resource_forms(resources, &source_bytes, depth)?;
-        let rewritten = rewrite_native_stream(self.source, &source_bytes, &resources, self.stats)?;
-        if rewritten.is_none() && !descendants_changed {
+        let result = self.rewrite_stream(&source_bytes, resources, state, depth)?;
+        let Some(contents) = result.bytes else {
             return Ok(None);
+        };
+        if result.aliased {
+            form.insert(
+                b"Resources".to_vec(),
+                OwnedObject::Dictionary(result.resources),
+            );
         }
-        form.insert(b"Resources".to_vec(), OwnedObject::Dictionary(resources));
-        let object =
-            make_decoded_stream(form, rewritten.unwrap_or_else(|| source_bytes.into_owned()))?;
         self.stats.cloned_forms += 1;
-        Ok(Some(self.edited.add_object(object)))
+        Ok(Some(
+            self.edited.add_object(make_decoded_stream(form, contents)?),
+        ))
     }
 }
 
@@ -324,30 +369,27 @@ pub fn mask_native_fonts(
             stats: &mut stats,
         };
         let page_data = page_content(source, page_id)?;
-        let (resources, forms_changed) = rewriter.resource_forms(resources, &page_data, 0)?;
-        let rewritten = rewrite_native_stream(source, &page_data, &resources, rewriter.stats)?;
-        if rewritten.is_none() && !forms_changed {
+        let result = rewriter.rewrite_stream(&page_data, resources, TextState::default(), 0)?;
+        let Some(contents) = result.bytes else {
             continue;
-        }
-        let content = rewritten
-            .map(|bytes| {
-                make_decoded_stream(OwnedDictionary::new(), bytes)
-                    .map(|stream| rewriter.edited.add_object(stream))
-            })
-            .transpose()?;
+        };
+        let content = rewriter
+            .edited
+            .add_object(make_decoded_stream(OwnedDictionary::new(), contents)?);
         let page_object = rewriter.edited.edit_object(page_id)?;
         let dict = page_object.as_dictionary_mut().ok_or_else(|| {
             Error::Invalid("native font mask page object is not a dictionary".into())
         })?;
-        if forms_changed {
-            dict.insert(b"Resources".to_vec(), OwnedObject::Dictionary(resources));
-        }
-        if let Some(id) = content {
+        if result.aliased {
             dict.insert(
-                b"Contents".to_vec(),
-                OwnedObject::Reference(ObjectHandle::New(id)),
+                b"Resources".to_vec(),
+                OwnedObject::Dictionary(result.resources),
             );
         }
+        dict.insert(
+            b"Contents".to_vec(),
+            OwnedObject::Reference(ObjectHandle::New(content)),
+        );
         stats.rewritten_pages += 1;
     }
     let bytes = if stats.hidden_native_shows > 0 {
@@ -360,9 +402,9 @@ pub fn mask_native_fonts(
 
 #[cfg(test)]
 mod tests {
-    use super::rewrite_native_stream;
+    use super::{FormRewriter, TextState};
     use crate::paint_scan::inherited_page_resources;
-    use pdf_redox::SourcePdf;
+    use pdf_redox::{EditDocument, SourcePdf};
 
     #[test]
     fn every_pdf_text_show_preserves_operands_and_graphics_state() -> Result<(), crate::Error> {
@@ -372,7 +414,17 @@ mod tests {
         let resources = inherited_page_resources(&source, source.page_ids()[0])?;
         let input = br#"q BT /Normal 12 Tf 2 Tr (A) Tj [(B) -120 (C)] TJ (D) ' 0 0 (E) " /Glyphs 20 Tf (X) Tj /Normal 12 Tf 7 Tr (CLIP) Tj 3 Tr (HIDDEN) Tj ET Q"#;
         let mut stats = super::NativeFontMaskStats::default();
-        let rewritten = rewrite_native_stream(&source, input, &resources, &mut stats)?
+        let mut edited = EditDocument::from_bytes(source.bytes().to_vec())?;
+        let mut rewriter = FormRewriter {
+            source: &source,
+            edited: &mut edited,
+            active: std::collections::BTreeSet::new(),
+            visits: 0,
+            stats: &mut stats,
+        };
+        let rewritten = rewriter
+            .rewrite_stream(input, resources, TextState::default(), 0)?
+            .bytes
             .ok_or_else(|| crate::Error::Invalid("native text was not masked".into()))?;
         assert_eq!(stats.hidden_native_shows, 4);
         assert_eq!(stats.preserved_clipping_shows, 1);
@@ -403,7 +455,17 @@ mod tests {
         let resources = inherited_page_resources(&source, source.page_ids()[0])?;
         let content = b"BT /Normal 12 Tf 0 Tr (HELLO) Tj [<41> -120 (B)] TJ 7 Tr (CLIP) Tj 3 Tr (INVISIBLE) Tj ET";
         let mut stats = super::NativeFontMaskStats::default();
-        let changed = rewrite_native_stream(&source, content, &resources, &mut stats)?;
+        let mut edited = EditDocument::from_bytes(source.bytes().to_vec())?;
+        let mut rewriter = FormRewriter {
+            source: &source,
+            edited: &mut edited,
+            active: std::collections::BTreeSet::new(),
+            visits: 0,
+            stats: &mut stats,
+        };
+        let changed = rewriter
+            .rewrite_stream(content, resources, TextState::default(), 0)?
+            .bytes;
         // The chosen fixture intentionally does not define /Normal: unknown
         // fonts are preserved, not erased on the assumption they are valid.
         assert!(changed.is_none());

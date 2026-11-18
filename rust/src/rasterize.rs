@@ -158,11 +158,7 @@ fn calculate_crop(
     if !(36..=2400).contains(&dpi) || max_pixels == 0 {
         return Err(Error::Invalid("invalid native mosaic render budget".into()));
     }
-    let right = mapper.to_pdf(1.0, 0.0);
-    let bottom = mapper.to_pdf(0.0, 1.0);
-    let first = mapper.to_pdf(0.0, 0.0);
-    let display_width = (right.0 - first.0).hypot(right.1 - first.1);
-    let display_height = (bottom.0 - first.0).hypot(bottom.1 - first.1);
+    let Point(display_width, display_height) = mapper.display_dimensions();
     let points_per_pixel = 72.0 / f64::from(dpi);
     let (mut left, mut top, mut max_x, mut max_y) = (
         f64::INFINITY,

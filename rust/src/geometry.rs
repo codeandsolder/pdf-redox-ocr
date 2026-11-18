@@ -95,6 +95,19 @@ impl DisplayMapper {
         Self { box_, rotation }
     }
 
+    /// The displayed page width and height in PDF user-space units.
+    ///
+    /// The page rotation swaps dimensions for 90°/270°. Deriving this
+    /// directly from the mapped box avoids repeated inverse transforms and
+    /// keeps native image rectification and Poppler crop scaling consistent.
+    #[must_use]
+    pub fn display_dimensions(self) -> Point {
+        match self.rotation {
+            Rotation::Deg0 | Rotation::Deg180 => Point(self.box_.width(), self.box_.height()),
+            Rotation::Deg90 | Rotation::Deg270 => Point(self.box_.height(), self.box_.width()),
+        }
+    }
+
     /// Convert normalized raster U (right), V (down) into PDF user-space.
     #[must_use]
     pub fn to_pdf(self, raster_u: f64, raster_v: f64) -> Point {
@@ -162,6 +175,26 @@ mod tests {
                 assert!((u - back_u).abs() < 1e-12, "{angle}: U mismatch");
                 assert!((v - back_v).abs() < 1e-12, "{angle}: V mismatch");
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn display_dimensions_follow_page_rotation() -> Result<(), crate::Error> {
+        let box_ = PageBox::new([30.0, 40.0, 830.0, 640.0])?;
+        for (rotation, expected) in [
+            (Rotation::Deg0, Point(800.0, 600.0)),
+            (Rotation::Deg90, Point(600.0, 800.0)),
+            (Rotation::Deg180, Point(800.0, 600.0)),
+            (Rotation::Deg270, Point(600.0, 800.0)),
+        ] {
+            let mapper = DisplayMapper::new(box_, rotation);
+            assert_eq!(mapper.display_dimensions(), expected);
+            let origin = mapper.to_pdf(0.0, 0.0);
+            let horizontal = mapper.to_pdf(1.0, 0.0);
+            let vertical = mapper.to_pdf(0.0, 1.0);
+            assert!((horizontal.0 - origin.0).hypot(horizontal.1 - origin.1) == expected.0);
+            assert!((vertical.0 - origin.0).hypot(vertical.1 - origin.1) == expected.1);
         }
         Ok(())
     }

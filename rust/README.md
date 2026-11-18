@@ -63,8 +63,13 @@ For fallback page OCR, a temporary Rust-generated PDF makes native searchable
 font shows invisible using mode 3 while retaining the original text-show
 operands, advances and geometry. Type3 glyphs, unresolved fonts, existing
 invisible shows and text-clipping modes remain as originally painted. Nested
-and reused Form XObjects are cloned copy-on-write for their inherited page
-resource context, rather than modifying shared source objects. Existing
+and reused Form XObjects are cloned copy-on-write for each exact Do
+invocation, preserving the selected font object and rendering mode from the
+calling graphics state, including q/Q saves and Form-local resource-name
+collisions. Native font classification happens when Tf executes rather than
+re-resolving its resource name inside another Form. Independent Form calls
+may therefore be hidden, already invisible, clipping, or graphical Type3,
+without modifying sibling invocations. Existing
 native text extraction, source visibility proofs, the input SHA-256 and the
 final vector overlay still use the **original PDF**. The diagnostic CLI option
 `--keep-native-text` disables only this render-time native font suppression.
@@ -81,7 +86,11 @@ clip paths, rotated pages and nonzero MediaBox origins, plus arbitrary 17° and
 37° rotations, mirrored −28° raster and sheared 13° input. The five-page native-font
 regression verifies that shared Forms with context-dependent inherited fonts
 do not hide Type3 ink on sibling pages, and that extracted text and unselected
-pages remain unchanged. This fixes a cross-page Form mutation bug in the
+pages remain unchanged. A further three-page fixture exercises multiple
+invocations of the same Form under different Tf/Tr modes, nested Forms,
+Type3 calls, explicit Form-local font aliases that disagree with inherited
+fonts, and collision-safe resource aliases. This fixes a cross-page Form
+mutation bug in the
 current Python reference, which remains the production baseline until corpus
 and performance parity is demonstrated.
 
