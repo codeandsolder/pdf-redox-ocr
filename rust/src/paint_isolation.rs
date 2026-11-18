@@ -189,7 +189,10 @@ fn target_do_operand(
     Ok((resource_name, span))
 }
 
-fn make_decoded_stream(mut dict: OwnedDictionary, data: Vec<u8>) -> Result<OwnedObject, Error> {
+pub(crate) fn make_decoded_stream(
+    mut dict: OwnedDictionary,
+    data: Vec<u8>,
+) -> Result<OwnedObject, Error> {
     dict.retain(|name, _| {
         !matches!(
             name.as_slice(),

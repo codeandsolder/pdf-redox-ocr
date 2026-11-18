@@ -14,6 +14,8 @@ pub mod mixed_visibility;
 pub mod mosaic;
 #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
 pub mod mosaic_ocr;
+#[cfg(feature = "pdf-integration")]
+pub mod native_font_mask;
 pub mod native_images;
 pub mod native_words;
 #[cfg(feature = "pdf-integration")]

@@ -493,7 +493,7 @@ fn subtype(source: &SourcePdf, dict: &OwnedDictionary) -> Result<Option<Vec<u8>>
     }
 }
 
-fn font_searchable(
+pub(crate) fn font_searchable(
     source: &SourcePdf,
     resources: &OwnedDictionary,
     font_name: &[u8],

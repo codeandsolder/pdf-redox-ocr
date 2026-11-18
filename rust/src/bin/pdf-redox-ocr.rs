@@ -21,6 +21,7 @@ use pdf_redox_ocr::{
         plan_raster_mosaics,
     },
     mosaic_ocr::recognize_native_mosaics,
+    native_font_mask::mask_native_fonts,
     native_images::{NativeImageBudget, native_source_images},
     native_words::native_words_for_pages,
     paint_scan::{PaintReport, enumerate_image_paints},
@@ -63,6 +64,9 @@ struct Args {
     /// Poppler page-extraction batch size.
     #[arg(long, default_value_t = 24)]
     native_chunk: usize,
+    /// Diagnostic: render searchable native text rather than temporarily hiding it.
+    #[arg(long)]
+    keep_native_text: bool,
     /// Maximum pixels allowed in a single decoded native-image OCR source.
     #[arg(long, default_value_t = 8_000_000)]
     max_native_source_pixels: u64,
@@ -518,6 +522,33 @@ fn write_draft_and_overlay(
     Ok(())
 }
 
+/// Build an ephemeral font-suppressed PDF for page-only OCR rendering.
+fn prepare_raster_pdf(
+    args: &Args,
+    doc: &PdfMetadata,
+    selected: &[PageNumber],
+) -> Result<Option<NamedTempFile>, Box<dyn Error>> {
+    if args.keep_native_text {
+        return Ok(None);
+    }
+    let mask = mask_native_fonts(doc, selected)?;
+    eprintln!(
+        "native-font render mask: {} searchable shows hidden, {} Type3/unclassified preserved, {} clipping preserved, {} Forms cloned",
+        mask.stats.hidden_native_shows,
+        mask.stats.preserved_nonsearchable_shows,
+        mask.stats.preserved_clipping_shows,
+        mask.stats.cloned_forms,
+    );
+    mask.bytes
+        .map(|bytes| -> Result<NamedTempFile, Box<dyn Error>> {
+            let mut file = NamedTempFile::new()?;
+            file.write_all(&bytes)?;
+            file.flush()?;
+            Ok(file)
+        })
+        .transpose()
+}
+
 fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     let mut paths = vec![args.output.as_path()];
     if let Some(pdf) = &args.output_pdf {
@@ -546,6 +577,10 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
         &selection,
         configured_native_policies(args, policy),
     )?;
+    let temporary_mask = prepare_raster_pdf(args, &doc, &selection)?;
+    let raster_pdf = temporary_mask
+        .as_ref()
+        .map_or(args.pdf.as_path(), NamedTempFile::path);
     let mut raster_pages = Vec::with_capacity(selection.len());
     let mut fallback_pages = Vec::new();
     for &page in &selection {
@@ -565,7 +600,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
             native_text_regions: native_text_regions.clone(),
         });
         if !prepared.source_only.approved_pages.contains(&page) {
-            let image = render_rgb_page(&args.pdf, page, policy)?;
+            let image = render_rgb_page(raster_pdf, page, policy)?;
             let mapper = doc.mapper(page)?;
             let lines = engine.recognize_page(image, mapper)?;
             eprintln!(
