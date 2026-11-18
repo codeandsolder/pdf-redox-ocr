@@ -5,12 +5,12 @@
 
 use std::{fs, process::Command};
 
-use image::ImageFormat;
+use image::{ImageFormat, RgbImage};
 use pdf_redox_ocr::{
     PageNumber,
     draft::OcrLine,
-    geometry::{PageBox, Point},
-    mosaic::{MosaicBudget, mosaic_page_eligible, plan_raster_mosaics},
+    geometry::{DisplayMapper, PageBox, Point},
+    mosaic::{MosaicAxes, MosaicBudget, mosaic_page_eligible, plan_raster_mosaics},
     mosaic_ocr::reconstruct_native_mosaics,
     paint_scan::enumerate_image_paints,
     pdf_metadata::PdfMetadata,
@@ -232,6 +232,88 @@ fn complete_fragment_group_reconstructs_text_geometry_without_model_download()
     Ok(())
 }
 
+fn assert_rectified_affine_frame(
+    raster: &RgbImage,
+    to_pdf: &dyn Fn(Point) -> Point,
+    mapper: DisplayMapper,
+    axes: MosaicAxes,
+    number: u32,
+    angle: f64,
+    reflected: bool,
+) -> Vec<OcrLine> {
+    let origin = mapper.to_pdf(0.0, 0.0);
+    let right = mapper.to_pdf(1.0, 0.0);
+    let down = mapper.to_pdf(0.0, 1.0);
+    let display_width = (right.0 - origin.0).hypot(right.1 - origin.1);
+    let display_height = (down.0 - origin.0).hypot(down.1 - origin.1);
+    assert!(
+        (500..=670).contains(&raster.width()),
+        "page {number}: width {}",
+        raster.width()
+    );
+    assert!(
+        (120..=220).contains(&raster.height()),
+        "page {number}: height {}",
+        raster.height()
+    );
+    assert!(
+        raster.pixels().filter(|pixel| pixel.0[0] < 120).count() > 700,
+        "page {number}: native ink not recovered",
+    );
+    // The exact inverse pixel mapping must point both axes
+    // along the true native-image directions, irrespective of
+    // page rotation, mirror or arbitrary affine skew.
+    let p0 = mapper.to_raster(to_pdf(Point(0.0, 0.0)));
+    let px = mapper.to_raster(to_pdf(Point(30.0, 0.0)));
+    let py = mapper.to_raster(to_pdf(Point(0.0, 30.0)));
+    let ux = Point(
+        (px.0 - p0.0) * display_width,
+        (px.1 - p0.1) * display_height,
+    );
+    let uy = Point(
+        (py.0 - p0.0) * display_width,
+        (py.1 - p0.1) * display_height,
+    );
+    let norm = |point: Point| {
+        let len = point.0.hypot(point.1);
+        Point(point.0 / len, point.1 / len)
+    };
+    let nx = norm(ux);
+    let ny = norm(uy);
+    assert!((nx.0 - axes.x.0).abs() < 1e-10);
+    assert!((nx.1 - axes.x.1).abs() < 1e-10);
+    assert!((ny.0 - axes.y.0).abs() < 1e-10);
+    assert!((ny.1 - axes.y.1).abs() < 1e-10);
+    let midpoint = to_pdf(Point(
+        f64::from(raster.width()) * 0.5,
+        f64::from(raster.height()) * 0.5,
+    ));
+    assert!((60.0..=370.0).contains(&midpoint.0));
+    assert!((90.0..=280.0).contains(&midpoint.1));
+    let expected = angle.to_radians();
+    let (s, c) = expected.sin_cos();
+    let target = if reflected {
+        Point(-c, s)
+    } else {
+        Point(c, -s)
+    };
+    assert!(
+        nx.0.mul_add(target.0, nx.1 * target.1) > 0.99999,
+        "page {number}: incorrect source-text orientation"
+    );
+    vec![OcrLine {
+        text: "AFFINE RASTER".into(),
+        confidence: 0.99,
+        quad: [
+            to_pdf(Point(40.0, 90.0)),
+            to_pdf(Point(480.0, 90.0)),
+            to_pdf(Point(480.0, 40.0)),
+            to_pdf(Point(40.0, 40.0)),
+        ],
+        reviewed: false,
+    }]
+}
+
 #[test]
 fn arbitrary_source_angles_and_reflection_rectify_original_pdf_coordinates()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -262,11 +344,6 @@ fn arbitrary_source_angles_and_reflection_rectify_original_pdf_coordinates()
         assert_eq!(plan.groups.len(), 1);
         assert_eq!(plan.groups[0].paint_indices.len(), 20);
         let axes = plan.groups[0].axes;
-        let origin = mapper.to_pdf(0.0, 0.0);
-        let right = mapper.to_pdf(1.0, 0.0);
-        let down = mapper.to_pdf(0.0, 1.0);
-        let display_width = (right.0 - origin.0).hypot(right.1 - origin.1);
-        let display_height = (down.0 - origin.0).hypot(down.1 - origin.1);
         let mut observed = 0_usize;
         let lines = reconstruct_native_mosaics(
             &pdf,
@@ -276,72 +353,9 @@ fn arbitrary_source_angles_and_reflection_rectify_original_pdf_coordinates()
             MosaicBudget::default(),
             |raster, to_pdf| {
                 observed += 1;
-                assert!(
-                    (500..=670).contains(&raster.width()),
-                    "page {number}: width {}",
-                    raster.width()
-                );
-                assert!(
-                    (120..=220).contains(&raster.height()),
-                    "page {number}: height {}",
-                    raster.height()
-                );
-                assert!(
-                    raster.pixels().filter(|pixel| pixel.0[0] < 120).count() > 700,
-                    "page {number}: native ink not recovered",
-                );
-                // The exact inverse pixel mapping must point both axes
-                // along the true native-image directions, irrespective of
-                // page rotation, mirror or arbitrary affine skew.
-                let p0 = mapper.to_raster(to_pdf(Point(0.0, 0.0)));
-                let px = mapper.to_raster(to_pdf(Point(30.0, 0.0)));
-                let py = mapper.to_raster(to_pdf(Point(0.0, 30.0)));
-                let ux = Point(
-                    (px.0 - p0.0) * display_width,
-                    (px.1 - p0.1) * display_height,
-                );
-                let uy = Point(
-                    (py.0 - p0.0) * display_width,
-                    (py.1 - p0.1) * display_height,
-                );
-                let norm = |point: Point| {
-                    let len = point.0.hypot(point.1);
-                    Point(point.0 / len, point.1 / len)
-                };
-                let nx = norm(ux);
-                let ny = norm(uy);
-                assert!((nx.0 - axes.x.0).abs() < 1e-10);
-                assert!((nx.1 - axes.x.1).abs() < 1e-10);
-                assert!((ny.0 - axes.y.0).abs() < 1e-10);
-                assert!((ny.1 - axes.y.1).abs() < 1e-10);
-                let midpoint = to_pdf(Point(
-                    f64::from(raster.width()) * 0.5,
-                    f64::from(raster.height()) * 0.5,
-                ));
-                assert!((60.0..=370.0).contains(&midpoint.0));
-                assert!((90.0..=280.0).contains(&midpoint.1));
-                let expected = angle.to_radians();
-                let (s, c) = expected.sin_cos();
-                let target = if reflected {
-                    Point(-c, s)
-                } else {
-                    Point(c, -s)
-                };
-                assert!(
-                    nx.0.mul_add(target.0, nx.1 * target.1) > 0.99999,
-                    "page {number}: incorrect source-text orientation"
-                );
-                Ok(vec![OcrLine {
-                    text: "AFFINE RASTER".into(),
-                    confidence: 0.99,
-                    quad: [
-                        to_pdf(Point(40.0, 90.0)),
-                        to_pdf(Point(480.0, 90.0)),
-                        to_pdf(Point(480.0, 40.0)),
-                        to_pdf(Point(40.0, 40.0)),
-                    ],
-                    reviewed: false,
-                }])
+                Ok(assert_rectified_affine_frame(
+                    &raster, to_pdf, mapper, axes, number, angle, reflected,
+                ))
             },
         )?
         .ok_or("rectified native OCR rejected")?;
