@@ -143,7 +143,7 @@ fn isolated_paint_does_not_modify_other_visible_uses_or_reserved_aliases()
             .find(|paint| paint.page == page.get())
             .ok_or("missing first image")?;
         let masked = mask_source_object(
-            original,
+            metadata.source(),
             ObjectId::new(
                 i32::try_from(first.object_number)?,
                 i32::from(first.generation),

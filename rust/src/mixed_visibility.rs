@@ -117,7 +117,7 @@ pub fn prove_mixed_source_text(
                 masked_cache.insert(
                     paint.source_id.clone(),
                     mask_source_object(
-                        document.original_bytes(),
+                        document.source(),
                         source_object,
                         &source.lines,
                         minimum_confidence,

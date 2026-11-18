@@ -59,7 +59,7 @@ pub fn mask_source_text(
     min_confidence: f64,
 ) -> Result<Option<MaskedSourcePdf>, Error> {
     let mut doc = EditDocument::from_bytes(original.to_vec())?;
-    let Some(masked) = mask_source_object(original, source_id, lines, min_confidence)? else {
+    let Some(masked) = mask_source_object(doc.source(), source_id, lines, min_confidence)? else {
         return Ok(None);
     };
     *doc.edit_object(source_id)? = masked.object;
@@ -76,7 +76,7 @@ pub fn mask_source_text(
 /// # Errors
 /// Returns an error for invalid source polygons or a malformed source PDF.
 pub fn mask_source_object(
-    original: &[u8],
+    source: &SourcePdf,
     source_id: ObjectId,
     lines: &[OcrLine],
     min_confidence: f64,
@@ -91,7 +91,6 @@ pub fn mask_source_object(
     if eligible.is_empty() {
         return Ok(None);
     }
-    let source = pdf_redox::SourcePdf::from_bytes(original.to_vec())?;
     let object = source.materialize(source_id)?;
     let Some(mut image) = decode_native_samples(&source, source_id, &object)? else {
         return Ok(None);
