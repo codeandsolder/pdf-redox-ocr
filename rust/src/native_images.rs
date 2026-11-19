@@ -124,6 +124,16 @@ impl NativeImageBudget {
     }
 }
 
+/// Decode only the exact raster dimensions from Poppler's preflight inventory.
+/// A missing, malformed or mismatched optional source is handled by page OCR.
+fn decode_inventory_png(file: &Path, entry: &ImageInventoryEntry) -> Option<RgbImage> {
+    if image::image_dimensions(file).ok()? != (entry.width, entry.height) {
+        return None;
+    }
+    let rgb = image::open(file).ok()?.into_rgb8();
+    (rgb.dimensions() == (entry.width, entry.height)).then_some(rgb)
+}
+
 fn list_native_images(pdf: &Path, arguments: &[String]) -> Result<Vec<ImageInventoryEntry>, Error> {
     let mut args = arguments.to_vec();
     args.push("-list".to_owned());
@@ -156,8 +166,8 @@ fn list_native_images(pdf: &Path, arguments: &[String]) -> Result<Vec<ImageInven
 /// Candidate images exceeding resource ceilings are skipped rather than loaded.
 ///
 /// # Errors
-/// Returns an error when Poppler fails, the image inventory is malformed or a
-/// a source raster with matching metadata cannot be decoded.
+/// Returns an error if the inventory itself cannot be read or is malformed.
+/// Unsupported source extraction/decoding leaves that source to page OCR.
 pub fn native_source_images(
     pdf: &Path,
     selected: &[PageNumber],
@@ -220,10 +230,9 @@ pub fn native_source_images(
             .stderr(Stdio::piped())
             .output()?;
         if !extract.status.success() {
-            return Err(Error::Poppler(format!(
-                "pdfimages native extraction failed: {}",
-                String::from_utf8_lossy(&extract.stderr)
-            )));
+            // Some valid PDFs contain images that pdfimages cannot export to
+            // PNG, even when pdftoppm can render the page normally.
+            continue;
         }
         for entry in candidates {
             let Some(source_id) = &entry.source_id else {
@@ -239,16 +248,9 @@ pub fn native_source_images(
             // Poppler indexes all emitted images including masks. The summary
             // ordinal is the same ordinal used for generated PNG filenames.
             let file = prefix.with_file_name(format!("image-{:03}.png", entry.number));
-            let rgb = image::open(&file)
-                .map_err(|error| {
-                    Error::Invalid(format!("unable to decode source {source_id}: {error}"))
-                })?
-                .into_rgb8();
-            if rgb.width() != entry.width || rgb.height() != entry.height {
-                return Err(Error::Invalid(format!(
-                    "pdfimages source {source_id} raster dimensions do not match inventory"
-                )));
-            }
+            let Some(rgb) = decode_inventory_png(&file, entry) else {
+                continue;
+            };
             used_pixels += pixels;
             decoded.insert(source_id.clone(), rgb);
         }
@@ -258,7 +260,10 @@ pub fn native_source_images(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_inventory_line;
+    use super::{ImageInventoryEntry, decode_inventory_png, parse_inventory_line};
+    use crate::PageNumber;
+    use image::{Rgb, RgbImage};
+    use std::fs;
 
     #[test]
     fn inventory_preserves_pdf_source_identity_across_repeated_pages() -> Result<(), crate::Error> {
@@ -289,6 +294,34 @@ mod tests {
                 })?;
         assert_eq!(tagged_inline.source_id, None);
         assert_eq!((tagged_inline.width, tagged_inline.height), (400, 400));
+        Ok(())
+    }
+
+    #[test]
+    fn optional_png_decode_rejects_missing_corrupt_or_mismatched_sources()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("image-000.png");
+        let mut entry = ImageInventoryEntry {
+            page: PageNumber::new(1)?,
+            number: 0,
+            source_id: Some("9:0".into()),
+            kind: "image".into(),
+            width: 2,
+            height: 3,
+        };
+        assert!(decode_inventory_png(&path, &entry).is_none());
+        fs::write(&path, b"not a PNG")?;
+        assert!(decode_inventory_png(&path, &entry).is_none());
+
+        let pixels = RgbImage::from_pixel(2, 3, Rgb([12, 23, 34]));
+        pixels.save(&path)?;
+        let decoded = decode_inventory_png(&path, &entry).ok_or("valid PNG rejected")?;
+        assert_eq!(decoded.dimensions(), (2, 3));
+        assert_eq!(decoded.get_pixel(0, 0).0, [12, 23, 34]);
+
+        entry.width = 3;
+        assert!(decode_inventory_png(&path, &entry).is_none());
         Ok(())
     }
 }
