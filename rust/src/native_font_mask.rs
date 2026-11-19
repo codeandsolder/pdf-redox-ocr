@@ -93,12 +93,9 @@ fn update_selected_font_from_gs(
     selected: &mut bool,
 ) -> Result<(), Error> {
     let mut operands = instruction.operands();
-    let name = match (operands.next(), operands.next()) {
-        (Some(HayroObject::Name(name)), None) => name,
-        _ => {
-            *selected = false;
-            return Ok(());
-        }
+    let (Some(HayroObject::Name(name)), None) = (operands.next(), operands.next()) else {
+        *selected = false;
+        return Ok(());
     };
     let Some(table) = resources.get(b"ExtGState".as_slice()) else {
         *selected = false;
