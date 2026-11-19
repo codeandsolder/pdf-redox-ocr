@@ -28,7 +28,7 @@ pub struct SourceObservation {
 /// Project PDF image-source space into each original PDF paint occurrence.
 ///
 /// # Errors
-/// Rejects zero source dimensions or non-finite PDF transform/line coordinates.
+/// Rejects mismatched source dimensions, out-of-bounds image quads, or non-finite projections.
 pub fn map_observations_to_paint(
     source: &SourceObservation,
     paint: &ImagePaint,
@@ -42,17 +42,26 @@ pub fn map_observations_to_paint(
             "source OCR pixel dimensions differ from PDF `XObject`".into(),
         ));
     }
+    let width = f64::from(source.width);
+    let height = f64::from(source.height);
     let matrix = PdfMatrix(paint.ctm);
     let mapped = source
         .lines
         .iter()
         .map(|line| {
-            let projected = line.quad.map(|point| {
-                matrix.point(Point(
-                    point.0 / f64::from(source.width),
-                    point.1 / f64::from(source.height),
-                ))
-            });
+            if line.quad.iter().any(|point| {
+                !point.0.is_finite()
+                    || !point.1.is_finite()
+                    || !(0.0..=width).contains(&point.0)
+                    || !(0.0..=height).contains(&point.1)
+            }) {
+                return Err(Error::Invalid(
+                    "OCR quad outside native source image".into(),
+                ));
+            }
+            let projected = line
+                .quad
+                .map(|point| matrix.point(Point(point.0 / width, point.1 / height)));
             if projected
                 .iter()
                 .any(|point| !point.0.is_finite() || !point.1.is_finite())
@@ -107,12 +116,12 @@ pub struct SourceOnlyResult {
 /// Decide whether source OCR can replace ordinary page OCR.
 ///
 /// A recognized image is not enough: all actual painted images must be
-/// decoded/recognized, all text polygons inside the known clips, there must be
+/// decoded/recognized, all source quads inside the native raster and known clips, there must be
 /// at least one positive text observation, and every image layer must be
 /// mutually non-overlapping.
 ///
 /// # Errors
-/// Returns an error for invalid source geometry or non-finite PDF-space projections.
+/// Returns an error for invalid page numbering; unusable source observations trigger page fallback.
 pub fn source_only_pages(
     report: &PaintReport,
     recognized: &BTreeMap<String, SourceObservation>,
@@ -134,11 +143,16 @@ pub fn source_only_pages(
             let known_source = recognized.get(&paint.source_id);
             let mut safe = paint.unsafe_reasons.is_empty() && known_source.is_some();
             if safe && let Some(observation) = known_source {
-                let mapped = map_observations_to_paint(observation, paint)?;
-                for line in &mapped {
-                    safe &= paint.wholly_visible_in_clip(&line.quad);
+                match map_observations_to_paint(observation, paint) {
+                    Ok(mapped) => {
+                        safe &= mapped
+                            .iter()
+                            .all(|line| paint.wholly_visible_in_clip(&line.quad));
+                        lines.extend(mapped);
+                    }
+                    Err(Error::Invalid(_)) => safe = false,
+                    Err(error) => return Err(error),
                 }
-                lines.extend(mapped);
             }
             evidence.push(ImagePaintEvidence {
                 page_quad: paint.page_quad,
@@ -253,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_source_observation_never_approves_page() -> Result<(), crate::Error> {
+    fn missing_or_invalid_source_observation_never_approves_page() -> Result<(), crate::Error> {
         let report = PaintReport {
             pages: vec![PagePaintSummary {
                 page: 1,
@@ -282,6 +296,29 @@ mod tests {
             }],
         };
         let result = source_only_pages(&report, &BTreeMap::new())?;
+        assert!(result.approved_pages.is_empty());
+
+        let invalid_source = SourceObservation {
+            width: 200,
+            height: 100,
+            lines: vec![OcrLine {
+                text: "Outside image".into(),
+                confidence: 0.99,
+                quad: quad(150.0, 90.0),
+                reviewed: false,
+            }],
+        };
+        assert!(super::map_observations_to_paint(&invalid_source, &report.placements[0]).is_err());
+        let result = source_only_pages(&report, &BTreeMap::from([("9:0".into(), invalid_source)]))?;
+        assert!(result.approved_pages.is_empty());
+        assert!(result.pages.is_empty());
+
+        let wrong_size = SourceObservation {
+            width: 199,
+            height: 100,
+            lines: Vec::new(),
+        };
+        let result = source_only_pages(&report, &BTreeMap::from([("9:0".into(), wrong_size)]))?;
         assert!(result.approved_pages.is_empty());
         Ok(())
     }
