@@ -34,6 +34,12 @@ After compilation, the prototype entrypoint is:
 Native source decoding is explicitly bounded by per-source, total-resident,
 source-count and single-extraction pixel ceilings. Those controls are exposed
 as CLI options. If an image cannot fit, its page uses ordinary page OCR.
+Optional Poppler native PNG extraction and decoding failures likewise trigger
+page OCR, after preflighting exported raster dimensions against inventory bounds.
+The PP-OCRv6 Small detector retains original detail up to 2048 pixels on its
+longest side rather than downscaling every page to the OAR 960-pixel preset;
+smaller native images are not artificially enlarged. The detector profile is
+included in the OCR draft's model provenance.
 
 The CLI recognizes native image XObjects once per source and skips page OCR
 on independently paint-safe raster-only pages. On mixed pages, native source

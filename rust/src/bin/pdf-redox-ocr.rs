@@ -618,12 +618,12 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     }
     let raster_draft = OcrDraft::new(
         digest.clone(),
-        "oar-ocr PP-OCRv6 Small native-source".into(),
+        format!("{} native-source", OcrInference::MODEL_PROFILE),
         raster_pages,
     );
     let fallback_draft = OcrDraft::new(
         digest,
-        "oar-ocr PP-OCRv6 Small page-fallback".into(),
+        format!("{} page-fallback", OcrInference::MODEL_PROFILE),
         fallback_pages,
     );
     let (draft, stats, _proposals) = merge_ocr(MergeInput {

@@ -4,7 +4,11 @@
 //! All recognitions use the original page-image frame, with no `UVDoc` warping.
 
 use image::RgbImage;
-use oar_ocr::prelude::{OAROCR, OAROCRBuilder, PpOcrV6Size};
+use oar_ocr::{
+    domain::tasks::TextDetectionConfig,
+    prelude::{OAROCR, OAROCRBuilder, PpOcrV6Size},
+    processors::LimitType,
+};
 
 use crate::{
     Error,
@@ -17,7 +21,28 @@ pub struct OcrInference {
     backend: OAROCR,
 }
 
+/// Retain actual page/native-source detail up to a bounded detector size.
+///
+/// The OAR preset limits the longest side to 960 pixels, which erases
+/// small supplier-PDF labels. Unlike minimum-side resizing, a 2048-pixel
+/// maximum never needlessly upscales tiny embedded image sources.
+/// Postprocessing thresholds remain the official PP-OCRv6 Small defaults.
+fn small_detector_config() -> TextDetectionConfig {
+    TextDetectionConfig {
+        score_threshold: 0.2,
+        box_threshold: 0.45,
+        unclip_ratio: 1.4,
+        max_candidates: 3000,
+        limit_side_len: Some(2048),
+        limit_type: Some(LimitType::Max),
+        max_side_len: Some(2048),
+    }
+}
+
 impl OcrInference {
+    /// Stable draft provenance including the detector's resolution policy.
+    pub const MODEL_PROFILE: &str = "oar-ocr PP-OCRv6 Small detector-max-2048";
+
     /// Initialize the official PP-OCRv6 Small detector/recognizer pair.
     ///
     /// Model files are resolved using the configured oar-ocr model registry,
@@ -27,6 +52,7 @@ impl OcrInference {
     /// Returns an error when models or ONNX Runtime cannot initialize.
     pub fn pp_ocrv6_small() -> Result<Self, Error> {
         let backend = OAROCRBuilder::pp_ocrv6(PpOcrV6Size::Small)
+            .text_detection_config(small_detector_config())
             .image_batch_size(1)
             .region_batch_size(4)
             .build()
@@ -138,9 +164,21 @@ fn image_polygon_to_quad(
 
 #[cfg(test)]
 mod tests {
-    use super::image_polygon_to_quad;
+    use super::{image_polygon_to_quad, small_detector_config};
     use crate::geometry::{DisplayMapper, PageBox, Point, Rotation};
-    use oar_ocr::processors::Point as OarPoint;
+    use oar_ocr::processors::{LimitType, Point as OarPoint};
+
+    #[test]
+    fn detector_retains_small_source_pixels_without_upscaling() {
+        let config = small_detector_config();
+        assert_eq!(config.limit_side_len, Some(2048));
+        assert!(matches!(config.limit_type, Some(LimitType::Max)));
+        assert_eq!(config.max_side_len, Some(2048));
+        assert_eq!(config.score_threshold, 0.2);
+        assert_eq!(config.box_threshold, 0.45);
+        assert_eq!(config.unclip_ratio, 1.4);
+        assert_eq!(config.max_candidates, 3000);
+    }
 
     #[test]
     fn oar_bounding_boxes_translate_to_ccw_pdf_space() -> Result<(), crate::Error> {
