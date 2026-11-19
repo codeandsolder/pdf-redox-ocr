@@ -27,7 +27,7 @@ pub struct OcrInference {
 /// small supplier-PDF labels. Unlike minimum-side resizing, a 2048-pixel
 /// maximum never needlessly upscales tiny embedded image sources.
 /// Postprocessing thresholds remain the official PP-OCRv6 Small defaults.
-fn small_detector_config() -> TextDetectionConfig {
+const fn small_detector_config() -> TextDetectionConfig {
     TextDetectionConfig {
         score_threshold: 0.2,
         box_threshold: 0.45,

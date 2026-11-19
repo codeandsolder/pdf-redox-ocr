@@ -638,13 +638,13 @@ mod tests {
         };
         let mut unknown = original.clone();
         unknown.source_id.clear();
-        assert!(check(&[unknown], &[proof.clone()]).is_err());
+        assert!(check(&[unknown], std::slice::from_ref(&proof)).is_err());
         let mut unbound_proof = proof.clone();
         unbound_proof.source_id.clear();
-        assert!(check(&[original.clone()], &[unbound_proof]).is_err());
+        assert!(check(std::slice::from_ref(&original), &[unbound_proof]).is_err());
         let mut wrong_paint = proof.clone();
         wrong_paint.paint_index += 1;
-        let (unchanged, stats, audit) = check(&[original.clone()], &[wrong_paint])?;
+        let (unchanged, stats, audit) = check(std::slice::from_ref(&original), &[wrong_paint])?;
         assert_eq!(unchanged.pages[1].lines.len(), 1);
         assert_eq!(stats.nonoverlapping_image_lines_added, 0);
         assert!(!audit[0].verified_visible_source);
