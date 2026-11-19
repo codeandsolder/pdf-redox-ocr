@@ -108,21 +108,32 @@ pub fn prove_mixed_source_text(
             let source = recognized
                 .get(&paint.source_id)
                 .ok_or_else(|| Error::Invalid("source recognition vanished during proof".into()))?;
+            if source.width == 0
+                || source.height == 0
+                || source.width != paint.width
+                || source.height != paint.height
+            {
+                continue;
+            }
             if !masked_cache.contains_key(&paint.source_id) {
                 let source_object = ObjectId::new(
                     i32::try_from(paint.object_number)
                         .map_err(|_| Error::Invalid("source object number outside i32".into()))?,
                     i32::from(paint.generation),
                 );
-                masked_cache.insert(
-                    paint.source_id.clone(),
-                    mask_source_object(
-                        document.source(),
-                        source_object,
-                        &source.lines,
-                        minimum_confidence,
-                    )?,
-                );
+                let masked = match mask_source_object(
+                    document.source(),
+                    source_object,
+                    &source.lines,
+                    minimum_confidence,
+                ) {
+                    Ok(masked) => masked,
+                    // Unusable native OCR coordinates are not a reason to
+                    // abandon otherwise valid full-page OCR.
+                    Err(Error::Invalid(_)) => None,
+                    Err(error) => return Err(error),
+                };
+                masked_cache.insert(paint.source_id.clone(), masked);
             }
             let Some(masked) = masked_cache.get(&paint.source_id).and_then(Option::as_ref) else {
                 continue;

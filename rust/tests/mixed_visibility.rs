@@ -93,3 +93,58 @@ fn source_isolation_accepts_visible_and_rejects_opaque_occlusion()
     assert!(selected.contains(&first.source_id));
     Ok(())
 }
+
+#[test]
+fn invalid_native_recognition_retains_page_fallback() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = tempfile::tempdir()?;
+    let path = tmp.path().join("source-geometry.pdf");
+    fs::write(
+        &path,
+        include_bytes!("fixtures/mixed-paint-visible-occluded.pdf"),
+    )?;
+    let document = PdfMetadata::open(&path)?;
+    let pages = [PageNumber::new(1)?, PageNumber::new(2)?];
+    let painted = enumerate_image_paints(&document, &pages)?;
+    let id = painted.placements[0].source_id.clone();
+    let policy = RenderPolicy {
+        max_side: 1600,
+        dpi: 72,
+    };
+    let invalid_line = OcrLine {
+        text: "OUTSIDE IMAGE".into(),
+        confidence: 0.99,
+        quad: [
+            Point(1150.0, 120.0),
+            Point(1250.0, 120.0),
+            Point(1250.0, 200.0),
+            Point(1150.0, 200.0),
+        ],
+        reviewed: false,
+    };
+    for source in [
+        SourceObservation {
+            width: 1200,
+            height: 300,
+            lines: vec![invalid_line.clone()],
+        },
+        SourceObservation {
+            width: 1199,
+            height: 300,
+            lines: vec![invalid_line],
+        },
+    ] {
+        let result = prove_mixed_source_text(
+            &path,
+            &document,
+            &painted,
+            &BTreeMap::from([(id.clone(), source)]),
+            &pages,
+            policy,
+            0.97,
+        )?;
+        assert!(result.proofs.is_empty());
+        assert!(result.observations.is_empty());
+        assert!(result.proven_pages.is_empty());
+    }
+    Ok(())
+}
