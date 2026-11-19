@@ -1,4 +1,4 @@
-//! Noncanonical Form BBox coordinates are common in real supplier PDFs.
+//! Noncanonical Form rectangle coordinates are common in real supplier PDFs.
 
 #![cfg(feature = "pdf-integration")]
 
