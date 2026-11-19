@@ -14,7 +14,10 @@ use pdf_redox::{EditDocument, ObjectHandle, ObjectId, OwnedDictionary, OwnedObje
 use crate::{
     Error, PageNumber,
     paint_isolation::make_decoded_stream,
-    paint_scan::{font_searchable, inherited_page_resources, page_content, resolve_dictionary},
+    paint_scan::{
+        extgstate_font_searchability, font_searchable, inherited_page_resources, page_content,
+        resolve_dictionary,
+    },
     pdf_metadata::PdfMetadata,
 };
 
@@ -80,6 +83,39 @@ fn set_font(instruction: &hayro_syntax::content::Instruction<'_, '_>) -> Option<
     }
 }
 
+/// Apply any font selection executed by a named extended graphics state.
+/// An unresolved resource leaves the selected font untrusted, so native ink
+/// will remain visible rather than accidentally masking a graphical font.
+fn update_selected_font_from_gs(
+    source: &SourcePdf,
+    resources: &OwnedDictionary,
+    instruction: &hayro_syntax::content::Instruction<'_, '_>,
+    selected: &mut bool,
+) -> Result<(), Error> {
+    let mut operands = instruction.operands();
+    let name = match (operands.next(), operands.next()) {
+        (Some(HayroObject::Name(name)), None) => name,
+        _ => {
+            *selected = false;
+            return Ok(());
+        }
+    };
+    let Some(table) = resources.get(b"ExtGState".as_slice()) else {
+        *selected = false;
+        return Ok(());
+    };
+    let table = resolve_dictionary(source, table)?;
+    let Some(raw) = table.get(name.as_ref()) else {
+        *selected = false;
+        return Ok(());
+    };
+    let gs = resolve_dictionary(source, raw)?;
+    if let Some(searchable) = extgstate_font_searchability(source, &gs)? {
+        *selected = searchable;
+    }
+    Ok(())
+}
+
 /// One source-content instruction replaced without losing neighboring bytes.
 struct ByteEdit {
     span: std::ops::Range<usize>,
@@ -142,6 +178,12 @@ impl FormRewriter<'_> {
                     };
                 }
                 b"Tr" => current.render_mode = set_render_mode(&instruction)?,
+                b"gs" => update_selected_font_from_gs(
+                    self.source,
+                    &resources,
+                    &instruction,
+                    &mut current.font_searchable,
+                )?,
                 b"Tj" | b"TJ" | b"'" | b"\"" => {
                     self.rewrite_show(&instruction, bytes, &current, &mut edits);
                 }

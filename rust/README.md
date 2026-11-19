@@ -68,12 +68,15 @@ invisible shows and text-clipping modes remain as originally painted. Nested
 and reused Form XObjects are cloned copy-on-write for each exact Do
 invocation, preserving the selected font object and rendering mode from the
 calling graphics state, including q/Q saves and Form-local resource-name
-collisions. Native font classification happens when Tf executes rather than
-re-resolving its resource name inside another Form. Independent Form calls
+collisions. Native font classification is captured when Tf executes or
+when an extended graphics state selects a font through its Font array;
+the font object's identity is inherited through nested Forms rather than
+re-resolved by name against their different resource tables. The native
+paint scanner applies the same selection rule. Independent Form calls
 may therefore be hidden, already invisible, clipping, or graphical Type3,
-without modifying sibling invocations. Existing
-native text extraction, source visibility proofs, the input SHA-256 and the
-final vector overlay still use the **original PDF**. The diagnostic CLI option
+without modifying sibling invocations. Existing native text extraction,
+source visibility proofs, the input SHA-256 and the final vector overlay
+still use the **original PDF**. The diagnostic CLI option
 `--keep-native-text` disables only this render-time native font suppression.
 The original PDF is never modified.
 
@@ -91,10 +94,12 @@ do not hide Type3 ink on sibling pages, and that extracted text and unselected
 pages remain unchanged. A further three-page fixture exercises multiple
 invocations of the same Form under different Tf/Tr modes, nested Forms,
 Type3 calls, explicit Form-local font aliases that disagree with inherited
-fonts, and collision-safe resource aliases. This fixes a cross-page Form
-mutation bug in the
-current Python reference, which remains the production baseline until corpus
-and performance parity is demonstrated.
+fonts, and collision-safe resource aliases. A two-page extended-graphics-state
+fixture additionally exercises native and graphical fonts selected through
+Font entries, selection inside Forms, original text extraction and unchanged
+unselected-page pixels. This avoids the cross-page Form mutation found in
+the Python reference, which remains the production baseline until corpus and
+performance parity is demonstrated.
 
 The source core is tested using stable Rust 1.100 with
 cargo +stable test --locked --no-default-features. The integrated crate

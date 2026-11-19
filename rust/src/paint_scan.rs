@@ -218,13 +218,23 @@ pub struct PaintReport {
     pub pages: Vec<PagePaintSummary>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+enum SelectedFont {
+    #[default]
+    Unsearchable,
+    Searchable,
+}
+
 #[derive(Clone, Debug)]
 struct State {
     ctm: PdfMatrix,
     clips: Vec<Quad>,
     clip_unknown: bool,
     gs_unsafe: bool,
-    font: Option<Vec<u8>>,
+    // The PDF graphics state holds an already selected *font object*.
+    // Once Tf executes, nested Forms must inherit its classification even
+    // when their own Resources reuse the same font name for another font.
+    font: SelectedFont,
     render_mode: u8,
     text_open: bool,
 }
@@ -236,7 +246,7 @@ impl State {
             clips: vec![PdfMatrix::IDENTITY.rect_quad(box_)],
             clip_unknown: false,
             gs_unsafe: false,
-            font: None,
+            font: SelectedFont::default(),
             render_mode: 0,
             text_open: false,
         }
@@ -505,6 +515,10 @@ pub(crate) fn font_searchable(
     let Some(font) = fonts.get(font_name) else {
         return Ok(false);
     };
+    font_object_searchable(source, font)
+}
+
+fn font_object_searchable(source: &SourcePdf, font: &OwnedObject) -> Result<bool, Error> {
     let font = resolve_dictionary(source, font)?;
     let kind = subtype(source, &font)?.unwrap_or_default();
     if kind.as_slice() == b"Type3" {
@@ -545,6 +559,25 @@ pub(crate) fn font_searchable(
                 | b"Times-Italic"
                 | b"Times-BoldItalic"
         ))
+}
+
+/// A graphics-state `Font` entry selects a font *object* and size independently
+/// of any name previously used by `Tf`. A missing entry leaves the font intact.
+pub(crate) fn extgstate_font_searchability(
+    source: &SourcePdf,
+    gs: &OwnedDictionary,
+) -> Result<Option<bool>, Error> {
+    let Some(raw) = gs.get(b"Font".as_slice()) else {
+        return Ok(None);
+    };
+    let OwnedObject::Array(values) = resolve_owned(source, raw.clone())? else {
+        return Err(Error::Invalid("graphics-state Font must be a pair".into()));
+    };
+    let [font, size]: [OwnedObject; 2] = values
+        .try_into()
+        .map_err(|_| Error::Invalid("graphics-state Font must have two elements".into()))?;
+    let _ = resolved_number(source, &size)?;
+    font_object_searchable(source, &font).map(Some)
 }
 
 fn opaque_extgs(source: &SourcePdf, gs: &OwnedDictionary) -> Result<bool, Error> {
@@ -849,24 +882,49 @@ impl ScanContext<'_> {
 }
 
 impl ScanContext<'_> {
-    /// Classify a PDF text show for native searchability without masking Type3 ink.
-    fn handle_text_show(
-        &mut self,
-        resources: &OwnedDictionary,
-        state: &State,
-    ) -> Result<(), Error> {
+    /// Classify shows by the font already selected in graphics state, not
+    /// by a name resolved against this stream's potentially different resources.
+    const fn handle_text_show(&mut self, state: &State) {
         if state.render_mode >= 4 {
             self.summary.non_image_visual_paint += 1;
         } else if state.render_mode != 3 {
-            let native = match state.font.as_deref() {
-                Some(font) => font_searchable(self.source, resources, font)?,
-                None => false,
-            };
-            if native {
+            if matches!(state.font, SelectedFont::Searchable) {
                 self.summary.native_searchable_shows += 1;
             } else {
                 self.summary.non_image_visual_paint += 1;
             }
+        }
+    }
+
+    fn apply_extended_graphics_state(
+        &mut self,
+        instruction: &hayro_syntax::content::Instruction<'_, '_>,
+        resources: &OwnedDictionary,
+        state: &mut State,
+    ) -> Result<(), Error> {
+        let name = instruction_name(instruction);
+        let raw = name
+            .as_deref()
+            .map(|name| named_resource(self.source, resources, b"ExtGState", name))
+            .transpose()?
+            .flatten();
+        let safe = match raw {
+            Some(raw) => {
+                let gs = resolve_dictionary(self.source, &raw)?;
+                if let Some(searchable) = extgstate_font_searchability(self.source, &gs)? {
+                    state.font = if searchable {
+                        SelectedFont::Searchable
+                    } else {
+                        SelectedFont::Unsearchable
+                    };
+                }
+                opaque_extgs(self.source, &gs)?
+            }
+            None => false,
+        };
+        if !safe {
+            self.summary.unsupported_extgs += 1;
+            state.gs_unsafe = true;
         }
         Ok(())
     }
@@ -932,27 +990,16 @@ impl ScanContext<'_> {
                     }
                 }
                 b"gs" => {
-                    let name = instruction_name(&instruction);
-                    let ext = name
-                        .as_deref()
-                        .map(|name| named_resource(self.source, resources, b"ExtGState", name))
-                        .transpose()?
-                        .flatten();
-                    let safe = match ext {
-                        Some(raw) => {
-                            opaque_extgs(self.source, &resolve_dictionary(self.source, &raw)?)?
-                        }
-                        None => false,
-                    };
-                    if !safe {
-                        self.summary.unsupported_extgs += 1;
-                        state.gs_unsafe = true;
-                    }
+                    self.apply_extended_graphics_state(&instruction, resources, &mut state)?;
                 }
                 b"Tf" => {
                     state.font = match instruction.operands().next() {
-                        Some(HayroObject::Name(name)) => Some(name.as_ref().to_vec()),
-                        _ => None,
+                        Some(HayroObject::Name(name))
+                            if font_searchable(self.source, resources, name.as_ref())? =>
+                        {
+                            SelectedFont::Searchable
+                        }
+                        _ => SelectedFont::Unsearchable,
                     };
                 }
                 b"Tr" => {
@@ -970,7 +1017,7 @@ impl ScanContext<'_> {
                 }
                 b"BT" => state.text_open = true,
                 b"ET" => state.text_open = false,
-                b"Tj" | b"TJ" | b"'" | b"\"" => self.handle_text_show(resources, &state)?,
+                b"Tj" | b"TJ" | b"'" | b"\"" => self.handle_text_show(&state),
                 b"sh" => self.summary.non_image_visual_paint += 1,
                 b"Do" => {
                     self.visit_do(&instruction, resources, &state, depth, next_do)?;
@@ -1096,6 +1143,38 @@ mod tests {
         let composed = result.point(point);
         assert!((direct.0 - composed.0).abs() < 1e-8);
         assert!((direct.1 - composed.1).abs() < 1e-8);
+    }
+
+    #[test]
+    fn reused_forms_inherit_the_actual_selected_font_not_local_aliases() -> Result<(), crate::Error>
+    {
+        // On page 1, a Form whose /F points at Type3 inherits the caller's
+        // selected Type1 /F and paints searchable text. On page 2, the
+        // reverse Form has a local /G pointing at Type1 but inherits a Type3
+        // selected by the caller. The call-site /Tr modes and q/Q stacks
+        // independently preserve invisible, clipping, and visual text.
+        let fixture = include_bytes!("../tests/fixtures/native-font-invocation-context.pdf");
+        let metadata = PdfMetadata::from_bytes(fixture.to_vec())?;
+        let pages = [
+            PageNumber::new(1)?,
+            PageNumber::new(2)?,
+            PageNumber::new(3)?,
+        ];
+        let report = enumerate_image_paints(&metadata, &pages)?;
+        assert!(report.placements.is_empty());
+        for (page, native, non_image) in [(1, 5, 2), (2, 2, 5), (3, 4, 2)] {
+            let result = report
+                .pages
+                .iter()
+                .find(|entry| entry.page == page)
+                .ok_or_else(|| crate::Error::Invalid("scan omitted fixture page".into()))?;
+            assert_eq!(result.page, page);
+            assert_eq!(result.native_searchable_shows, native, "page {page}");
+            assert_eq!(result.non_image_visual_paint, non_image, "page {page}");
+            assert_eq!(result.unknown_paint, 0, "page {page}");
+            assert_eq!(result.unbalanced_q, 0, "page {page}");
+        }
+        Ok(())
     }
 
     #[test]
