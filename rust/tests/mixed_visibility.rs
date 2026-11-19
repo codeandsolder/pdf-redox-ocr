@@ -64,11 +64,8 @@ fn source_isolation_accepts_visible_and_rejects_opaque_occlusion()
     assert_eq!(evidence.audited.len(), 2);
     assert_eq!(evidence.proofs.len(), 1);
     assert_eq!(evidence.proofs[0].page, 1);
-    assert_eq!(
-        evidence.proofs[0].source_id.as_deref(),
-        Some(first.source_id.as_str())
-    );
-    assert_eq!(evidence.proofs[0].paint_index, Some(first.paint_index));
+    assert_eq!(evidence.proofs[0].source_id, first.source_id);
+    assert_eq!(evidence.proofs[0].paint_index, first.paint_index);
     assert_eq!(evidence.proofs[0].text, "CAPACITOR 47uF 16V");
     assert!(evidence.proven_pages.contains(&pages[0]));
     assert!(!evidence.proven_pages.contains(&pages[1]));

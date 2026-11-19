@@ -22,10 +22,10 @@ use crate::{
 pub struct ImageObservation {
     /// One-based page number.
     pub page: u32,
-    /// Source object identifier, if known.
-    pub source_id: Option<String>,
-    /// Expanded PDF paint invocation ordinal, if known.
-    pub paint_index: Option<u32>,
+    /// Required original source object identifier.
+    pub source_id: String,
+    /// Required zero-based expanded PDF paint invocation ordinal.
+    pub paint_index: u32,
     /// OCR line in the page's PDF user-space frame.
     pub line: OcrLine,
 }
@@ -36,9 +36,9 @@ pub struct VisibilityProof {
     /// One-based page number.
     pub page: u32,
     /// Exact source-object identity.
-    pub source_id: Option<String>,
+    pub source_id: String,
     /// Exact expanded paint invocation.
-    pub paint_index: Option<u32>,
+    pub paint_index: u32,
     /// Recognized text, bound to a specific visible polygon.
     pub text: String,
     /// Recognized PDF-space polygon.
@@ -125,10 +125,10 @@ pub struct MergeProposal {
     pub page: u32,
     /// Candidate source text.
     pub raster_text: String,
-    /// Candidate source image.
-    pub source_id: Option<String>,
+    /// Required candidate source image identity.
+    pub source_id: String,
     /// Expanded paint invocation identity.
-    pub paint_index: Option<u32>,
+    pub paint_index: u32,
     /// Raw recognition confidence.
     pub raster_confidence: f64,
     /// Maximum page OCR overlap fraction.
@@ -168,6 +168,7 @@ fn proof_geometry_matches(first: &Quad, second: &Quad) -> bool {
 
 fn proof_matches(image: &ImageObservation, proof: &VisibilityProof) -> bool {
     proof.visible
+        && !image.source_id.is_empty()
         && proof.page == image.page
         && proof.source_id == image.source_id
         && proof.paint_index == image.paint_index
@@ -256,6 +257,18 @@ pub fn merge_ocr(
         if !selected_pages.contains(&PageNumber::new(image.page)?) {
             return Err(Error::Invalid(
                 "image observation for unselected page".into(),
+            ));
+        }
+        if image.source_id.is_empty() {
+            return Err(Error::Invalid(
+                "image observation missing source identity".into(),
+            ));
+        }
+    }
+    for proof in input.visibility_proofs {
+        if !selected_pages.contains(&PageNumber::new(proof.page)?) || proof.source_id.is_empty() {
+            return Err(Error::Invalid(
+                "visibility proof has invalid page or source identity".into(),
             ));
         }
     }
@@ -464,8 +477,8 @@ mod tests {
             .iter()
             .map(|observation| ImageObservation {
                 page: 2,
-                source_id: Some("8:0".into()),
-                paint_index: Some(1),
+                source_id: "8:0".into(),
+                paint_index: 1,
                 line: observation.clone(),
             })
             .collect::<Vec<_>>();
@@ -483,8 +496,8 @@ mod tests {
         let (raster, baseline, observations) = merge_fixture(sha256_file(sample.path())?);
         let original = observations[0].clone();
         let mut other = original.clone();
-        other.source_id = Some("37:0".into());
-        other.paint_index = Some(12);
+        other.source_id = "37:0".into();
+        other.paint_index = 12;
         let candidates = [original, other];
         let proofs = candidates
             .iter()
@@ -573,7 +586,7 @@ mod tests {
             assert_eq!(merged.pages[1].lines.len(), 2);
             assert_eq!(merged.pages[1].lines[1].text, "New image text");
             let mut wrong_source_proof = proof;
-            wrong_source_proof[0].source_id = Some("9:0".into());
+            wrong_source_proof[0].source_id = "9:0".into();
             let (rejected, _, _) = merge_ocr(MergeInput {
                 pdf: &path,
                 selected: &selected,
@@ -590,5 +603,56 @@ mod tests {
         })();
         fs::remove_file(path)?;
         result
+    }
+
+    #[test]
+    fn missing_or_mismatched_paint_provenance_never_admits_text()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let sample = tempfile::NamedTempFile::new()?;
+        fs::write(sample.path(), b"test image paint evidence identity")?;
+        let (raster, baseline, observations) = merge_fixture(sha256_file(sample.path())?);
+        let selected = [PageNumber::new(1)?, PageNumber::new(2)?];
+        let source_only = BTreeSet::from([selected[0]]);
+        let proven_pages = BTreeSet::from([selected[1]]);
+        let original = observations[0].clone();
+        let proof = VisibilityProof {
+            page: original.page,
+            source_id: original.source_id.clone(),
+            paint_index: original.paint_index,
+            text: original.line.text.clone(),
+            quad: original.line.quad,
+            visible: true,
+        };
+        let check = |observations: &[ImageObservation], proofs: &[VisibilityProof]| {
+            merge_ocr(MergeInput {
+                pdf: sample.path(),
+                selected: &selected,
+                raster: &raster,
+                image_observations: observations,
+                baseline: &baseline,
+                raster_only: &source_only,
+                proven_pages: &proven_pages,
+                visibility_proofs: proofs,
+                threshold: 0.97,
+            })
+        };
+        let mut unknown = original.clone();
+        unknown.source_id.clear();
+        assert!(check(&[unknown], &[proof.clone()]).is_err());
+        let mut unbound_proof = proof.clone();
+        unbound_proof.source_id.clear();
+        assert!(check(&[original.clone()], &[unbound_proof]).is_err());
+        let mut wrong_paint = proof.clone();
+        wrong_paint.paint_index += 1;
+        let (unchanged, stats, audit) = check(&[original.clone()], &[wrong_paint])?;
+        assert_eq!(unchanged.pages[1].lines.len(), 1);
+        assert_eq!(stats.nonoverlapping_image_lines_added, 0);
+        assert!(!audit[0].verified_visible_source);
+
+        let (accepted, stats, audit) = check(&[original], &[proof])?;
+        assert_eq!(accepted.pages[1].lines.len(), 2);
+        assert_eq!(stats.nonoverlapping_image_lines_added, 1);
+        assert!(audit[0].verified_visible_source);
+        Ok(())
     }
 }

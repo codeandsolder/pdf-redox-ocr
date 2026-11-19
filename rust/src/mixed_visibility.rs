@@ -249,14 +249,14 @@ impl PageProbe<'_> {
             }
             observations.push(ImageObservation {
                 page: self.page.get(),
-                source_id: Some(paint.source_id.clone()),
-                paint_index: Some(paint.paint_index),
+                source_id: paint.source_id.clone(),
+                paint_index: paint.paint_index,
                 line: line.clone(),
             });
             proofs.push(VisibilityProof {
                 page: self.page.get(),
-                source_id: Some(paint.source_id.clone()),
-                paint_index: Some(paint.paint_index),
+                source_id: paint.source_id.clone(),
+                paint_index: paint.paint_index,
                 text: line.text.clone(),
                 quad: line.quad,
                 visible: true,

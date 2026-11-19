@@ -88,7 +88,7 @@ fn attributes_repeated_direct_form_and_nested_form_paints() -> Result<(), Box<dy
             .filter(|proof| proof.page == page)
             .collect::<Vec<_>>();
         assert_eq!(proofs.len(), 1, "page {page}");
-        assert_eq!(proofs[0].paint_index, Some(first.paint_index));
+        assert_eq!(proofs[0].paint_index, first.paint_index);
         assert_eq!(proofs[0].text, "CAPACITOR 47uF 16V");
         assert!(result.proven_pages.contains(&PageNumber::new(page)?));
         let audits = result
