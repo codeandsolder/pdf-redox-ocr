@@ -110,8 +110,11 @@ uses zlib-rs-fast portable SIMD. Shared CI runs strict Clippy for both.
 
 A source-image result may replace full-page OCR only if the page is pure
 source-raster paint and every visible source was recognized. In mixed pages,
-additional source text requires matching source+expanded paint ID and an actual
-isolation/differential render visibility proof; no guessed overlap is enough.
+additional source text requires a nonempty source identity, exact expanded
+paint index and an actual isolation/differential render visibility proof;
+missing provenance can never authorize a line. Invalid native-source OCR quads
+or mismatched raster dimensions reject that source-only fast path and use
+ordinary page OCR without aborting the document.
 
 The complete parity gate is tracked in the Notion worklog:
 https://app.notion.com/p/41bf74be902081209382e49903e8f0ff
