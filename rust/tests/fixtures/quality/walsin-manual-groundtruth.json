@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "source_pdf_sha256": "321bf036eb8ec137b7f695489edcd8f7ded0bf29f94ff80e9d56f0f149186bee",
+  "provenance": "Manual visual transcription from Poppler-rendered Walsin.pdf page 5 (image reviewed at 125 DPI on 2026-11-20). PDF-space anchor centers were located using the OCR draft geometry, not used as transcription evidence. Focused technical-specification and graph-label sample, not representative corpus.",
+  "coordinate_system": "PDF user space",
+  "samples": [
+    {
+      "page": 5,
+      "center": [
+        376.7,
+        562.9
+      ],
+      "text": "Storage Temperature : -40°C to +125°C",
+      "kind": "technical"
+    },
+    {
+      "page": 5,
+      "center": [
+        429.8,
+        552.6
+      ],
+      "text": "Operating Ambient Temperature : -40°C to +125°C (without derating)",
+      "kind": "technical"
+    },
+    {
+      "page": 5,
+      "center": [
+        394.9,
+        530.6
+      ],
+      "text": "Insulation Resistance : 1000 Mega-ohm minimum",
+      "kind": "technical"
+    },
+    {
+      "page": 5,
+      "center": [
+        382.9,
+        519.7
+      ],
+      "text": "Hi Pot (Leads To Case, 1 Min.) : 2500 VDC",
+      "kind": "technical"
+    },
+    {
+      "page": 5,
+      "center": [
+        386.6,
+        508.5
+      ],
+      "text": "Typical Response Time : <25 Nano-seconds",
+      "kind": "technical"
+    },
+    {
+      "page": 5,
+      "center": [
+        343.4,
+        497.5
+      ],
+      "text": "Epoxy Rating : 94V-0",
+      "kind": "technical"
+    },
+    {
+      "page": 5,
+      "center": [
+        358.1,
+        464.9
+      ],
+      "text": "Solderability : MIL-STD-202F",
+      "kind": "technical"
+    },
+    {
+      "page": 5,
+      "center": [
+        407.9,
+        299.4
+      ],
+      "text": "All definitions are according to IEEE specifications C62.33.",
+      "kind": "technical"
+    },
+    {
+      "page": 5,
+      "center": [
+        175.8,
+        52.2
+      ],
+      "text": "Ambient Temperature, °C",
+      "kind": "chart"
+    },
+    {
+      "page": 5,
+      "center": [
+        414.4,
+        44.3
+      ],
+      "text": "Pulse Duration, Microseconds",
+      "kind": "chart"
+    }
+  ]
+}

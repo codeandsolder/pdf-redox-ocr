@@ -1,0 +1,782 @@
+{
+  "schema_version": 1,
+  "source_pdf_sha256": "1fce7d48e7fe2347759998c27d7bb7bde711ea5620e8219715e4ead54ac71ba1",
+  "provenance": "Manual transcription from visually inspected Poppler-rendered DEFOND pages 8 and 28, using OCR geometries solely for locating the corresponding text boxes. The set is a selected evaluation sample, not a representative corpus. Line 22 transcription corrected after rechecking the rendered line break: 度 belongs to the following line.",
+  "coordinate_system": "PDF user space",
+  "samples": [
+    {
+      "page": 8,
+      "center": [
+        149.5,
+        756.2
+      ],
+      "text": "How to Select ? 如何选择开关?",
+      "kind": "mixed"
+    },
+    {
+      "page": 8,
+      "center": [
+        107.1,
+        707.3
+      ],
+      "text": "Meaning of Rating on the Switch :",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        334.6,
+        708.4
+      ],
+      "text": "认识开关的规格：",
+      "kind": "cjk"
+    },
+    {
+      "page": 8,
+      "center": [
+        170.7,
+        692.9
+      ],
+      "text": "In IEC (ENEC) rating 10(6)A 250V~ 5E4 T125/55 μ IP30",
+      "kind": "technical"
+    },
+    {
+      "page": 8,
+      "center": [
+        439.7,
+        693.2
+      ],
+      "text": "IEC (ENEC)认证的规格 10(6)A 250V~ 5E4 T125/55 μ IP30",
+      "kind": "mixed"
+    },
+    {
+      "page": 8,
+      "center": [
+        106.4,
+        681.5
+      ],
+      "text": "APM-2116",
+      "kind": "technical"
+    },
+    {
+      "page": 8,
+      "center": [
+        171.5,
+        663.8
+      ],
+      "text": "10(6) : The rated current for resistive load = 10A. The rated",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        439.5,
+        664.8
+      ],
+      "text": "10(6)：括号前的10A值指的是开关能承受的额定电流，括号里的",
+      "kind": "cjk"
+    },
+    {
+      "page": 8,
+      "center": [
+        186.2,
+        651.9
+      ],
+      "text": "current for motor = 6A. The inrush current = 6 x the rated",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        455.2,
+        652.4
+      ],
+      "text": "6A值是指开关能承受的马达负载的稳态电流，冲击电流",
+      "kind": "cjk"
+    },
+    {
+      "page": 8,
+      "center": [
+        113.7,
+        639.7
+      ],
+      "text": "current for motor.",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        379.7,
+        641
+      ],
+      "text": "为6倍稳态电流。",
+      "kind": "cjk"
+    },
+    {
+      "page": 8,
+      "center": [
+        170.5,
+        623.2
+      ],
+      "text": "5E4 : The rated operating cycles = 50,000 cycles; If operating",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        439.5,
+        623.7
+      ],
+      "text": "5E4：开关的使用寿命为50,000次，当没有注明寿命次数，默认",
+      "kind": "cjk"
+    },
+    {
+      "page": 8,
+      "center": [
+        185.9,
+        610.6
+      ],
+      "text": "cycle rating is absent on the switch, default operating",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        389.1,
+        611.6
+      ],
+      "text": "为1E4，即10,000次。",
+      "kind": "cjk"
+    },
+    {
+      "page": 8,
+      "center": [
+        133.7,
+        598.7
+      ],
+      "text": "cycles = 1E4, 10,000 cycles.",
+      "kind": "technical"
+    },
+    {
+      "page": 8,
+      "center": [
+        439.7,
+        594.9
+      ],
+      "text": "T125/55：T125是指开关装置于产品的内部所承受之基本温度",
+      "kind": "cjk"
+    },
+    {
+      "page": 8,
+      "center": [
+        170.7,
+        582.4
+      ],
+      "text": "T125/55: T125 means the rated ambient temperature for",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        458.7,
+        582.7
+      ],
+      "text": "上限。55是指开关装置于产品外露所承受之基本温",
+      "kind": "cjk"
+    },
+    {
+      "page": 8,
+      "center": [
+        190,
+        570
+      ],
+      "text": "the switch body is 125 °C, 55 means the rated",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        373.9,
+        570.8
+      ],
+      "text": "度上限。",
+      "kind": "cjk"
+    },
+    {
+      "page": 8,
+      "center": [
+        189.7,
+        557.9
+      ],
+      "text": "ambient temperature for the actuating member.",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        135.8,
+        534.1
+      ],
+      "text": "is from 0 °C up to 85 °C.",
+      "kind": "technical"
+    },
+    {
+      "page": 8,
+      "center": [
+        88.2,
+        517.1
+      ],
+      "text": "* Optional mark :",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        322,
+        512
+      ],
+      "text": "μ",
+      "kind": "technical"
+    },
+    {
+      "page": 8,
+      "center": [
+        451.9,
+        513.3
+      ],
+      "text": "：“微断开”标志，当开关断开电气间隙及高压在不能满足一",
+      "kind": "cjk"
+    },
+    {
+      "page": 8,
+      "center": [
+        183.4,
+        500.6
+      ],
+      "text": ": The mark is for micro-disconnection of switches. There",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        440.8,
+        501.4
+      ],
+      "text": "个基本绝缘的要求时，就必须带有“微断开”标志。",
+      "kind": "cjk"
+    },
+    {
+      "page": 8,
+      "center": [
+        185.9,
+        488.5
+      ],
+      "text": "should be “μ” mark on switch when the clearance and",
+      "kind": "technical"
+    },
+    {
+      "page": 8,
+      "center": [
+        381.5,
+        484.7
+      ],
+      "text": "IP30：防尘防水标志(详见表A)。",
+      "kind": "cjk"
+    },
+    {
+      "page": 8,
+      "center": [
+        185.9,
+        476.3
+      ],
+      "text": "dielectric strength of disconnection can't comply with the",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        137.8,
+        464.9
+      ],
+      "text": "requirement of basic insulation",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        381.7,
+        467.7
+      ],
+      "text": "APM-2116：IEC认证的认证编号。",
+      "kind": "cjk"
+    },
+    {
+      "page": 8,
+      "center": [
+        171,
+        447.9
+      ],
+      "text": "IP30 : IP index. It complies protection against ingress of solid",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        154,
+        435.5
+      ],
+      "text": "foreign objects and water (See Table A).",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        346,
+        430.4
+      ],
+      "text": "UL认证的规格",
+      "kind": "cjk"
+    },
+    {
+      "page": 8,
+      "center": [
+        464.3,
+        430.4
+      ],
+      "text": "20A 125VAC, 10A 250VAC",
+      "kind": "technical"
+    },
+    {
+      "page": 8,
+      "center": [
+        143.9,
+        419
+      ],
+      "text": "APM-2116: Model Type No. on the IEC certificate.",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        111.5,
+        401.8
+      ],
+      "text": "* CQC rating refers to IEC rating.",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        74.7,
+        381.8
+      ],
+      "text": "In UL rating",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        196.8,
+        382
+      ],
+      "text": "20A 125VAC, 10A 250VAC",
+      "kind": "technical"
+    },
+    {
+      "page": 8,
+      "center": [
+        194,
+        370.4
+      ],
+      "text": "1/2HP 125-250VAC T85",
+      "kind": "technical"
+    },
+    {
+      "page": 8,
+      "center": [
+        185.7,
+        340.5
+      ],
+      "text": "fractional hp value designation is followed by the symbol",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        186.7,
+        328.8
+      ],
+      "text": "“hp”. 1/2HP means 1/2 Horsepower load. Please see Table",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        412.6,
+        329.4
+      ],
+      "text": "操作寿命：UL无寿命次数标志时，默认为6,000次。",
+      "kind": "cjk"
+    },
+    {
+      "page": 8,
+      "center": [
+        170.7,
+        235.4
+      ],
+      "text": "Endurance cycle : If endurance cycle mark is not given, the implied",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        139.8,
+        223.5
+      ],
+      "text": "endurance cycles is 6,000 cycles.",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        170.7,
+        206.5
+      ],
+      "text": "UL Catalogue No.: According to UL1054 standard, is not necessary",
+      "kind": "english"
+    },
+    {
+      "page": 8,
+      "center": [
+        185.7,
+        194.3
+      ],
+      "text": "to be marked it on the switch when it is impractical to",
+      "kind": "english"
+    },
+    {
+      "page": 28,
+      "center": [
+        107.5,
+        791.5
+      ],
+      "text": "Rocker Switch 翘板开关",
+      "kind": "mixed"
+    },
+    {
+      "page": 28,
+      "center": [
+        57.5,
+        766.4
+      ],
+      "text": "ARC",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        385,
+        764.9
+      ],
+      "text": "Ø20.0",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        323,
+        700.8
+      ],
+      "text": "Ø23.0",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        424.8,
+        689.6
+      ],
+      "text": "THICKNESS 0.8-2.0",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        506.4,
+        691.1
+      ],
+      "text": "THICKNESS OVER 2.0",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        468.6,
+        671.9
+      ],
+      "text": "PANEL CUTOUT",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        78.8,
+        660.5
+      ],
+      "text": "• single pole, single throw",
+      "kind": "english"
+    },
+    {
+      "page": 28,
+      "center": [
+        51.4,
+        643.8
+      ],
+      "text": "• ratings",
+      "kind": "english"
+    },
+    {
+      "page": 28,
+      "center": [
+        92.7,
+        633.6
+      ],
+      "text": "- 15A 125VAC, 7.5A 250VAC",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        93.5,
+        622.5
+      ],
+      "text": "15A 125VAC, 6A 250VAC",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        93.5,
+        611.8
+      ],
+      "text": "12A 125VAC, 6A 250VAC",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        78,
+        595.4
+      ],
+      "text": "12A 250VAC T85",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        80,
+        584.5
+      ],
+      "text": "10A 250VAC T85",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        78,
+        573.8
+      ],
+      "text": "6A 250VAC T85",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        70.9,
+        546
+      ],
+      "text": "ARC-XXXX",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        78,
+        510.5
+      ],
+      "text": "T105 for UL",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        183.4,
+        511.3
+      ],
+      "text": "ON-OFF",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        527.6,
+        511
+      ],
+      "text": "330~570 gf",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        170.7,
+        480.6
+      ],
+      "text": "ON-OFF W/LAMP",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        57.2,
+        409.2
+      ],
+      "text": "ARD",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        309.3,
+        363
+      ],
+      "text": "POS 1",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        361.7,
+        363
+      ],
+      "text": "POS 2",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        78.3,
+        304.8
+      ],
+      "text": "• single pole, single throw",
+      "kind": "english"
+    },
+    {
+      "page": 28,
+      "center": [
+        50.2,
+        288.3
+      ],
+      "text": "• ratings",
+      "kind": "english"
+    },
+    {
+      "page": 28,
+      "center": [
+        88.2,
+        277.9
+      ],
+      "text": "- 12A 125VAC, 6A 250VAC",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        79.2,
+        261.5
+      ],
+      "text": "- 6(2)A 250VAC T100",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        71.2,
+        227.5
+      ],
+      "text": "ARD-XXXX",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        77.8,
+        191.5
+      ],
+      "text": "ON-OFF",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        498.5,
+        191.8
+      ],
+      "text": "200 ± 100gf",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        493.3,
+        174.8
+      ],
+      "text": "480±200gf",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        497,
+        182.9
+      ],
+      "text": "For knob A",
+      "kind": "english"
+    },
+    {
+      "page": 28,
+      "center": [
+        497.2,
+        164.9
+      ],
+      "text": "For knob D",
+      "kind": "english"
+    },
+    {
+      "page": 28,
+      "center": [
+        81.1,
+        152.3
+      ],
+      "text": "ON-OFF W/LAMP",
+      "kind": "technical"
+    },
+    {
+      "page": 28,
+      "center": [
+        269.8,
+        80.6
+      ],
+      "text": "For D Housing",
+      "kind": "english"
+    },
+    {
+      "page": 28,
+      "center": [
+        63.6,
+        22.8
+      ],
+      "text": "Rocker Switch",
+      "kind": "english"
+    }
+  ]
+}
