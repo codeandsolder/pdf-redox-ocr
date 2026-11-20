@@ -6,6 +6,7 @@
 pub mod artifacts;
 pub mod draft;
 pub mod geometry;
+pub mod glyph_topology;
 pub mod hybrid;
 #[cfg(feature = "native-inference")]
 pub mod inference;

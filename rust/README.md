@@ -181,7 +181,12 @@ what share of manually anchored labels would be admitted and their empirical
 normalized-text error rate. Missing OCR observations never enter the admitted
 set; tied confidence values are always evaluated together. This reports
 actual high-confidence failures instead of treating numerical confidence as a
-calibrated probability or authorization to insert text.
+calibrated probability or authorization to insert text. The version-2 quality
+report additionally contains a Unicode character-confusion histogram produced
+by a minimum-edit alignment of the reference and OCR strings, covering
+substitutions, insertions, and deletions. Each recurring confusion includes its
+frequency and highest line confidence, exposing high-confidence technical-glyph
+failures without installing any hard-coded text replacement rules.
 The evaluator needs neither ONNX models nor a PDF rendering engine,
 and never edits the input draft or source PDF. The two small, manually reviewed reference manifests are versioned in
 `tests/fixtures/quality/` (86 DEFOND and 10 Walsin anchors). Original supplier
@@ -189,6 +194,30 @@ PDFs, full OCR observations and benchmark outputs remain in the separate
 benchmark workspace; the manifests carry the original PDF digests and
 visual-review provenance. The Notion worklog documents their precise paths,
 selected-sample limitations and experimental comparisons.
+
+## Independent glyph topology diagnostics
+
+The native `pdf-redox-ocr-glyph-audit` research tool reports thresholded
+foreground pixel counts and 4-connected *enclosed background regions* from an
+original raster glyph crop. It records each region's area, centroid, bounds,
+and crop SHA-256. Results across 64/128/192/224 luminance cutoffs reveal
+whether apparent glyph structure is stable without asking another OCR model
+to interpret the text.
+
+```sh
+pdf-redox-ocr-glyph-audit --image original-glyph-crop.png \
+  --report glyph-topology.json
+```
+
+Six tiny source-PDF crops under `tests/fixtures/glyph-topology/` exercise
+two diagonal-stroke diameter glyphs (two diagonally displaced holes),
+three real digit zeros (one hole), and a digit eight (two vertically stacked
+holes). They originate from DEFOND page 28 at 600-DPI Poppler rendering;
+the precise reproducible crop coordinates and original document digest
+are retained in the Notion OCR worklog. This is a **geometric measurement**,
+not evidence that the pixels intrinsically mean a particular Unicode
+character: cropped edges, touching neighboring strokes, raster resolution
+and differing typefaces all matter. No automatic OCR replacement is made.
 
 ## Correctness policy
 

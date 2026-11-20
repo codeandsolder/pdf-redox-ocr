@@ -61,3 +61,8 @@ required-features = ["native-inference", "pdf-integration", "cli"]
 name = "pdf-redox-ocr-eval"
 path = "src/bin/pdf-redox-ocr-eval.rs"
 required-features = ["cli"]
+
+[[bin]]
+name = "pdf-redox-ocr-glyph-audit"
+path = "src/bin/pdf-redox-ocr-glyph-audit.rs"
+required-features = ["cli"]

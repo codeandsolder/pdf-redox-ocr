@@ -1,7 +1,11 @@
 //! Evaluate SHA-bound OCR drafts against manually transcribed PDF-space anchors.
 //! Missing observations contribute full reference length to character error.
 
+mod alignment;
+
 use std::collections::{BTreeMap, BTreeSet};
+
+use alignment::alignment;
 
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
@@ -78,6 +82,16 @@ pub struct ConfidencePoint {
     pub empirical_error_rate: f64,
 }
 
+/// One Unicode substitution, insertion, or deletion found in manual OCR text.
+/// A missing side is a genuine insertion/deletion, not an empty character.
+#[derive(Debug, Clone, Serialize)]
+pub struct CharacterConfusion {
+    pub reference: Option<char>,
+    pub predicted: Option<char>,
+    pub count: usize,
+    pub highest_line_confidence: Option<f64>,
+}
+
 /// Auditable report bound to the exact original PDF hash.
 #[derive(Debug, Clone, Serialize)]
 pub struct QualityReport {
@@ -88,6 +102,7 @@ pub struct QualityReport {
     pub overall: QualityMetrics,
     pub by_kind: BTreeMap<String, QualityMetrics>,
     pub confidence_curve: Vec<ConfidencePoint>,
+    pub character_confusions: Vec<CharacterConfusion>,
     pub samples: Vec<QualitySample>,
 }
 
@@ -188,6 +203,45 @@ pub fn confidence_curve(samples: &[QualitySample]) -> Vec<ConfidencePoint> {
         });
     }
     curve
+}
+
+/// Aggregate independently aligned Unicode mistakes without losing insertions
+/// or deletions. All counts refer to normalized manual labels.
+#[must_use]
+pub fn character_confusions(samples: &[QualitySample]) -> Vec<CharacterConfusion> {
+    let mut counts = BTreeMap::<(Option<char>, Option<char>), (usize, Option<f64>)>::new();
+    for sample in samples {
+        let reference = normalized(&sample.reference);
+        let prediction = normalized(sample.predicted.as_deref().unwrap_or(""));
+        for (expected, observed) in alignment(&reference, &prediction) {
+            if expected == observed {
+                continue;
+            }
+            let entry = counts.entry((expected, observed)).or_default();
+            entry.0 += 1;
+            if let Some(score) = sample.confidence {
+                entry.1 = Some(entry.1.map_or(score, |previous| previous.max(score)));
+            }
+        }
+    }
+    let mut errors = counts
+        .into_iter()
+        .map(
+            |((reference, predicted), (count, highest_line_confidence))| CharacterConfusion {
+                reference,
+                predicted,
+                count,
+                highest_line_confidence,
+            },
+        )
+        .collect::<Vec<_>>();
+    errors.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.reference.cmp(&b.reference))
+            .then_with(|| a.predicted.cmp(&b.predicted))
+    });
+    errors
 }
 
 /// Levenshtein distance over Unicode scalar values, not UTF-8 bytes.
@@ -389,24 +443,34 @@ pub fn evaluate(reference: &GroundTruth, draft: &OcrDraft) -> Result<QualityRepo
         samples.push(sample);
     }
     let curve = confidence_curve(&samples);
+    let errors = character_confusions(&samples);
+    let metrics = overall.metrics();
+    debug_assert_eq!(
+        errors.iter().map(|entry| entry.count).sum::<usize>(),
+        metrics.normalized_character_edits
+    );
     Ok(QualityReport {
-        schema_version: 1,
+        schema_version: 2,
         pdf_sha256: draft.pdf_sha256.clone(),
         reference_provenance: reference.provenance.clone(),
         draft_model: draft.model.clone(),
-        overall: overall.metrics(),
+        overall: metrics,
         by_kind: kinds
             .into_iter()
             .map(|(kind, metrics)| (kind, metrics.metrics()))
             .collect(),
         confidence_curve: curve,
+        character_confusions: errors,
         samples,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{GroundTruth, ReferenceSample, character_edits, contains, evaluate};
+    use super::{
+        GroundTruth, QualitySample, ReferenceSample, character_confusions, character_edits,
+        contains, evaluate,
+    };
     use crate::{
         draft::{DraftPage, OcrDraft, OcrLine},
         geometry::Point,
@@ -621,6 +685,55 @@ mod tests {
         assert_eq!(ties.confidence_curve[0].admitted, 2);
         assert_eq!(ties.confidence_curve[0].admitted_errors, 1);
         Ok(())
+    }
+
+    #[test]
+    fn every_unicode_confusion_is_counted_with_source_confidence() {
+        let make = |reference: &str, predicted: Option<&str>, confidence| QualitySample {
+            page: 1,
+            center: Point(1.0, 1.0),
+            kind: "technical".into(),
+            reference: reference.into(),
+            predicted: predicted.map(str::to_owned),
+            confidence,
+            candidate_count: 1,
+            exact: false,
+            normalized_exact: false,
+            character_edits: 0,
+            normalized_character_edits: 0,
+        };
+        let samples = vec![
+            make("Ø20.0", Some("020.0"), Some(0.999)),
+            make("Ø23.0", Some("023.0"), Some(0.998)),
+            make("温度", Some("温"), Some(0.8)),
+            make("A", Some("AB"), Some(0.5)),
+            make("A", None, None),
+            make("℃", Some("°C"), Some(0.99)),
+        ];
+        let errors = character_confusions(&samples);
+        assert_eq!(errors.iter().map(|error| error.count).sum::<usize>(), 5);
+        let diameter = &errors[0];
+        assert_eq!(
+            (diameter.reference, diameter.predicted),
+            (Some('Ø'), Some('0'))
+        );
+        assert_eq!(diameter.count, 2);
+        assert_eq!(diameter.highest_line_confidence, Some(0.999));
+        assert!(
+            errors
+                .iter()
+                .any(|error| { error.reference == Some('度') && error.predicted.is_none() })
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| { error.reference.is_none() && error.predicted == Some('B') })
+        );
+        assert!(errors.iter().any(|error| {
+            error.reference == Some('A')
+                && error.predicted.is_none()
+                && error.highest_line_confidence.is_none()
+        }));
     }
 
     #[test]
