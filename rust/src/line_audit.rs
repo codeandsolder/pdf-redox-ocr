@@ -14,9 +14,10 @@ use crate::{
     Error, PageNumber,
     draft::{OcrDraft, OcrLine, sha256_file},
     geometry::{DisplayMapper, PageBox, Point, Quad},
-    glyph_isolation::{InkBounds, InkGroup, isolate_ink},
+    glyph_isolation::{InkGroup, InkIsolation, InkRun, isolate_ink},
     ink_polarity::{Polarity, PolarityEvidence, estimate},
     pdf_metadata::PdfMetadata,
+    pixel_regions::{InkBounds, PixelRegion},
     rasterize::{render_rgb_region, sample_whitened},
 };
 
@@ -244,48 +245,6 @@ impl SampleWindow {
     }
 }
 
-/// Counts of actual foreground pixels on each side of the original observation
-/// boundary, using the same threshold as the ink-group segmentation.
-#[derive(Clone, Debug, Serialize)]
-pub struct ObservationSupport {
-    pub inside_pixels: u64,
-    pub outside_pixels: u64,
-    /// Foreground group reaches at least one original observation boundary.
-    pub touches_observation_edge: bool,
-}
-
-fn observation_support(
-    image: &GrayImage,
-    group: InkBounds,
-    original: InkBounds,
-    threshold: u8,
-) -> ObservationSupport {
-    let mut result = ObservationSupport {
-        inside_pixels: 0,
-        outside_pixels: 0,
-        touches_observation_edge: false,
-    };
-    for y in group.top..group.bottom {
-        for x in group.left..group.right {
-            if image.get_pixel(x, y)[0] >= threshold {
-                continue;
-            }
-            if (original.left..original.right).contains(&x)
-                && (original.top..original.bottom).contains(&y)
-            {
-                result.inside_pixels += 1;
-                result.touches_observation_edge |= x == original.left
-                    || y == original.top
-                    || x + 1 == original.right
-                    || y + 1 == original.bottom;
-            } else {
-                result.outside_pixels += 1;
-            }
-        }
-    }
-    result
-}
-
 fn envelope(quad: &Quad) -> Result<PageBox, Error> {
     let (mut l, mut b, mut r, mut t) = (
         f64::INFINITY,
@@ -312,7 +271,22 @@ pub struct MappedInkGroup {
     pub ink_quad: Quad,
     /// Original PDF quad for the actual topology sampling window.
     pub crop_quad: Quad,
-    pub observation_support: ObservationSupport,
+}
+
+/// A connected component with its original PDF-space bounding quad.
+#[derive(Debug, Serialize)]
+pub struct MappedComponent {
+    #[serde(flatten)]
+    pub component: PixelRegion,
+    pub ink_quad: Quad,
+}
+
+/// Projection of components supported by the original observation.
+#[derive(Debug, Serialize)]
+pub struct MappedSupportedRun {
+    #[serde(flatten)]
+    pub run: InkRun,
+    pub ink_quad: Quad,
 }
 
 /// Audit an original OCR observation without assigning text to individual ink groups.
@@ -332,6 +306,8 @@ pub struct AuditedLine {
     pub axis_swapped: bool,
     pub polarity: PolarityEvidence,
     pub groups: Vec<MappedInkGroup>,
+    pub components: Vec<MappedComponent>,
+    pub supported_runs: Vec<MappedSupportedRun>,
 }
 
 /// Provenance-bound geometric evidence, not an OCR replacement draft.
@@ -395,24 +371,38 @@ fn audit_line(
     .to_image();
     let polarity = estimate(&original, policy.polarity)?;
     let normalized = polarity.normalize(&raster);
-    let groups = isolate_ink(
+    let InkIsolation {
+        components,
+        groups,
+        supported_runs,
+    } = isolate_ink(
         &normalized,
+        observation,
         policy.segmentation_threshold,
         &policy.topology_thresholds,
-    )?
-    .into_iter()
-    .map(|group| MappedInkGroup {
-        ink_quad: window.quad(frame, group.ink),
-        crop_quad: window.quad(frame, group.crop),
-        observation_support: observation_support(
-            &normalized,
-            group.ink,
-            observation,
-            policy.segmentation_threshold,
-        ),
-        group,
-    })
-    .collect();
+    )?;
+    let groups = groups
+        .into_iter()
+        .map(|group| MappedInkGroup {
+            ink_quad: window.quad(frame, group.run.ink),
+            crop_quad: window.quad(frame, group.crop),
+            group,
+        })
+        .collect();
+    let components = components
+        .into_iter()
+        .map(|component| MappedComponent {
+            ink_quad: window.quad(frame, component.bounds),
+            component,
+        })
+        .collect();
+    let supported_runs = supported_runs
+        .into_iter()
+        .map(|run| MappedSupportedRun {
+            ink_quad: window.quad(frame, run.ink),
+            run,
+        })
+        .collect();
     Ok(AuditedLine {
         page: page.get(),
         line_index: index,
@@ -427,6 +417,8 @@ fn audit_line(
         axis_swapped: frame.axis_swapped,
         polarity,
         groups,
+        components,
+        supported_runs,
     })
 }
 
@@ -486,7 +478,7 @@ pub fn audit_lines(
         ));
     }
     Ok(LineAuditReport {
-        schema_version: 2,
+        schema_version: 3,
         pdf_sha256: draft.pdf_sha256.clone(),
         draft_model: draft.model.clone(),
         dpi: policy.dpi,
@@ -500,12 +492,11 @@ pub fn audit_lines(
 
 #[cfg(test)]
 mod tests {
-    use super::{LineAuditPolicy, LineFrame, SampleWindow, observation_support};
+    use super::{LineAuditPolicy, LineFrame, SampleWindow};
     use crate::{
         geometry::{DisplayMapper, PageBox, Point, Rotation},
-        glyph_isolation::InkBounds,
+        pixel_regions::InkBounds,
     };
-    use image::{GrayImage, Luma};
 
     #[test]
     fn quad_rectification_preserves_rotated_nonrectangular_geometry() -> Result<(), crate::Error> {
@@ -578,34 +569,6 @@ mod tests {
             assert!(SampleWindow::new(frame, display, 8, 1).is_err());
         }
         Ok(())
-    }
-
-    #[test]
-    fn foreground_support_distinguishes_padded_only_ink_from_boundary_continuations() {
-        let original = InkBounds {
-            left: 2,
-            top: 2,
-            right: 6,
-            bottom: 6,
-        };
-        let mut raster = GrayImage::from_pixel(8, 8, Luma([255]));
-        for x in 0..5 {
-            raster.put_pixel(x, 3, Luma([0]));
-        }
-        let support = observation_support(
-            &raster,
-            InkBounds {
-                left: 0,
-                top: 0,
-                right: 8,
-                bottom: 8,
-            },
-            original,
-            128,
-        );
-        assert_eq!(support.inside_pixels, 3);
-        assert_eq!(support.outside_pixels, 2);
-        assert!(support.touches_observation_edge);
     }
 
     #[test]

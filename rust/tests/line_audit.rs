@@ -59,6 +59,9 @@ fn source_ink_topology_and_pdf_mapping_survive_all_page_rotations()
     for line in report.lines {
         assert_eq!(line.original_quad, quad);
         assert_eq!(line.groups.len(), 3, "page {}", line.page);
+        assert_eq!(line.components.len(), 4);
+        assert_eq!(line.supported_runs.len(), 3);
+        assert_eq!(line.groups[2].group.run.component_indices.len(), 2);
         for ((group, expected_holes), expected_left) in
             line.groups.iter().zip([1, 2, 0]).zip([55.0, 75.0, 100.0])
         {
@@ -120,9 +123,9 @@ fn source_padding_recovers_clipped_stroke_across_rotations()
                 .iter()
                 .all(|topology| topology.enclosed_background_regions.len() == 1)
         );
-        assert!(group.observation_support.inside_pixels > 0);
-        assert!(group.observation_support.outside_pixels > 0);
-        assert!(group.observation_support.touches_observation_edge);
+        assert!(group.group.run.observation_support.inside_pixels > 0);
+        assert!(group.group.run.observation_support.outside_pixels > 0);
+        assert!(group.group.run.observation_support.touches_observation_edge);
         assert!(!group.group.touches_line_edge);
         assert_eq!(before.polarity.foreground, after.polarity.foreground);
         assert_eq!(before.polarity.class_medians, after.polarity.class_medians);

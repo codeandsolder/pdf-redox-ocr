@@ -4,10 +4,12 @@
 //! structural evidence but never assigns Unicode or rewrites recognized text.
 
 use image::GrayImage;
-use num_traits::ToPrimitive;
 use serde::Serialize;
 
-use crate::Error;
+use crate::{
+    Error,
+    pixel_regions::{InkBounds, PixelClass, regions},
+};
 
 /// One enclosed 4-connected background region of a dark glyph.
 #[derive(Clone, Debug, Serialize)]
@@ -17,7 +19,7 @@ pub struct EnclosedRegion {
     /// Geometric center in original crop pixel coordinates.
     pub centroid: [f64; 2],
     /// Inclusive pixel bounds in order `min_x`, `min_y`, `max_x`, `max_y`.
-    pub bounds: [usize; 4],
+    pub bounds: [u32; 4],
 }
 
 /// Topology of a thresholded glyph crop, without any character interpretation.
@@ -41,80 +43,29 @@ pub struct GlyphTopology {
 /// # Errors
 /// Rejects empty images or image dimensions not representable by the host.
 pub fn analyze(image: &GrayImage, threshold: u8) -> Result<GlyphTopology, Error> {
-    let width = usize::try_from(image.width())
-        .map_err(|_| Error::Invalid("glyph width not representable".into()))?;
-    let height = usize::try_from(image.height())
-        .map_err(|_| Error::Invalid("glyph height not representable".into()))?;
-    let total = width
-        .checked_mul(height)
-        .filter(|&size| size > 0)
-        .ok_or_else(|| Error::Invalid("empty or unrepresentable glyph crop".into()))?;
-    let pixels = image.as_raw();
-    if pixels.len() != total {
-        return Err(Error::Invalid(
-            "glyph crop has inconsistent pixel count".into(),
-        ));
-    }
-
-    let foreground_pixels = pixels.iter().filter(|&&value| value < threshold).count();
-    let mut visited = vec![false; total];
-    let mut regions = Vec::new();
-    let mut stack = Vec::new();
-
-    for seed in 0..total {
-        if visited[seed] || pixels[seed] < threshold {
-            continue;
-        }
-        visited[seed] = true;
-        stack.push(seed);
-        let mut area = 0_usize;
-        let (mut sum_x, mut sum_y) = (0_f64, 0_f64);
-        let (mut min_x, mut min_y) = (width, height);
-        let (mut max_x, mut max_y) = (0, 0);
-        let mut exterior = false;
-
-        while let Some(index) = stack.pop() {
-            let (x, y) = (index % width, index / width);
-            area += 1;
-            sum_x += x
-                .to_f64()
-                .ok_or_else(|| Error::Invalid("glyph X unrepresentable".into()))?;
-            sum_y += y
-                .to_f64()
-                .ok_or_else(|| Error::Invalid("glyph Y unrepresentable".into()))?;
-            min_x = min_x.min(x);
-            min_y = min_y.min(y);
-            max_x = max_x.max(x);
-            max_y = max_y.max(y);
-            exterior |= x == 0 || y == 0 || x + 1 == width || y + 1 == height;
-
-            // Only 4-connected background regions count as enclosed;
-            // diagonal touches do not create a path through a 1px ink wall.
-            let neighbors = [
-                (x > 0).then_some(index.saturating_sub(1)),
-                (x + 1 < width).then_some(index + 1),
-                (y > 0).then_some(index.saturating_sub(width)),
-                (y + 1 < height).then_some(index + width),
-            ];
-            for adjacent in neighbors.into_iter().flatten() {
-                if !visited[adjacent] && pixels[adjacent] >= threshold {
-                    visited[adjacent] = true;
-                    stack.push(adjacent);
-                }
+    let bounds = InkBounds {
+        left: 0,
+        top: 0,
+        right: image.width(),
+        bottom: image.height(),
+    };
+    let foreground_pixels = image
+        .as_raw()
+        .iter()
+        .filter(|&&value| value < threshold)
+        .count();
+    let mut regions = regions(image, threshold, PixelClass::Background, bounds)?
+        .into_iter()
+        .filter(|region| !region.touches_line_edge)
+        .map(|region| {
+            let b = region.bounds;
+            EnclosedRegion {
+                area_pixels: region.area_pixels,
+                centroid: region.centroid,
+                bounds: [b.left, b.top, b.right - 1, b.bottom - 1],
             }
-        }
-
-        if !exterior {
-            let denominator = area
-                .to_f64()
-                .ok_or_else(|| Error::Invalid("glyph region area unrepresentable".into()))?;
-            regions.push(EnclosedRegion {
-                area_pixels: area,
-                centroid: [sum_x / denominator, sum_y / denominator],
-                bounds: [min_x, min_y, max_x, max_y],
-            });
-        }
-    }
+        })
+        .collect::<Vec<_>>();
 
     regions.sort_by(|a, b| {
         a.centroid[1]

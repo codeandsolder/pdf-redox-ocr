@@ -31,6 +31,7 @@ pub mod paint_isolation;
 pub mod paint_scan;
 #[cfg(feature = "pdf-integration")]
 pub mod pdf_metadata;
+pub mod pixel_regions;
 pub mod polygon;
 pub mod quality_eval;
 pub mod rasterize;
