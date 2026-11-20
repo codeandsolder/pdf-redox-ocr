@@ -116,11 +116,7 @@ pub fn prove_mixed_source_text(
                 continue;
             }
             if !masked_cache.contains_key(&paint.source_id) {
-                let source_object = ObjectId::new(
-                    i32::try_from(paint.object_number)
-                        .map_err(|_| Error::Invalid("source object number outside i32".into()))?,
-                    i32::from(paint.generation),
-                );
+                let source_object = ObjectId::new(paint.object_number, i32::from(paint.generation));
                 let masked = match mask_source_object(
                     document.source(),
                     source_object,

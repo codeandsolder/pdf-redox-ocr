@@ -144,10 +144,7 @@ fn isolated_paint_does_not_modify_other_visible_uses_or_reserved_aliases()
             .ok_or("missing first image")?;
         let masked = mask_source_object(
             metadata.source(),
-            ObjectId::new(
-                i32::try_from(first.object_number)?,
-                i32::from(first.generation),
-            ),
+            ObjectId::new(first.object_number, i32::from(first.generation)),
             std::slice::from_ref(&original_line),
             0.97,
         )?

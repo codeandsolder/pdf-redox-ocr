@@ -816,8 +816,7 @@ impl ScanContext<'_> {
         if !unsafe_reasons.is_empty() {
             self.summary.unsafe_image_paints += 1;
         }
-        let object_number = u32::try_from(id.number())
-            .map_err(|_| Error::Invalid("invalid source object number".into()))?;
+        let object_number = id.number();
         let generation = u16::try_from(id.generation())
             .map_err(|_| Error::Invalid("invalid source generation".into()))?;
         self.paintings.push(ImagePaint {

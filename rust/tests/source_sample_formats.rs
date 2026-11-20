@@ -96,10 +96,7 @@ fn source_mask_preserves_pdf_color_semantics_across_ten_sample_formats()
             .find(|paint| paint.page == page.get())
             .ok_or("missing native image paint")?;
         assert!(paint.unsafe_reasons.is_empty(), "{name}: {paint:#?}");
-        let id = ObjectId::new(
-            i32::try_from(paint.object_number)?,
-            i32::from(paint.generation),
-        );
+        let id = ObjectId::new(paint.object_number, i32::from(paint.generation));
         let changed = mask_source_text(original, id, &[original_line()], 0.97)?
             .ok_or_else(|| format!("{name}: source mask rejected supported image"))?;
         assert_eq!(changed.metrics.len(), 1, "{name}");

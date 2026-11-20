@@ -33,11 +33,7 @@ pub fn isolate_source_paint(
     }
     let page_index = usize::try_from(paint.page - 1)
         .map_err(|_| Error::Invalid("page index exceeds usize".into()))?;
-    let source_id = ObjectId::new(
-        i32::try_from(paint.object_number)
-            .map_err(|_| Error::Invalid("source number exceeds i32".into()))?,
-        i32::from(paint.generation),
-    );
+    let source_id = ObjectId::new(paint.object_number, i32::from(paint.generation));
     let mut doc = EditDocument::from_bytes(original.original_bytes().to_vec())?;
     let page_id = *doc
         .source()
