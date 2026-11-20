@@ -24,7 +24,7 @@ use crate::{
     paint_scan::{ImagePaint, PaintReport, PdfMatrix},
     pdf_metadata::PdfMetadata,
     rasterize::{RenderPolicy, render_rgb_page},
-    source_mask::{MaskedSourceObject, mask_source_object},
+    source_mask::{MaskedSourceObject, mask_candidate, mask_source_object, mask_source_subset},
     source_ocr::{SourceObservation, map_observations_to_paint},
 };
 
@@ -500,14 +500,9 @@ impl PageProbe<'_> {
             .entry(key.clone())
             .or_insert_with(|| {
                 let id = ObjectId::new(paint.object_number, i32::from(paint.generation));
-                mask_source_object(
-                    self.document.source(),
-                    id,
-                    &subset.lines,
-                    self.minimum_confidence,
-                )
-                .ok()
-                .flatten()
+                mask_source_subset(self.document.source(), id, &source.lines, &key.indices)
+                    .ok()
+                    .flatten()
             })
             .as_ref()?;
         let proof = self.examine(paint, &subset, masked).ok().flatten()?;
@@ -530,9 +525,7 @@ impl PageProbe<'_> {
             .lines
             .iter()
             .enumerate()
-            .filter(|(_, line)| {
-                line.confidence >= self.minimum_confidence && line.text.trim().chars().count() >= 2
-            })
+            .filter(|(_, line)| mask_candidate(line, self.minimum_confidence))
             .map(|(index, line)| (index, line.clone()))
             .unzip();
         if lines.is_empty() {

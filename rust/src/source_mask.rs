@@ -16,6 +16,8 @@ use crate::{
     source_samples::PackedSamples,
 };
 
+const MASK_PADDING: u32 = 3;
+
 /// Quantifies the specific source text modified by a counterfactual.
 #[derive(Debug, Clone)]
 pub struct MaskMetric {
@@ -84,13 +86,48 @@ pub fn mask_source_object(
     if !min_confidence.is_finite() || !(0.0..=1.0).contains(&min_confidence) {
         return Err(Error::Invalid("invalid source mask confidence".into()));
     }
-    let eligible = lines
+    let selected = lines
         .iter()
-        .filter(|line| line.confidence >= min_confidence && line.text.trim().chars().count() >= 2)
+        .enumerate()
+        .filter_map(|(index, line)| mask_candidate(line, min_confidence).then_some(index))
         .collect::<Vec<_>>();
-    if eligible.is_empty() {
+    mask_source_subset(source, source_id, lines, &selected)
+}
+
+pub(crate) fn mask_candidate(line: &OcrLine, min_confidence: f64) -> bool {
+    line.confidence >= min_confidence && line.text.trim().chars().count() >= 2
+}
+
+/// Mask an explicit subset of source observations.
+///
+/// All other recognized regions, including those excluded by confidence or page-specific
+/// admission, retain their original samples even if mask padding overlaps.
+///
+/// The selected indices must be unique and in ascending order.
+///
+/// # Errors
+/// Returns an error for invalid indices, malformed PDF objects or invalid source
+/// geometry in selected and protected observations.
+pub fn mask_source_subset(
+    source: &SourcePdf,
+    source_id: ObjectId,
+    lines: &[OcrLine],
+    selected: &[usize],
+) -> Result<Option<MaskedSourceObject>, Error> {
+    if selected.is_empty() {
         return Ok(None);
     }
+    if selected.windows(2).any(|pair| pair[0] >= pair[1])
+        || selected.last().is_some_and(|&last| last >= lines.len())
+    {
+        return Err(Error::Invalid(
+            "invalid selected source mask indices".into(),
+        ));
+    }
+    let eligible = selected
+        .iter()
+        .map(|&index| &lines[index])
+        .collect::<Vec<_>>();
     let object = source.materialize(source_id)?;
     let Some(mut image) = decode_native_samples(source, source_id, &object)? else {
         return Ok(None);
@@ -105,7 +142,25 @@ pub fn mask_source_object(
         polygons.push(to_top_left(&line.quad, width, height)?);
     }
     for polygon in &polygons {
-        cover_text(&mut image, polygon, 3);
+        cover_text(&mut image, polygon, MASK_PADDING);
+    }
+    let pad = f64::from(MASK_PADDING);
+    let affected = polygons
+        .iter()
+        .map(|polygon| extent(polygon, image.width, image.height, pad))
+        .collect::<Vec<_>>();
+    for (index, line) in lines.iter().enumerate() {
+        if selected.binary_search(&index).is_ok() || line.text.trim().is_empty() {
+            continue;
+        }
+        let protected = to_top_left(&line.quad, width, height)?;
+        let bounds = extent(&protected, image.width, image.height, pad);
+        if affected
+            .iter()
+            .any(|&target| bounds_overlap(bounds, target))
+        {
+            restore_region(&before, &mut image, &protected, bounds, pad);
+        }
     }
     let metrics = eligible
         .iter()
@@ -319,7 +374,7 @@ fn within_quad(quad: &Quad, point: Point, pad: f64) -> bool {
     true
 }
 
-fn extent(quad: &Quad, width: usize, height: usize, pad: f64) -> (usize, usize, usize, usize) {
+fn extent(quad: &Quad, width: usize, height: usize, pad: f64) -> PixelBounds {
     let min_x = quad.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
     let max_x = quad.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
     let min_y = quad.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
@@ -334,6 +389,32 @@ fn extent(quad: &Quad, width: usize, height: usize, pad: f64) -> (usize, usize, 
         clamp((max_x + pad).ceil(), width),
         clamp((max_y + pad).ceil(), height),
     )
+}
+
+type PixelBounds = (usize, usize, usize, usize);
+
+const fn bounds_overlap(a: PixelBounds, b: PixelBounds) -> bool {
+    a.0 < b.2 && b.0 < a.2 && a.1 < b.3 && b.1 < a.3
+}
+
+/// Restore native component values rather than round-tripping RGB, so
+/// protected ink and packed row padding are bit-identical to the source.
+fn restore_region(
+    original: &PackedSamples,
+    image: &mut PackedSamples,
+    polygon: &Quad,
+    (x0, y0, x1, y1): PixelBounds,
+    padding: f64,
+) {
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if within_quad(polygon, pixel_center(x, y), padding) {
+                for channel in 0..image.components {
+                    image.set(x, y, channel, original.get(x, y, channel));
+                }
+            }
+        }
+    }
 }
 
 fn pixel_center(x: usize, y: usize) -> Point {

@@ -169,6 +169,10 @@ line level. Partially occluded or native-excluded labels stay unaltered;
 the exact remaining subset is separately masked and re-proved, with
 variants shared by original source identity and observation indices within
 the page. Different uses of one image may therefore receive different masks.
+Unselected source detections retain their exact original packed component
+samples including the mask edge padding, even when an eligible neighbor's
+fill region overlaps them. This covers low-confidence, short, occluded and
+native-text-excluded observations without changing their source color space.
 Several treatments can be combined when their changed RGB pixels are
 disjoint and the actual grouped copy-on-write PDF renders exactly to the
 same pixels. Native-font masking may be combined with those changes only
