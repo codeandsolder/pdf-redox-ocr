@@ -276,9 +276,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn missing_or_invalid_source_observation_never_approves_page() -> Result<(), crate::Error> {
-        let report = PaintReport {
+    fn single_paint_report() -> PaintReport {
+        PaintReport {
             pages: vec![PagePaintSummary {
                 page: 1,
                 image_only_after_native: true,
@@ -304,7 +303,12 @@ mod tests {
                 clips: vec![],
                 unsafe_reasons: vec![],
             }],
-        };
+        }
+    }
+
+    #[test]
+    fn missing_or_invalid_source_observation_never_approves_page() -> Result<(), crate::Error> {
+        let report = single_paint_report();
         let result = source_only_pages(&report, &BTreeMap::new())?;
         assert!(result.approved_pages.is_empty());
 
