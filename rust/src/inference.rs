@@ -3,6 +3,8 @@
 //! No Python interpreter, bindings or subprocess is involved in inference.
 //! All recognitions use the original page-image frame, with no `UVDoc` warping.
 
+use std::sync::OnceLock;
+
 use image::RgbImage;
 use oar_ocr::{
     domain::tasks::TextDetectionConfig,
@@ -17,9 +19,9 @@ use crate::{
     recognition::RecognitionBackend,
 };
 
-/// One warmed CPU OCR pipeline reused across multiple raster and PDF pages.
+/// One lazily initialized CPU OCR pipeline reused across multiple raster and PDF pages.
 pub struct OcrInference {
-    backend: OAROCR,
+    backend: OnceLock<Result<OAROCR, String>>,
 }
 
 /// Retain actual page/native-source detail up to a bounded detector size.
@@ -44,21 +46,28 @@ impl OcrInference {
     /// Stable draft provenance including the detector's resolution policy.
     pub const MODEL_PROFILE: &str = "oar-ocr PP-OCRv6 Small detector-max-2048";
 
-    /// Initialize the official PP-OCRv6 Small detector/recognizer pair.
-    ///
-    /// Model files are resolved using the configured oar-ocr model registry,
-    /// and downloaded into the model cache only when absent.
-    ///
-    /// # Errors
-    /// Returns an error when models or ONNX Runtime cannot initialize.
-    pub fn pp_ocrv6_small() -> Result<Self, Error> {
-        let backend = OAROCRBuilder::pp_ocrv6(PpOcrV6Size::Small)
-            .text_detection_config(small_detector_config())
-            .image_batch_size(1)
-            .region_batch_size(4)
-            .build()
-            .map_err(|error| Error::Inference(error.to_string()))?;
-        Ok(Self { backend })
+    /// Configure the official PP-OCRv6 Small detector/recognizer pair.
+    /// Resolve and load models only on the first recognition; a native-only
+    /// document needs no model files or ONNX session at all.
+    #[must_use]
+    pub const fn pp_ocrv6_small() -> Self {
+        Self {
+            backend: OnceLock::new(),
+        }
+    }
+
+    fn backend(&self) -> Result<&OAROCR, Error> {
+        self.backend
+            .get_or_init(|| {
+                OAROCRBuilder::pp_ocrv6(PpOcrV6Size::Small)
+                    .text_detection_config(small_detector_config())
+                    .image_batch_size(1)
+                    .region_batch_size(4)
+                    .build()
+                    .map_err(|error| error.to_string())
+            })
+            .as_ref()
+            .map_err(|error| Error::Inference(error.clone()))
     }
 }
 
@@ -80,7 +89,7 @@ impl RecognitionBackend for OcrInference {
         let width = f64::from(rgb.width());
         let height = f64::from(rgb.height());
         let results = self
-            .backend
+            .backend()?
             .predict(vec![rgb])
             .map_err(|error| Error::Inference(error.to_string()))?;
         let Some(result) = results.into_iter().next() else {

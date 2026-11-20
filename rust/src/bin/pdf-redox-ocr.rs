@@ -168,7 +168,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     }
     check_paths(&args.pdf, &paths)?;
     let job = PreparedOcr::open(&args.pdf, args.pages.as_deref(), configured_policy(args))?;
-    let engine = OcrInference::pp_ocrv6_small()?;
+    let engine = OcrInference::pp_ocrv6_small();
     let result = job.recognize(&engine, |message| eprintln!("{message}"))?;
     write_draft_and_overlay(args, job.original_bytes(), &result.draft)
 }

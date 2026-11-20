@@ -161,6 +161,25 @@ impl ImagePaint {
     }
 }
 
+/// Additional conditions required to certify native-text-only paint closure.
+/// Existing source-raster admission uses its own per-image visibility proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeOnlyBlocker {
+    /// Explicit clipping path.
+    Clipping,
+    /// Extended graphics state (may introduce a soft-mask group).
+    ExtendedGraphicsState,
+    /// Pattern or unclassified color space.
+    ColorPattern,
+    /// Transparency group or invalid Form bounds.
+    FormContext,
+    /// Invalid or unbalanced text, marked-content or compatibility state.
+    StreamState,
+    /// Unclassified page-level rendering context.
+    PageContext,
+}
+
 /// Source paint totals and page purity evidence.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PagePaintSummary {
@@ -192,12 +211,17 @@ pub struct PagePaintSummary {
     pub annotations: usize,
     /// Source paints alone account for all visible page ink except native text.
     pub image_only_after_native: bool,
+    /// Additional reasons native-only paint closure cannot be certified.
+    pub native_only_blockers: BTreeSet<NativeOnlyBlocker>,
 }
 
 impl PagePaintSummary {
     const fn certify(&mut self) {
-        self.image_only_after_native = self.image_paints > 0
-            && self.unsafe_image_paints == 0
+        self.image_only_after_native = self.image_paints > 0 && self.closed_visual_paint();
+    }
+
+    const fn closed_visual_paint(&self) -> bool {
+        self.unsafe_image_paints == 0
             && self.non_image_visual_paint == 0
             && self.unknown_paint == 0
             && self.unsupported_extgs == 0
@@ -205,7 +229,14 @@ impl PagePaintSummary {
             && self.unsafe_form_recursion == 0
             && self.unbalanced_q == 0
             && self.unbalanced_stream == 0
-            && self.annotations == 0;
+            && self.annotations == 0
+    }
+
+    /// All visible paint is native searchable text, or there is no visible paint.
+    /// Native word extraction is checked separately by the caller.
+    #[must_use]
+    pub fn native_text_only(&self) -> bool {
+        self.image_paints == 0 && self.closed_visual_paint() && self.native_only_blockers.is_empty()
     }
 }
 
@@ -707,6 +738,45 @@ fn named_resource(
     Ok(Some(resource.clone()))
 }
 
+/// Non-pattern color spaces cannot invoke a content stream. Resolve the
+/// actual named resource and reject unknown or pattern color-space families.
+fn non_pattern_color_space(
+    source: &SourcePdf,
+    resources: &OwnedDictionary,
+    name: &[u8],
+) -> Result<bool, Error> {
+    if matches!(name, b"DeviceGray" | b"DeviceRGB" | b"DeviceCMYK") {
+        return Ok(true);
+    }
+    if name == b"Pattern" {
+        return Ok(false);
+    }
+    let Some(resource) = named_resource(source, resources, b"ColorSpace", name)? else {
+        return Ok(false);
+    };
+    let family = match resolve_owned(source, resource)? {
+        OwnedObject::Name(family) => family,
+        OwnedObject::Array(values) => match values.first() {
+            Some(OwnedObject::Name(family)) => family.clone(),
+            _ => return Ok(false),
+        },
+        _ => return Ok(false),
+    };
+    Ok(matches!(
+        family.as_slice(),
+        b"DeviceGray"
+            | b"DeviceRGB"
+            | b"DeviceCMYK"
+            | b"CalGray"
+            | b"CalRGB"
+            | b"Lab"
+            | b"ICCBased"
+            | b"Indexed"
+            | b"Separation"
+            | b"DeviceN"
+    ))
+}
+
 fn instruction_numbers(
     instruction: &hayro_syntax::content::Instruction<'_, '_>,
 ) -> Option<Vec<f64>> {
@@ -869,6 +939,11 @@ impl ScanContext<'_> {
         if dict.contains_key(b"Group".as_slice()) {
             child.gs_unsafe = true;
         }
+        if child.clip_unknown || dict.contains_key(b"Group".as_slice()) {
+            self.summary
+                .native_only_blockers
+                .insert(NativeOnlyBlocker::FormContext);
+        }
         let child_resources = match dict.get(b"Resources".as_slice()) {
             Some(value) => resolve_dictionary(self.source, value)?,
             None => resources.clone(),
@@ -877,6 +952,79 @@ impl ScanContext<'_> {
         let result = self.visit_stream(&decoded, &child_resources, child, depth + 1);
         self.active_forms.remove(&id);
         result
+    }
+}
+
+/// Validation of balanced content scopes for the native-only certificate.
+/// Graphics-state and font inheritance still use the main paint walker.
+#[derive(Default)]
+struct NativeStreamClosure {
+    text_open: bool,
+    marked_content: usize,
+    compatibility: usize,
+}
+
+impl NativeStreamClosure {
+    const fn close_scope(depth: &mut usize) -> bool {
+        let nonempty = *depth != 0;
+        *depth = depth.saturating_sub(1);
+        nonempty
+    }
+
+    fn inspect(
+        &mut self,
+        instruction: &hayro_syntax::content::Instruction<'_, '_>,
+        numbers: Option<&[f64]>,
+        source: &SourcePdf,
+        resources: &OwnedDictionary,
+    ) -> Option<NativeOnlyBlocker> {
+        let op: &[u8] = &instruction.operator[..];
+        match op {
+            b"W" | b"W*" => return Some(NativeOnlyBlocker::Clipping),
+            b"gs" => return Some(NativeOnlyBlocker::ExtendedGraphicsState),
+            b"BT" => {
+                if std::mem::replace(&mut self.text_open, true) {
+                    return Some(NativeOnlyBlocker::StreamState);
+                }
+            }
+            b"ET" => {
+                if !std::mem::replace(&mut self.text_open, false) {
+                    return Some(NativeOnlyBlocker::StreamState);
+                }
+            }
+            b"Tj" | b"TJ" | b"'" | b"\"" if !self.text_open => {
+                return Some(NativeOnlyBlocker::StreamState);
+            }
+            b"BMC" | b"BDC" => self.marked_content += 1,
+            b"EMC" => {
+                if !Self::close_scope(&mut self.marked_content) {
+                    return Some(NativeOnlyBlocker::StreamState);
+                }
+            }
+            b"BX" => self.compatibility += 1,
+            b"EX" => {
+                if !Self::close_scope(&mut self.compatibility) {
+                    return Some(NativeOnlyBlocker::StreamState);
+                }
+            }
+            b"cs" | b"CS" => {
+                let plain = instruction_name(instruction).is_some_and(|name| {
+                    non_pattern_color_space(source, resources, &name).unwrap_or(false)
+                });
+                if !plain {
+                    return Some(NativeOnlyBlocker::ColorPattern);
+                }
+            }
+            b"scn" | b"SCN" | b"sc" | b"SC" if numbers.is_none() => {
+                return Some(NativeOnlyBlocker::ColorPattern);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    const fn balanced(&self) -> bool {
+        !self.text_open && self.marked_content == 0 && self.compatibility == 0
     }
 }
 
@@ -958,10 +1106,16 @@ impl ScanContext<'_> {
         let mut saved_states = Vec::new();
         let mut path = PathState::default();
         let mut next_do = 0_u32;
+        let mut closure = NativeStreamClosure::default();
 
         while let Some(instruction) = iter.next() {
             let op: &[u8] = &instruction.operator[..];
             let numbers = instruction_numbers(&instruction);
+            if let Some(blocker) =
+                closure.inspect(&instruction, numbers.as_deref(), self.source, resources)
+            {
+                self.summary.native_only_blockers.insert(blocker);
+            }
             if let Some(visual) = path.consume(op, numbers.as_deref(), &mut state) {
                 if visual {
                     self.summary.non_image_visual_paint += 1;
@@ -1035,6 +1189,15 @@ impl ScanContext<'_> {
         if !saved_states.is_empty() || path.pending_clip || state.text_open {
             self.summary.unbalanced_stream += 1;
         }
+        if !closure.balanced()
+            || !path.rects.is_empty()
+            || !path.subpaths.is_empty()
+            || path.curved_or_unknown
+        {
+            self.summary
+                .native_only_blockers
+                .insert(NativeOnlyBlocker::StreamState);
+        }
         if !iter.is_at_end() {
             self.summary.unknown_paint += 1;
         }
@@ -1080,6 +1243,14 @@ pub fn enumerate_image_paints(
             do_path: Vec::new(),
         };
         let page_object = source.materialize(id)?;
+        if page_object
+            .as_dictionary()
+            .is_none_or(|dict| dict.contains_key(b"Group".as_slice()))
+        {
+            ctx.summary
+                .native_only_blockers
+                .insert(NativeOnlyBlocker::PageContext);
+        }
         if let Some(dict) = page_object.as_dictionary()
             && let Some(annotations) = dict.get(b"Annots".as_slice())
         {

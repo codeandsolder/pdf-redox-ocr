@@ -13,7 +13,7 @@ use crate::{
     Error, PageNumber,
     draft::{DraftPage, OcrDraft, sha256_file},
     geometry::Quad,
-    hybrid::{MergeInput, MergeProposal, MergeStats, merge_ocr},
+    hybrid::{MergeInput, MergeProposal, MergeStats, PageRoute, merge_ocr},
     mixed_visibility::{MixedVisibility, prove_mixed_source_text},
     mosaic::{
         MosaicBudget, MosaicPlan, contains_native_fragments, mosaic_page_eligible,
@@ -76,6 +76,8 @@ impl PipelinePolicy {
 pub struct PipelineResult {
     pub draft: OcrDraft,
     pub stats: MergeStats,
+    /// The actual recognition path taken on every selected page.
+    pub routes: BTreeMap<PageNumber, PageRoute>,
     pub proposals: Vec<MergeProposal>,
     /// Original per-paint differential evidence, including occluded paints.
     pub visibility: MixedVisibility,
@@ -97,6 +99,8 @@ pub struct PreparedOcr {
 struct NativePreparation {
     source_only: SourceOnlyResult,
     mixed: MixedVisibility,
+    routes: BTreeMap<PageNumber, PageRoute>,
+    fallback_pages: Vec<PageNumber>,
 }
 
 type FragmentPlans = (BTreeSet<PageNumber>, BTreeMap<PageNumber, MosaicPlan>);
@@ -163,7 +167,7 @@ impl PreparedOcr {
     ) -> Result<PipelineResult, Error> {
         self.verify_source()?;
         let prepared = self.prepare_native_sources(engine, &mut progress)?;
-        let temporary_mask = self.prepare_raster_pdf(&mut progress)?;
+        let temporary_mask = self.prepare_raster_pdf(&prepared.fallback_pages, &mut progress)?;
         let raster_pdf = temporary_mask
             .as_ref()
             .map_or(self.pdf.as_path(), NamedTempFile::path);
@@ -185,7 +189,7 @@ impl PreparedOcr {
                 lines: native_lines,
                 native_text_regions: native_text_regions.clone(),
             });
-            if !prepared.source_only.approved_pages.contains(&page) {
+            if prepared.routes[&page] == PageRoute::PageFallback {
                 let image = render_rgb_page(raster_pdf, page, policy)?;
                 let mapper = self.doc.mapper(page)?;
                 let lines = engine.recognize_page(image, mapper)?;
@@ -218,13 +222,14 @@ impl PreparedOcr {
             raster: &raster_draft,
             image_observations: &prepared.mixed.observations,
             baseline: &fallback_draft,
-            raster_only: &prepared.source_only.approved_pages,
+            routes: &prepared.routes,
             proven_pages: &prepared.mixed.proven_pages,
             visibility_proofs: &prepared.mixed.proofs,
             threshold: self.policy.minimum_confidence,
         })?;
         progress(format!(
-            "OCR merge: {} source-only pages, {} fallback pages, {} verified native labels added",
+            "OCR merge: {} native-only pages, {} source-only pages, {} fallback pages, {} verified native labels added",
+            stats.native_only_pages,
             stats.image_source_only_pages,
             stats.page_fallback_pages,
             stats.nonoverlapping_image_lines_added,
@@ -233,6 +238,7 @@ impl PreparedOcr {
         Ok(PipelineResult {
             draft,
             stats,
+            routes: prepared.routes,
             proposals,
             visibility: prepared.mixed,
         })
@@ -448,12 +454,44 @@ impl PreparedOcr {
             source_only.approved_pages.len(),
             self.selected.len()
         ));
+        // A native-only page needs neither the font mask nor a page render.
+        // Retain its word exclusion regions even when it has no OCR output.
+        let routes = scanned
+            .pages
+            .iter()
+            .map(|summary| {
+                let page = PageNumber::new(summary.page)?;
+                let words = self
+                    .natives
+                    .get(&page)
+                    .ok_or_else(|| Error::Invalid("missing native words".into()))?;
+                let route = if source_only.approved_pages.contains(&page) {
+                    PageRoute::RasterOnly
+                } else if !self.policy.keep_native_text
+                    && summary.native_text_only()
+                    && (summary.native_searchable_shows == 0 || !words.is_empty())
+                {
+                    PageRoute::NativeOnly
+                } else {
+                    PageRoute::PageFallback
+                };
+                Ok((page, route))
+            })
+            .collect::<Result<BTreeMap<_, _>, Error>>()?;
         let fallback_selected = self
             .selected
             .iter()
             .copied()
-            .filter(|page| !source_only.approved_pages.contains(page))
+            .filter(|page| routes.get(page) == Some(&PageRoute::PageFallback))
             .collect::<Vec<_>>();
+        progress(format!(
+            "native-text-only fast path approved {} of {} selected pages",
+            routes
+                .values()
+                .filter(|&&route| route == PageRoute::NativeOnly)
+                .count(),
+            self.selected.len()
+        ));
         let mixed = match prove_mixed_source_text(
             &self.pdf,
             &self.doc,
@@ -476,18 +514,24 @@ impl PreparedOcr {
             mixed.proofs.len(),
             mixed.audited.len()
         ));
-        Ok(NativePreparation { source_only, mixed })
+        Ok(NativePreparation {
+            source_only,
+            mixed,
+            routes,
+            fallback_pages: fallback_selected,
+        })
     }
 
     /// Build an ephemeral font-suppressed PDF for page-only OCR rendering.
     fn prepare_raster_pdf(
         &self,
+        fallback_pages: &[PageNumber],
         progress: &mut dyn FnMut(String),
     ) -> Result<Option<NamedTempFile>, Error> {
-        if self.policy.keep_native_text {
+        if self.policy.keep_native_text || fallback_pages.is_empty() {
             return Ok(None);
         }
-        let mask = mask_native_fonts(&self.doc, &self.selected)?;
+        let mask = mask_native_fonts(&self.doc, fallback_pages)?;
         progress(format!(
             "native-font render mask: {} searchable shows hidden, {} Type3/unclassified preserved, {} clipping preserved, {} Forms cloned",
             mask.stats.hidden_native_shows,

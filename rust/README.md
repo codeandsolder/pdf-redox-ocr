@@ -125,6 +125,18 @@ model initialization. `recognize` then runs source reuse, source-resolution
 mosaics, paint visibility proofs, and the masked full-page fallback through
 one `RecognitionBackend`. The backend receives owned RGB rasters and an
 explicit pixel-to-PDF coordinate mapping; it supplies its model provenance.
+The scanner also certifies native-only or empty pages using shared paint
+closure and source context; those pages retain their native word regions
+without any OCR lines, rendering or font masking. The merge validates an
+explicit, exhaustive three-way route partition (native-only, raster-only,
+page fallback). Only fallback pages need a font-suppressed raster. Named
+pattern color spaces, unsupported paint, clipping, extended graphics state,
+annotations and malformed content scopes cannot obtain native-only closure.
+Pages with visible native shows but no extracted native words also fall back.
+The native model loads lazily, so no ONNX session or model download is
+needed for a document consisting entirely of native-only pages. The
+`--keep-native-text` diagnostic disables native-only bypass.
+
 The returned `PipelineResult` includes the v3 importer draft, merge statistics,
 admission proposals and original per-paint visibility audits. Progress goes to
 the caller's callback, not global standard error. The source hash is checked

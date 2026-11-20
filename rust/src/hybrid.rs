@@ -144,6 +144,8 @@ pub struct MergeProposal {
 /// Summary of the source/page merge.
 #[derive(Debug, Default, Clone, Copy, Serialize)]
 pub struct MergeStats {
+    /// Native-text-only or empty pages requiring no OCR.
+    pub native_only_pages: usize,
     /// Pages where source OCR replaces full page OCR.
     pub image_source_only_pages: usize,
     /// OCR lines emitted directly from source-only pages.
@@ -226,6 +228,18 @@ fn index_merge_evidence<'a>(
     Ok((observations_by_page, proofs))
 }
 
+/// Mutually exclusive recognition paths for each selected PDF page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageRoute {
+    /// Native searchable text or an empty page, no OCR output.
+    NativeOnly,
+    /// Source images or reconstructed native-resolution mosaics.
+    RasterOnly,
+    /// Full page OCR, optionally supplemented by proven source labels.
+    PageFallback,
+}
+
 /// Exact inputs and source-specific provenance for one hybrid OCR merge.
 #[derive(Debug, Clone, Copy)]
 pub struct MergeInput<'a> {
@@ -233,14 +247,14 @@ pub struct MergeInput<'a> {
     pub pdf: &'a Path,
     /// Selected one-based pages in caller-requested order.
     pub selected: &'a [PageNumber],
-    /// Native-raster OCR draft for all selected pages.
+    /// Native word exclusions for every selected page and source-only OCR lines.
     pub raster: &'a OcrDraft,
     /// Source-bound observations from each painted image.
     pub image_observations: &'a [ImageObservation],
-    /// Full-page OCR draft for all pages not approved as raster-only.
+    /// Full-page OCR draft for exactly the fallback pages.
     pub baseline: &'a OcrDraft,
-    /// Pages proven to contain only independent, visible raster paint.
-    pub raster_only: &'a BTreeSet<PageNumber>,
+    /// Exactly one route for every selected page.
+    pub routes: &'a BTreeMap<PageNumber, PageRoute>,
     /// Pages whose differential mask-verification completed.
     pub proven_pages: &'a BTreeSet<PageNumber>,
     /// Source and paint-specific visibility observations.
@@ -249,7 +263,49 @@ pub struct MergeInput<'a> {
     pub threshold: f64,
 }
 
-/// Merge raster-only pages and eligible visible image labels into page OCR.
+impl MergeInput<'_> {
+    fn validate_partition(&self) -> Result<BTreeSet<PageNumber>, Error> {
+        let Self {
+            pdf,
+            selected,
+            raster,
+            baseline,
+            routes,
+            proven_pages,
+            threshold,
+            ..
+        } = *self;
+        if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+            return Err(Error::Invalid(
+                "invalid additional raster confidence threshold".into(),
+            ));
+        }
+        raster.verify_pdf(pdf)?;
+        baseline.verify_pdf(pdf)?;
+        if raster.pdf_sha256 != baseline.pdf_sha256 {
+            return Err(Error::Invalid(
+                "page fallback was run on a different PDF".into(),
+            ));
+        }
+        let selected_pages = selected.iter().copied().collect::<BTreeSet<_>>();
+        if selected_pages.len() != selected.len()
+            || selected_pages.is_empty()
+            || routes.keys().copied().collect::<BTreeSet<_>>() != selected_pages
+        {
+            return Err(Error::Invalid("invalid selected-page partition".into()));
+        }
+        let fallback_pages = routes
+            .iter()
+            .filter_map(|(&page, &route)| (route == PageRoute::PageFallback).then_some(page))
+            .collect::<BTreeSet<_>>();
+        if !proven_pages.is_subset(&fallback_pages) {
+            return Err(Error::Invalid("source proofs outside page fallback".into()));
+        }
+        Ok(fallback_pages)
+    }
+}
+
+/// Merge native-only, raster-only and fallback pages with proved visible labels.
 ///
 /// The verifier passes *only* proofs from pages for which the source-masked
 /// render comparison completed. Source and paint IDs cannot be dropped.
@@ -262,49 +318,25 @@ pub fn merge_ocr(
     input: MergeInput<'_>,
 ) -> Result<(OcrDraft, MergeStats, Vec<MergeProposal>), Error> {
     let MergeInput {
-        pdf,
         selected,
         raster,
         image_observations,
         baseline,
-        raster_only,
-        proven_pages,
-
-        threshold,
+        routes,
         ..
     } = input;
-    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
-        return Err(Error::Invalid(
-            "invalid additional raster confidence threshold".into(),
-        ));
-    }
-    raster.verify_pdf(pdf)?;
-    baseline.verify_pdf(pdf)?;
-    if raster.pdf_sha256 != baseline.pdf_sha256 {
-        return Err(Error::Invalid(
-            "page fallback was run on a different PDF".into(),
-        ));
-    }
-    let selected_pages = selected.iter().copied().collect::<BTreeSet<_>>();
-    if selected_pages.len() != selected.len()
-        || selected_pages.is_empty()
-        || !raster_only.is_subset(&selected_pages)
-        || !proven_pages.is_subset(&selected_pages)
-    {
-        return Err(Error::Invalid("invalid selected-page partition".into()));
-    }
+    let fallback_pages = input.validate_partition()?;
     let raster_map = pages_by_number(&raster.pages)?;
     let baseline_map = pages_by_number(&baseline.pages)?;
-    if raster_map.keys().copied().collect::<BTreeSet<_>>() != selected_pages
-        || baseline_map.keys().copied().collect::<BTreeSet<_>>()
-            != selected_pages.difference(raster_only).copied().collect()
+    if !raster_map.keys().eq(routes.keys())
+        || baseline_map.keys().copied().collect::<BTreeSet<_>>() != fallback_pages
     {
         return Err(Error::Invalid(
             "raster/page fallback coverage incomplete".into(),
         ));
     }
     let (observations_by_page, proofs) =
-        index_merge_evidence(image_observations, input.visibility_proofs, &selected_pages)?;
+        index_merge_evidence(image_observations, input.visibility_proofs, &fallback_pages)?;
     let mut merged_pages = Vec::with_capacity(selected.len());
     let mut stats = MergeStats::default();
     let mut proposals = Vec::new();
@@ -312,11 +344,22 @@ pub fn merge_ocr(
         let raster_page = raster_map
             .get(page)
             .ok_or_else(|| Error::Invalid(format!("missing raster page {}", page.get())))?;
-        if raster_only.contains(page) {
-            merged_pages.push((*raster_page).clone());
-            stats.image_source_only_pages += 1;
-            stats.image_source_lines += raster_page.lines.len();
-            continue;
+        match routes[page] {
+            PageRoute::NativeOnly => {
+                if !raster_page.lines.is_empty() {
+                    return Err(Error::Invalid("native-only page contains OCR lines".into()));
+                }
+                merged_pages.push((*raster_page).clone());
+                stats.native_only_pages += 1;
+                continue;
+            }
+            PageRoute::RasterOnly => {
+                merged_pages.push((*raster_page).clone());
+                stats.image_source_only_pages += 1;
+                stats.image_source_lines += raster_page.lines.len();
+                continue;
+            }
+            PageRoute::PageFallback => {}
         }
         let baseline_page = baseline_map
             .get(page)
@@ -432,15 +475,19 @@ fn round4(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ImageObservation, ImagePaintEvidence, MergeInput, RasterPageEvidence, VisibilityProof,
-        approve_raster_only_pages, merge_ocr,
+        ImageObservation, ImagePaintEvidence, MergeInput, PageRoute, RasterPageEvidence,
+        VisibilityProof, approve_raster_only_pages, merge_ocr,
     };
     use crate::{
         PageNumber,
         draft::{DraftPage, OcrDraft, OcrLine, sha256_file},
         geometry::Point,
     };
-    use std::{collections::BTreeSet, fs, path::PathBuf};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+        path::PathBuf,
+    };
 
     fn rect(x: f64, y: f64, width: f64, height: f64) -> [Point; 4] {
         [
@@ -458,6 +505,89 @@ mod tests {
             quad,
             reviewed: false,
         }
+    }
+
+    #[test]
+    fn native_only_route_preserves_words_and_excludes_every_ocr_payload()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let file = tempfile::NamedTempFile::new()?;
+        fs::write(file.path(), b"native only source")?;
+        let page = PageNumber::new(1)?;
+        let digest = sha256_file(file.path())?;
+        let words = vec![rect(10.0, 20.0, 100.0, 12.0)];
+        let raster = OcrDraft::new(
+            digest.clone(),
+            "source".into(),
+            vec![DraftPage {
+                page: 1,
+                lines: vec![],
+                native_text_regions: words.clone(),
+            }],
+        );
+        let baseline = OcrDraft::new(digest, "page".into(), vec![]);
+        let routes = BTreeMap::from([(page, PageRoute::NativeOnly)]);
+        let no_pages = BTreeSet::new();
+        let input = MergeInput {
+            pdf: file.path(),
+            selected: &[page],
+            raster: &raster,
+            image_observations: &[],
+            baseline: &baseline,
+            routes: &routes,
+            proven_pages: &no_pages,
+            visibility_proofs: &[],
+            threshold: 0.97,
+        };
+        let (draft, stats, _) = merge_ocr(input)?;
+        assert_eq!(draft.pages[0].native_text_regions, words);
+        assert_eq!(stats.native_only_pages, 1);
+        assert_eq!(stats.image_source_only_pages, 0);
+        assert_eq!(stats.page_fallback_pages, 0);
+        assert!(
+            merge_ocr(MergeInput {
+                routes: &BTreeMap::new(),
+                ..input
+            })
+            .is_err()
+        );
+        assert!(
+            merge_ocr(MergeInput {
+                proven_pages: &BTreeSet::from([page]),
+                ..input
+            })
+            .is_err()
+        );
+        let bogus = ImageObservation {
+            page: 1,
+            source_id: "9:0".into(),
+            paint_index: 0,
+            line: line("forged OCR", rect(10.0, 20.0, 100.0, 12.0)),
+        };
+        assert!(
+            merge_ocr(MergeInput {
+                image_observations: std::slice::from_ref(&bogus),
+                ..input
+            })
+            .is_err()
+        );
+        assert!(
+            merge_ocr(MergeInput {
+                baseline: &raster,
+                ..input
+            })
+            .is_err()
+        );
+        let mut invalid_raster = raster.clone();
+        invalid_raster.pages[0].lines.push(bogus.line);
+        assert!(
+            merge_ocr(MergeInput {
+                raster: &invalid_raster,
+                ..input
+            })
+            .is_err()
+        );
+        assert_eq!(raster.pages[0].native_text_regions, words);
+        Ok(())
     }
 
     #[test]
@@ -559,7 +689,10 @@ mod tests {
             raster: &raster,
             image_observations: &candidates,
             baseline: &baseline,
-            raster_only: &BTreeSet::from([selected[0]]),
+            routes: &BTreeMap::from([
+                (selected[0], PageRoute::RasterOnly),
+                (selected[1], PageRoute::PageFallback),
+            ]),
             proven_pages: &BTreeSet::from([selected[1]]),
             visibility_proofs: &proofs,
             threshold: 0.97,
@@ -584,14 +717,17 @@ mod tests {
         let result = (|| {
             let (raster, baseline, observations) = merge_fixture(sha256_file(&path)?);
             let selected = [PageNumber::new(1)?, PageNumber::new(2)?];
-            let only = BTreeSet::from([selected[0]]);
+            let only = BTreeMap::from([
+                (selected[0], PageRoute::RasterOnly),
+                (selected[1], PageRoute::PageFallback),
+            ]);
             let (ignored, stats, _) = merge_ocr(MergeInput {
                 pdf: &path,
                 selected: &selected,
                 raster: &raster,
                 image_observations: &observations,
                 baseline: &baseline,
-                raster_only: &only,
+                routes: &only,
                 proven_pages: &BTreeSet::new(),
                 visibility_proofs: &[],
                 threshold: 0.97,
@@ -615,7 +751,7 @@ mod tests {
                 raster: &raster,
                 image_observations: &observations,
                 baseline: &baseline,
-                raster_only: &only,
+                routes: &only,
                 proven_pages: &BTreeSet::from([selected[1]]),
                 visibility_proofs: &proof,
                 threshold: 0.97,
@@ -635,7 +771,7 @@ mod tests {
                 raster: &raster,
                 image_observations: &observations,
                 baseline: &baseline,
-                raster_only: &only,
+                routes: &only,
                 proven_pages: &BTreeSet::from([selected[1]]),
                 visibility_proofs: &wrong_source_proof,
                 threshold: 0.97,
@@ -654,7 +790,10 @@ mod tests {
         fs::write(sample.path(), b"test image paint evidence identity")?;
         let (raster, baseline, observations) = merge_fixture(sha256_file(sample.path())?);
         let selected = [PageNumber::new(1)?, PageNumber::new(2)?];
-        let source_only = BTreeSet::from([selected[0]]);
+        let source_only = BTreeMap::from([
+            (selected[0], PageRoute::RasterOnly),
+            (selected[1], PageRoute::PageFallback),
+        ]);
         let proven_pages = BTreeSet::from([selected[1]]);
         let original = observations[0].clone();
         let proof = VisibilityProof {
@@ -672,7 +811,7 @@ mod tests {
                 raster: &raster,
                 image_observations: observations,
                 baseline: &baseline,
-                raster_only: &source_only,
+                routes: &source_only,
                 proven_pages: &proven_pages,
                 visibility_proofs: proofs,
                 threshold: 0.97,

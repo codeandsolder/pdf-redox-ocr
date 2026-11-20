@@ -8,7 +8,7 @@ use crate::{
     geometry::{DisplayMapper, Point},
 };
 
-/// A warmed OCR recognizer; mapping is supplied by the caller for every raster.
+/// A reusable OCR recognizer; mapping is supplied by the caller for every raster.
 pub trait RecognitionBackend {
     /// Stable model and preprocessing provenance for the generated draft.
     fn model_profile(&self) -> &str;
