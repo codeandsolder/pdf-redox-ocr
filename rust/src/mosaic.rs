@@ -575,18 +575,18 @@ mod tests {
         let mut components = if indexed {
             super::connected_components(items, page)
         } else {
-            let mut components = DisjointSet::new(items.len());
+            let mut components = crate::disjoint_set::DisjointSet::new(items.len());
             for (i, &item) in items.iter().enumerate() {
                 for (j, &other) in items.iter().enumerate().skip(i + 1) {
                     if super::compatible(item, other) {
-                        super::components.connect(i, j);
+                        components.connect(i, j);
                     }
                 }
             }
             let mut result = std::collections::BTreeMap::new();
             for (i, &item) in items.iter().enumerate() {
                 result
-                    .entry(super::root(&mut parents, i))
+                    .entry(components.root(i))
                     .or_insert_with(Vec::new)
                     .push(item);
             }
