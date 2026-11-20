@@ -1,6 +1,12 @@
 //! Research-only PP-OCRv6 medium recognition on uncertain PDF text quads.
 
-use std::{collections::BTreeSet, error::Error, fs, io::Write, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fs,
+    io::Write,
+    path::PathBuf,
+};
 
 use clap::Parser;
 use image::{RgbImage, imageops};
@@ -16,7 +22,10 @@ use pdf_redox_ocr::{
     page_selection::parse_page_selection,
     pdf_metadata::PdfMetadata,
     rasterize::{DEFAULT_PAGE_MAX_SIDE, RenderPolicy},
-    refinement::{Recognition, RefinementPolicy, RefinementRequest, refine_draft, refinement_plan},
+    refinement::{
+        Recognition, RefinementPolicy, RefinementRequest, RefinementScope, refine_draft,
+        refinement_plan,
+    },
 };
 use tempfile::NamedTempFile;
 
@@ -43,8 +52,11 @@ struct Args {
     #[arg(long)]
     experimental_draft: PathBuf,
     /// Optional one-based page numbers and inclusive ranges.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "lines")]
     pages: Option<String>,
+    /// Exact original draft observation `PAGE:ZERO_BASED_LINE_INDEX`; repeatable.
+    #[arg(long = "line", value_name = "PAGE:INDEX")]
+    lines: Vec<String>,
     /// Maximum primary OCR confidence to reconsider.
     #[arg(long, default_value_t = 0.97)]
     max_primary_score: f64,
@@ -147,6 +159,31 @@ impl OnnxRecognizer {
     }
 }
 
+/// Parse original draft page and zero-based line indices without ambiguity.
+fn parse_exact_lines(
+    specifications: &[String],
+) -> Result<BTreeMap<PageNumber, BTreeSet<usize>>, pdf_redox_ocr::Error> {
+    let mut targets = BTreeMap::<PageNumber, BTreeSet<usize>>::new();
+    for spec in specifications {
+        let (page, index) = spec.split_once(':').ok_or_else(|| {
+            pdf_redox_ocr::Error::Invalid(format!("expected PAGE:INDEX, got {spec:?}"))
+        })?;
+        let number = page.parse::<u32>().map_err(|_| {
+            pdf_redox_ocr::Error::Invalid(format!("invalid OCR target page {page:?}"))
+        })?;
+        let number = PageNumber::new(number)?;
+        let index = index.parse::<usize>().map_err(|_| {
+            pdf_redox_ocr::Error::Invalid(format!("invalid OCR target index {index:?}"))
+        })?;
+        if !targets.entry(number).or_default().insert(index) {
+            return Err(pdf_redox_ocr::Error::Invalid(format!(
+                "duplicate explicit OCR target {spec:?}"
+            )));
+        }
+    }
+    Ok(targets)
+}
+
 fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     check_output_paths(&args.pdf, &[&args.report, &args.experimental_draft])?;
     check_output_paths(&args.primary_ocr, &[&args.report, &args.experimental_draft])?;
@@ -160,6 +197,14 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
         .map(|pages| parse_page_selection(Some(pages), metadata.page_count()))
         .transpose()?
         .map(|pages| pages.into_iter().collect::<BTreeSet<PageNumber>>());
+    let exact_lines = parse_exact_lines(&args.lines)?;
+    let scope = if exact_lines.is_empty() {
+        RefinementScope::ByConfidence {
+            pages: selection.as_ref(),
+        }
+    } else {
+        RefinementScope::ExplicitLines(&exact_lines)
+    };
     let policy = RefinementPolicy {
         max_primary_score: args.max_primary_score,
         min_chars: args.min_chars,
@@ -170,7 +215,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
         },
     }
     .validate()?;
-    let plan = refinement_plan(&source, selection.as_ref(), metadata.page_count(), policy)?;
+    let plan = refinement_plan(&source, scope, metadata.page_count(), policy)?;
     let candidate_pages = plan.keys().copied().collect::<Vec<_>>();
     let mut masked_pdf = None;
     if !candidate_pages.is_empty()
@@ -207,7 +252,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
             render_pdf,
             metadata: &metadata,
             source: &source,
-            selected: selection.as_ref(),
+            scope,
             secondary_model: &label,
             policy,
         },
@@ -240,4 +285,26 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     run(&Args::parse())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_exact_lines;
+    use pdf_redox_ocr::PageNumber;
+
+    #[test]
+    fn exact_line_syntax_and_duplicates_are_unambiguous() -> Result<(), pdf_redox_ocr::Error> {
+        let targets = parse_exact_lines(&["28:11".into(), "28:2".into(), "8:0".into()])?;
+        let page = PageNumber::new(28)?;
+        assert_eq!(
+            targets[&page].iter().copied().collect::<Vec<_>>(),
+            vec![2, 11],
+        );
+        assert_eq!(targets[&PageNumber::new(8)?].len(), 1);
+        for invalid in ["0:1", "28", ":2", "x:2", "28:-1", "28:1:0", "28:x"] {
+            assert!(parse_exact_lines(&[invalid.into()]).is_err(), "{invalid}");
+        }
+        assert!(parse_exact_lines(&["28:2".into(), "28:2".into()]).is_err());
+        Ok(())
+    }
 }

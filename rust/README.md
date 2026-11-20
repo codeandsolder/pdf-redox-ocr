@@ -137,9 +137,24 @@ automatic rewrite of the primary PDF. The experimental draft has every line
 unreviewed with confidence **zero**, including unchanged lines. Unicode NFKC
 and whitespace differences are recorded as equivalent, but altered case,
 digits, punctuation, and units remain distinct. No second model is loaded if
-nothing qualifies for refinement. When searchable native fonts overlap
-selected pages, an ephemeral render-only font mask is used as in primary OCR.
-Both CLIs share strict page-selection and atomic output handling.
+nothing qualifies for refinement. For **high-confidence errors**, pass exact
+original-draft indices with repeatable `--line PAGE:INDEX` instead of editing a
+reduced copy of the OCR observations; these line numbers are zero-based and are
+validated against the unchanged source draft, bypassing only confidence and
+minimum-length selection:
+
+```sh
+pdf-redox-ocr-refine --pdf input.pdf --primary-ocr observations.json \
+  --line 28:2 --line 28:11 --report diameter-hypotheses.json \
+  --experimental-draft diameter-experimental.json
+```
+
+The second-pass report schema 2 identifies `selection_mode` as `confidence`
+or `explicit-lines`, and emits null selection thresholds in explicit mode.
+Every experimental draft line remains unreviewed with confidence zero regardless
+of selection. When searchable native fonts overlap selected pages, an ephemeral
+render-only font mask is used as in primary OCR. Both CLIs share strict
+page-selection and atomic output handling.
 
 ## Source-bound manual OCR quality evaluation
 
@@ -161,7 +176,13 @@ pdf-redox-ocr-eval --pdf source.pdf --draft primary.json \
 
 Its JSON report has per-sample predictions (including absent observations),
 confidence, candidate ambiguity, error counts, overall totals and per-kind
-metrics. The evaluator needs neither ONNX models nor a PDF rendering engine,
+metrics. Its `confidence_curve` records, at every observed confidence threshold,
+what share of manually anchored labels would be admitted and their empirical
+normalized-text error rate. Missing OCR observations never enter the admitted
+set; tied confidence values are always evaluated together. This reports
+actual high-confidence failures instead of treating numerical confidence as a
+calibrated probability or authorization to insert text.
+The evaluator needs neither ONNX models nor a PDF rendering engine,
 and never edits the input draft or source PDF. The two small, manually reviewed reference manifests are versioned in
 `tests/fixtures/quality/` (86 DEFOND and 10 Walsin anchors). Original supplier
 PDFs, full OCR observations and benchmark outputs remain in the separate

@@ -64,6 +64,20 @@ pub struct QualitySample {
     pub normalized_character_edits: usize,
 }
 
+/// Observed quality when admitting every matched line at or above this score.
+///
+/// These are retrospective, *labeled* sample statistics, not proof that the
+/// model's numeric confidence is a calibrated probability.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfidencePoint {
+    pub minimum_confidence: f64,
+    pub admitted: usize,
+    pub admitted_normalized_exact: usize,
+    pub admitted_errors: usize,
+    pub reference_coverage: f64,
+    pub empirical_error_rate: f64,
+}
+
 /// Auditable report bound to the exact original PDF hash.
 #[derive(Debug, Clone, Serialize)]
 pub struct QualityReport {
@@ -73,6 +87,7 @@ pub struct QualityReport {
     pub draft_model: String,
     pub overall: QualityMetrics,
     pub by_kind: BTreeMap<String, QualityMetrics>,
+    pub confidence_curve: Vec<ConfidencePoint>,
     pub samples: Vec<QualitySample>,
 }
 
@@ -101,16 +116,6 @@ impl Counters {
     }
 
     fn metrics(self) -> QualityMetrics {
-        let ratio = |errors: usize, reference: usize| {
-            if reference == 0 {
-                0.0
-            } else {
-                errors
-                    .to_f64()
-                    .zip(reference.to_f64())
-                    .map_or(0.0, |(error, count)| error / count)
-            }
-        };
         QualityMetrics {
             samples: self.samples,
             matched: self.matched,
@@ -121,8 +126,8 @@ impl Counters {
             normalized_character_edits: self.normalized_character_edits,
             reference_characters: self.reference_characters,
             normalized_reference_characters: self.normalized_reference_characters,
-            character_error_rate: ratio(self.character_edits, self.reference_characters),
-            normalized_character_error_rate: ratio(
+            character_error_rate: proportion(self.character_edits, self.reference_characters),
+            normalized_character_error_rate: proportion(
                 self.normalized_character_edits,
                 self.normalized_reference_characters,
             ),
@@ -132,6 +137,57 @@ impl Counters {
 
 fn normalized(s: &str) -> String {
     s.nfkc().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// A ratio over observed counts, with no implied statistical confidence.
+fn proportion(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        return 0.0;
+    }
+    numerator
+        .to_f64()
+        .zip(denominator.to_f64())
+        .map_or(0.0, |(numerator, denominator)| numerator / denominator)
+}
+
+/// Full empirical risk/coverage curve over distinct model confidence scores.
+///
+/// A missing observation has no model confidence and never counts as admitted.
+/// Tied confidence values are grouped, so a threshold cannot select an
+/// arbitrary subset of equally confident predictions.
+#[must_use]
+pub fn confidence_curve(samples: &[QualitySample]) -> Vec<ConfidencePoint> {
+    let mut scores = samples
+        .iter()
+        .filter_map(|sample| {
+            sample
+                .confidence
+                .map(|score| (score, sample.normalized_exact))
+        })
+        .collect::<Vec<_>>();
+    scores.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+    let mut curve = Vec::new();
+    let mut index = 0;
+    let mut admitted = 0;
+    let mut correct = 0;
+    while index < scores.len() {
+        let threshold = scores[index].0;
+        while index < scores.len() && scores[index].0.total_cmp(&threshold).is_eq() {
+            admitted += 1;
+            correct += usize::from(scores[index].1);
+            index += 1;
+        }
+        curve.push(ConfidencePoint {
+            minimum_confidence: threshold,
+            admitted,
+            admitted_normalized_exact: correct,
+            admitted_errors: admitted - correct,
+            reference_coverage: proportion(admitted, samples.len()),
+            empirical_error_rate: proportion(admitted - correct, admitted),
+        });
+    }
+    curve
 }
 
 /// Levenshtein distance over Unicode scalar values, not UTF-8 bytes.
@@ -332,6 +388,7 @@ pub fn evaluate(reference: &GroundTruth, draft: &OcrDraft) -> Result<QualityRepo
         kinds.entry(label.kind.clone()).or_default().add(&sample);
         samples.push(sample);
     }
+    let curve = confidence_curve(&samples);
     Ok(QualityReport {
         schema_version: 1,
         pdf_sha256: draft.pdf_sha256.clone(),
@@ -342,6 +399,7 @@ pub fn evaluate(reference: &GroundTruth, draft: &OcrDraft) -> Result<QualityRepo
             .into_iter()
             .map(|(kind, metrics)| (kind, metrics.metrics()))
             .collect(),
+        confidence_curve: curve,
         samples,
     })
 }
@@ -530,6 +588,38 @@ mod tests {
         assert_eq!(report.overall.matched, 2);
         assert_eq!(report.overall.exact, 2);
         assert_eq!(report.samples[0].candidate_count, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn confidence_curve_exposes_high_confidence_errors_and_missing_anchors()
+    -> Result<(), crate::Error> {
+        let mut source = draft();
+        source.pages[0].lines[1].text = "wrong".into();
+        source.pages[0].lines[1].confidence = 0.999;
+        let report = evaluate(&truth(), &source)?;
+        assert_eq!(report.overall.missing, 1);
+        assert_eq!(report.confidence_curve.len(), 2);
+        let strict = &report.confidence_curve[0];
+        assert_eq!(strict.minimum_confidence, 0.999);
+        assert_eq!(strict.admitted, 1);
+        assert_eq!(strict.admitted_normalized_exact, 0);
+        assert_eq!(strict.admitted_errors, 1);
+        assert!((strict.reference_coverage - 1.0 / 3.0).abs() < 1e-12);
+        assert_eq!(strict.empirical_error_rate, 1.0);
+
+        let permissive = &report.confidence_curve[1];
+        assert_eq!(permissive.minimum_confidence, 0.9);
+        assert_eq!(permissive.admitted, 2);
+        assert_eq!(permissive.admitted_normalized_exact, 1);
+        assert_eq!(permissive.admitted_errors, 1);
+        assert_eq!(permissive.empirical_error_rate, 0.5);
+
+        source.pages[0].lines[0].confidence = 0.999;
+        let ties = evaluate(&truth(), &source)?;
+        assert_eq!(ties.confidence_curve.len(), 1);
+        assert_eq!(ties.confidence_curve[0].admitted, 2);
+        assert_eq!(ties.confidence_curve[0].admitted_errors, 1);
         Ok(())
     }
 

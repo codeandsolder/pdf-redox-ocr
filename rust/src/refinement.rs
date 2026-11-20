@@ -67,6 +67,20 @@ impl RefinementPolicy {
     }
 }
 
+/// Select either low-confidence observations or explicit source-draft line indices.
+///
+/// Explicit targets bypass confidence and minimum-text-length thresholds, but
+/// must refer to real, nonblank observations in the unchanged original draft.
+#[derive(Clone, Copy, Debug)]
+pub enum RefinementScope<'a> {
+    /// Usual automatic candidate selection on all or a subset of draft pages.
+    ByConfidence {
+        pages: Option<&'a BTreeSet<PageNumber>>,
+    },
+    /// Research selection of exact zero-based line indices keyed by PDF page.
+    ExplicitLines(&'a BTreeMap<PageNumber, BTreeSet<usize>>),
+}
+
 /// Recognition returned for one crop in the original input order.
 #[derive(Debug, Clone)]
 pub struct Recognition {
@@ -112,8 +126,9 @@ pub struct RefinementReport {
     pub pdf_sha256: String,
     pub source_model: String,
     pub secondary_model: String,
-    pub max_primary_score: f64,
-    pub min_chars: usize,
+    pub selection_mode: &'static str,
+    pub max_primary_score: Option<f64>,
+    pub min_chars: Option<usize>,
     pub max_side: u32,
     pub summary: RefinementSummary,
     pub proposals: Vec<RefinementProposal>,
@@ -190,7 +205,7 @@ pub fn raster_quad(
 /// Rejects invalid input page identity, confidence or page selections.
 pub fn refinement_plan(
     draft: &OcrDraft,
-    selected: Option<&BTreeSet<PageNumber>>,
+    scope: RefinementScope<'_>,
     page_count: usize,
     policy: RefinementPolicy,
 ) -> Result<BTreeMap<PageNumber, Vec<usize>>, Error> {
@@ -198,33 +213,73 @@ pub fn refinement_plan(
     if draft.schema_version != 3 {
         return Err(Error::Invalid("unsupported OCR importer schema".into()));
     }
-    let mut plan = BTreeMap::new();
     let mut seen = BTreeSet::new();
     for page in &draft.pages {
         let number = PageNumber::new(page.page)?;
         if !usize::try_from(page.page).is_ok_and(|p| p <= page_count) || !seen.insert(number) {
             return Err(Error::Invalid("invalid or duplicate draft page".into()));
         }
-        let mut indices = Vec::new();
-        for (index, line) in page.lines.iter().enumerate() {
+        for line in &page.lines {
             if !line.confidence.is_finite() || !(0.0..=1.0).contains(&line.confidence) {
                 return Err(Error::Invalid("invalid primary OCR confidence".into()));
             }
-            if selected.is_none_or(|pages| pages.contains(&number))
-                && line.confidence <= policy.max_primary_score
-                && line.text.trim().chars().count() >= policy.min_chars
-            {
-                indices.push(index);
-            }
-        }
-        if !indices.is_empty() {
-            plan.insert(number, indices);
         }
     }
-    if selected.is_some_and(|pages| pages.is_empty() || !pages.is_subset(&seen)) {
-        return Err(Error::Invalid(
-            "requested refinement page missing from draft".into(),
-        ));
+
+    let mut plan = BTreeMap::new();
+    match scope {
+        RefinementScope::ByConfidence { pages } => {
+            if pages.is_some_and(|pages| pages.is_empty() || !pages.is_subset(&seen)) {
+                return Err(Error::Invalid(
+                    "requested refinement page missing from draft".into(),
+                ));
+            }
+            for page in &draft.pages {
+                let number = PageNumber::new(page.page)?;
+                if pages.is_some_and(|pages| !pages.contains(&number)) {
+                    continue;
+                }
+                let indices = page
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, line)| {
+                        (line.confidence <= policy.max_primary_score
+                            && line.text.trim().chars().count() >= policy.min_chars)
+                            .then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                if !indices.is_empty() {
+                    plan.insert(number, indices);
+                }
+            }
+        }
+        RefinementScope::ExplicitLines(targets) => {
+            if targets.is_empty() {
+                return Err(Error::Invalid("empty explicit OCR targets".into()));
+            }
+            for (&number, indices) in targets {
+                let page = draft
+                    .pages
+                    .iter()
+                    .find(|page| page.page == number.get())
+                    .ok_or_else(|| Error::Invalid("explicit OCR target page missing".into()))?;
+                if indices.is_empty() {
+                    return Err(Error::Invalid("empty explicit OCR target line set".into()));
+                }
+                for &index in indices {
+                    let line = page.lines.get(index).ok_or_else(|| {
+                        Error::Invalid("explicit OCR line index out of range".into())
+                    })?;
+                    if line.text.trim().is_empty() {
+                        return Err(Error::Invalid(
+                            "cannot refine a blank OCR observation".into(),
+                        ));
+                    }
+                }
+                plan.insert(number, indices.iter().copied().collect());
+            }
+        }
     }
     Ok(plan)
 }
@@ -294,8 +349,8 @@ pub struct RefinementRequest<'a> {
     pub metadata: &'a PdfMetadata,
     /// Exact-PDF-bound OCR draft.
     pub source: &'a OcrDraft,
-    /// Optional subset of source-draft pages.
-    pub selected: Option<&'a BTreeSet<PageNumber>>,
+    /// Confidence-based or explicitly indexed input observations.
+    pub scope: RefinementScope<'a>,
     /// Human-readable secondary model identity for traceability.
     pub secondary_model: &'a str,
     /// Selection, batching and render limits.
@@ -320,14 +375,14 @@ pub fn refine_draft(
         render_pdf,
         metadata,
         source,
-        selected,
+        scope,
         secondary_model,
         policy,
     } = request;
     let started = Instant::now();
     source.verify_pdf(pdf)?;
     let policy = policy.validate()?;
-    let plan = refinement_plan(source, selected, metadata.page_count(), policy)?;
+    let plan = refinement_plan(source, scope, metadata.page_count(), policy)?;
     let mappers = metadata.select_mappers(&plan.keys().copied().collect::<Vec<_>>())?;
     let mut proposals = Vec::new();
 
@@ -375,13 +430,19 @@ pub fn refine_draft(
             line.text.clone_from(&proposal.secondary_text);
         }
     }
+    let by_confidence = matches!(scope, RefinementScope::ByConfidence { .. });
     let report = RefinementReport {
-        schema_version: 1,
+        schema_version: 2,
         pdf_sha256: source.pdf_sha256.clone(),
         source_model: source.model.clone(),
         secondary_model: secondary_model.to_owned(),
-        max_primary_score: policy.max_primary_score,
-        min_chars: policy.min_chars,
+        selection_mode: if by_confidence {
+            "confidence"
+        } else {
+            "explicit-lines"
+        },
+        max_primary_score: by_confidence.then_some(policy.max_primary_score),
+        min_chars: by_confidence.then_some(policy.min_chars),
         max_side: policy.render.max_side,
         summary: RefinementSummary {
             source_lines: source.pages.iter().map(|page| page.lines.len()).sum(),
@@ -399,8 +460,8 @@ pub fn refine_draft(
 #[cfg(test)]
 mod tests {
     use super::{
-        Recognition, RefinementPolicy, RefinementRequest, meaningful_change, raster_quad,
-        refine_draft, refinement_plan,
+        Recognition, RefinementPolicy, RefinementRequest, RefinementScope, meaningful_change,
+        raster_quad, refine_draft, refinement_plan,
     };
     use crate::{
         PageNumber,
@@ -409,7 +470,10 @@ mod tests {
         pdf_metadata::PdfMetadata,
         rasterize::RenderPolicy,
     };
-    use std::{collections::BTreeSet, fs};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+    };
 
     #[test]
     fn format_equivalence_preserves_semantically_distinct_tokens() {
@@ -464,21 +528,115 @@ mod tests {
             }],
         );
         let policy = RefinementPolicy::default();
-        assert_eq!(refinement_plan(&draft, None, 1, policy)?.len(), 1);
+        assert_eq!(
+            refinement_plan(
+                &draft,
+                RefinementScope::ByConfidence { pages: None },
+                1,
+                policy
+            )?
+            .len(),
+            1
+        );
         assert!(
             refinement_plan(
                 &draft,
-                Some(&BTreeSet::from([PageNumber::new(2)?])),
+                RefinementScope::ByConfidence {
+                    pages: Some(&BTreeSet::from([PageNumber::new(2)?]))
+                },
                 2,
                 policy
             )
             .is_err()
         );
         draft.pages.push(draft.pages[0].clone());
-        assert!(refinement_plan(&draft, None, 2, policy).is_err());
+        assert!(
+            refinement_plan(
+                &draft,
+                RefinementScope::ByConfidence { pages: None },
+                2,
+                policy
+            )
+            .is_err()
+        );
         draft.pages.pop();
         draft.pages[0].lines[0].confidence = f64::NAN;
-        assert!(refinement_plan(&draft, None, 1, policy).is_err());
+        assert!(
+            refinement_plan(
+                &draft,
+                RefinementScope::ByConfidence { pages: None },
+                1,
+                policy
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_line_targets_bypass_score_and_length_but_validate_source()
+    -> Result<(), crate::Error> {
+        let page = PageNumber::new(2)?;
+        let mut draft = OcrDraft::new(
+            "00".repeat(32),
+            "test".into(),
+            vec![DraftPage {
+                page: page.get(),
+                lines: vec![
+                    OcrLine {
+                        text: "   ".into(),
+                        confidence: 0.99,
+                        quad: [Point(1.0, 2.0); 4],
+                        reviewed: false,
+                    },
+                    OcrLine {
+                        text: "0".into(),
+                        confidence: 0.999,
+                        quad: [Point(1.0, 2.0); 4],
+                        reviewed: false,
+                    },
+                ],
+                native_text_regions: Vec::new(),
+            }],
+        );
+        let policy = RefinementPolicy {
+            max_primary_score: 0.01,
+            min_chars: 6,
+            ..RefinementPolicy::default()
+        };
+        let mut targets = BTreeMap::from([(page, BTreeSet::from([1_usize]))]);
+        let plan = refinement_plan(&draft, RefinementScope::ExplicitLines(&targets), 2, policy)?;
+        assert_eq!(plan[&page], vec![1]);
+        assert!(
+            refinement_plan(
+                &draft,
+                RefinementScope::ByConfidence { pages: None },
+                2,
+                policy,
+            )?
+            .is_empty()
+        );
+
+        targets.insert(page, BTreeSet::from([0]));
+        assert!(
+            refinement_plan(&draft, RefinementScope::ExplicitLines(&targets), 2, policy,).is_err()
+        );
+        targets.insert(page, BTreeSet::from([20]));
+        assert!(
+            refinement_plan(&draft, RefinementScope::ExplicitLines(&targets), 2, policy,).is_err()
+        );
+        targets.clear();
+        assert!(
+            refinement_plan(&draft, RefinementScope::ExplicitLines(&targets), 2, policy,).is_err()
+        );
+        targets.insert(PageNumber::new(1)?, BTreeSet::from([0]));
+        assert!(
+            refinement_plan(&draft, RefinementScope::ExplicitLines(&targets), 2, policy,).is_err()
+        );
+        draft.pages[0].lines[1].confidence = f64::NAN;
+        assert!(
+            refinement_plan(&draft, RefinementScope::ExplicitLines(&targets), 2, policy,).is_err()
+        );
         Ok(())
     }
 
@@ -526,7 +684,7 @@ mod tests {
             render_pdf: &path,
             metadata: &metadata,
             source: &source,
-            selected: None,
+            scope: RefinementScope::ByConfidence { pages: None },
             secondary_model: "medium-recognition",
             policy,
         };
