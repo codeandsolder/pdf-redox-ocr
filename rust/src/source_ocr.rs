@@ -12,6 +12,7 @@ use crate::{
     geometry::{DisplayMapper, PageBox, Point, Rotation},
     hybrid::{ImagePaintEvidence, RasterPageEvidence, approve_raster_only_pages},
     paint_scan::{ImagePaint, PaintReport, PdfMatrix},
+    polygon::area,
 };
 
 /// One native image's OCR observations in the image's own user-space frame.
@@ -28,7 +29,8 @@ pub struct SourceObservation {
 /// Project PDF image-source space into each original PDF paint occurrence.
 ///
 /// # Errors
-/// Rejects mismatched source dimensions, out-of-bounds image quads, or non-finite projections.
+/// Rejects mismatched dimensions, invalid confidence, degenerate/out-of-bounds
+/// source quads, or non-finite projections.
 pub fn map_observations_to_paint(
     source: &SourceObservation,
     paint: &ImagePaint,
@@ -49,14 +51,18 @@ pub fn map_observations_to_paint(
         .lines
         .iter()
         .map(|line| {
-            if line.quad.iter().any(|point| {
-                !point.0.is_finite()
-                    || !point.1.is_finite()
-                    || !(0.0..=width).contains(&point.0)
-                    || !(0.0..=height).contains(&point.1)
-            }) {
+            if !line.confidence.is_finite()
+                || !(0.0..=1.0).contains(&line.confidence)
+                || area(&line.quad) <= 1e-9
+                || line.quad.iter().any(|point| {
+                    !point.0.is_finite()
+                        || !point.1.is_finite()
+                        || !(0.0..=width).contains(&point.0)
+                        || !(0.0..=height).contains(&point.1)
+                })
+            {
                 return Err(Error::Invalid(
-                    "OCR quad outside native source image".into(),
+                    "invalid native source OCR confidence or quad".into(),
                 ));
             }
             let projected = line
@@ -148,7 +154,11 @@ pub fn source_only_pages(
                         safe &= mapped
                             .iter()
                             .all(|line| paint.wholly_visible_in_clip(&line.quad));
-                        lines.extend(mapped);
+                        if safe {
+                            lines.extend(mapped.into_iter().filter(|line| {
+                                !line.text.trim().is_empty() && line.confidence > 0.0
+                            }));
+                        }
                     }
                     Err(Error::Invalid(_)) => safe = false,
                     Err(error) => return Err(error),
@@ -320,6 +330,70 @@ mod tests {
         };
         let result = source_only_pages(&report, &BTreeMap::from([("9:0".into(), wrong_size)]))?;
         assert!(result.approved_pages.is_empty());
+
+        let mut uninformative = OcrLine {
+            text: "   ".into(),
+            confidence: 0.99,
+            quad: quad(10.0, 10.0),
+            reviewed: false,
+        };
+        for (text, confidence) in [
+            ("   ", 0.99),
+            ("Unreliable", 0.0),
+            ("Nonfinite", f64::NAN),
+            ("Out of range", 1.01),
+        ] {
+            uninformative.text = text.into();
+            uninformative.confidence = confidence;
+            let source = SourceObservation {
+                width: 200,
+                height: 100,
+                lines: vec![uninformative.clone()],
+            };
+            let result = source_only_pages(&report, &BTreeMap::from([("9:0".into(), source)]))?;
+            assert!(
+                result.approved_pages.is_empty(),
+                "uninformative line {text:?} with confidence {confidence} approved source-only OCR"
+            );
+        }
+        let degenerate = SourceObservation {
+            width: 200,
+            height: 100,
+            lines: vec![OcrLine {
+                text: "Degenerate geometry".into(),
+                confidence: 0.99,
+                quad: [Point(10.0, 20.0); 4],
+                reviewed: false,
+            }],
+        };
+        assert!(super::map_observations_to_paint(&degenerate, &report.placements[0]).is_err());
+        let result = source_only_pages(&report, &BTreeMap::from([("9:0".into(), degenerate)]))?;
+        assert!(result.approved_pages.is_empty());
+
+        let meaningful = OcrLine {
+            text: "CAPACITOR".into(),
+            confidence: 0.99,
+            quad: quad(10.0, 10.0),
+            reviewed: false,
+        };
+        let blank = OcrLine {
+            text: "  ".into(),
+            confidence: 0.99,
+            quad: quad(10.0, 40.0),
+            reviewed: false,
+        };
+        let source = SourceObservation {
+            width: 200,
+            height: 100,
+            lines: vec![blank, meaningful],
+        };
+        let result = source_only_pages(&report, &BTreeMap::from([("9:0".into(), source)]))?;
+        let admitted = result
+            .pages
+            .get(&crate::PageNumber::new(1)?)
+            .ok_or_else(|| crate::Error::Invalid("textful raster-only page rejected".into()))?;
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(admitted[0].text, "CAPACITOR");
         Ok(())
     }
 }
