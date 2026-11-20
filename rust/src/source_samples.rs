@@ -44,34 +44,34 @@ impl PackedSamples {
     }
 
     #[inline]
-    const fn start_bit(&self, x: usize, y: usize, channel: usize) -> usize {
-        y * self.row_bytes * 8 + (x * self.components + channel) * self.bpc
+    const fn position(&self, x: usize, y: usize, channel: usize) -> (usize, usize) {
+        let bit = (x * self.components + channel) * self.bpc;
+        (y * self.row_bytes + bit / 8, bit % 8)
     }
 
     /// Read a PDF component value without truncating 16-bit samples.
+    ///
+    /// Supported component depths divide a byte exactly, or use two whole
+    /// bytes. No component spans a partial byte boundary.
     pub fn get(&self, x: usize, y: usize, channel: usize) -> u16 {
-        let start = self.start_bit(x, y, channel);
-        let mut value = 0_u16;
-        for offset in 0..self.bpc {
-            let index = start + offset;
-            let bit = (self.data[index / 8] >> (7 - index % 8)) & 1;
-            value = (value << 1) | u16::from(bit);
+        let (index, bit) = self.position(x, y, channel);
+        if self.bpc == 16 {
+            return u16::from_be_bytes([self.data[index], self.data[index + 1]]);
         }
-        value
+        let mask = u8::MAX >> (8 - self.bpc);
+        u16::from((self.data[index] >> (8 - self.bpc - bit)) & mask)
     }
 
     /// Replace only a sample's exact bits, leaving neighbors and row padding.
     pub fn set(&mut self, x: usize, y: usize, channel: usize, value: u16) {
-        let start = self.start_bit(x, y, channel);
-        for offset in 0..self.bpc {
-            let index = start + offset;
-            let bit = (value >> (self.bpc - offset - 1)) & 1;
-            let mask = 1_u8 << (7 - index % 8);
-            if bit == 0 {
-                self.data[index / 8] &= !mask;
-            } else {
-                self.data[index / 8] |= mask;
-            }
+        let (index, bit) = self.position(x, y, channel);
+        if self.bpc == 16 {
+            self.data[index..index + 2].copy_from_slice(&value.to_be_bytes());
+        } else {
+            let shift = 8 - self.bpc - bit;
+            let mask = u8::MAX >> (8 - self.bpc);
+            self.data[index] =
+                (self.data[index] & !(mask << shift)) | ((value.to_le_bytes()[0] & mask) << shift);
         }
     }
 
@@ -121,6 +121,54 @@ mod tests {
                         initial[last_byte] & ((1 << pad) - 1),
                     );
                 }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn direct_sample_access_matches_msb_first_reference_for_all_layouts() -> Result<(), crate::Error>
+    {
+        for depth in [1_u8, 2, 4, 8, 16] {
+            for channels in [1, 3, 5, 32] {
+                let bits = usize::from(depth);
+                let row_bytes = (7 * channels * bits).div_ceil(8);
+                let initial = (0..row_bytes * 3)
+                    .map(|index| (index * 157 + 91).to_le_bytes()[0])
+                    .collect::<Vec<_>>();
+                let mut reference = initial.clone();
+                let mut packed = PackedSamples::new(7, 3, channels, depth, initial)
+                    .ok_or_else(|| crate::Error::Invalid("invalid test layout".into()))?;
+                for y in 0..3 {
+                    for x in 0..7 {
+                        for channel in 0..channels {
+                            let start = y * row_bytes * 8 + (x * channels + channel) * bits;
+                            let before = (0..bits).fold(0_u16, |acc, offset| {
+                                let bit = start + offset;
+                                (acc << 1) | u16::from((reference[bit / 8] >> (7 - bit % 8)) & 1)
+                            });
+                            assert_eq!(packed.get(x, y, channel), before);
+                            // Deliberately exercise values exceeding the component maximum.
+                            let bytes = (start * 31337 + 0xa55a).to_le_bytes();
+                            let value = u16::from_le_bytes([bytes[0], bytes[1]]);
+                            packed.set(x, y, channel, value);
+                            for offset in 0..bits {
+                                let bit = start + offset;
+                                let mask = 1_u8 << (7 - bit % 8);
+                                if value & (1 << (bits - offset - 1)) == 0 {
+                                    reference[bit / 8] &= !mask;
+                                } else {
+                                    reference[bit / 8] |= mask;
+                                }
+                            }
+                            assert_eq!(
+                                packed.get(x, y, channel),
+                                value & (u16::MAX >> (16 - bits))
+                            );
+                        }
+                    }
+                }
+                assert_eq!(packed.data, reference);
             }
         }
         Ok(())

@@ -363,8 +363,8 @@ fn cover_text(image: &mut PackedSamples, polygon: &Quad, padding: u32) {
     let color = channels
         .iter_mut()
         .map(|samples| {
-            samples.sort_unstable();
-            samples[samples.len() / 2]
+            let middle = samples.len() / 2;
+            *samples.select_nth_unstable(middle).1
         })
         .collect::<Vec<_>>();
     for y in y0..y1 {
