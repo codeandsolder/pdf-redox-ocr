@@ -139,7 +139,7 @@ raster dimensions. The default LRU budget retains at most 256 entries and
 inferences are never cached. `--no-recognition-cache` disables lookup and
 retention for diagnostic comparison, and `PipelineResult.recognition`
 reports full-raster calls, cache hits, evictions, retained payload and additional crop batches, with separate leader and boundary candidate outcomes.
-The optional `--report audit.json` writes a separate schema-7 diagnostic
+The optional `--report audit.json` writes a separate schema-8 diagnostic
 report bound to the original PDF digest and model provenance. It includes
 the validated policy, raw native-image observations in source-pixel
 coordinates, original paint paths and native-only blockers, the per-page
@@ -401,7 +401,7 @@ At least one draft, searchable PDF or audit must be requested.
 Retaining a draft with processing requires `--optimized-pdf`, because
 its SHA and user-space geometry bind to the exact prepared PDF, not the
 original source. The optimizer report and actual configuration are recorded
-under `preparation` in schema-7 CLI audits, alongside both input hashes;
+under `preparation` in schema-8 CLI audits, alongside both input hashes;
 the existing `pdf_sha256` refers to the OCR input. Reverify the original
 and prepared source hashes before applying or publishing results.
 Processing is intentionally not lossless in every case (microstroke
@@ -489,7 +489,7 @@ retained, not invented. Failed or conflicting crops leave original
 observations unchanged. Failed repair attempts prevent caching the incomplete
 raster result; successful exact RGB reuse includes the confirmed repairs.
 
-Pipeline audit schema 7 records original pixel-space observations, sample
+Pipeline audit schema 8 records original pixel-space observations, sample
 frame, component bounds, typed crop reason, proposed quad and each actual
 prediction/decision by exact RGB SHA-256 and dimensions. Full-raster inference
 calls remain separate from recognition-only batch counters. Disable the stage
@@ -519,7 +519,7 @@ substitutions are encoded. Accepted crop geometry and model confidence
 replace the original; failures prevent exact-RGB result caching. The
 experimental flag is off by default until broader representative validation.
 All repair kinds share a 2M-pixel per-window and 16M-pixel per-raster sampling
-budget, prioritizing terminal-leader candidates, and schema-7 `crop_repairs` records the original prediction,
+budget, prioritizing terminal-leader candidates, and schema-8 `crop_repairs` records the original prediction,
 actual geometry, type-specific evidence and independent prediction/outcome.
 `recognition.crop_batches` counts actual recognition-only batches (leader and boundary batches are separate to preserve existing leader inference ordering);
 leader/boundary candidate/accepted counters are independent.
@@ -559,13 +559,17 @@ or impossible assignments when glyphs are joined. One unsolvable cluster
 does not discard independent matches elsewhere on the line. Unmatched,
 whitespace and padding emissions have explicit statuses.
 
-Schema-7 `character_audits` groups data by exact parent RGB SHA-256 and
+Schema-8 `character_audits` groups data by exact parent RGB SHA-256 and
 dimensions. Each primary detector entry includes the original line/quad,
 sorted detector index (not final draft index), exact rectified RGB crop
 hash/dimensions, padding geometry, raw CTC column indices, projected ink
 and alignment candidates. Component indices address the entry's component
 array. Positions and ink bounds are in the **rectified recognition-crop
-frame**, not PDF user space; perspective/rotation mapping is not inferred.
+frame**. Schema 8 additionally records a reconstructible projective crop
+mapping for actual detector quadrilaterals, verified against returned crop
+dimensions and the OAR rotation contract. Full-page raster occurrences have
+explicit SHA-bound page transforms. This permits vector association without
+assuming reading order equals final draft order.
 Audit pixel work is bounded to 16M sampled crop pixels per raster; skipped
 or invalid observations are counted. Cache hits reuse the same original
 raster audit, and enabling the diagnostic requires an explicit audit output.
@@ -580,3 +584,43 @@ diameter-symbol errors on the current draft (five Ø/0, one Ø/∅). It is a
 purposefully selected diagnostic, not a population error estimate. The
 slashed-circle glyph is transcribed as Ø according to the established
 reference convention; rendered shape alone cannot prove original Unicode.
+
+
+### Exact-source vector catalog evidence
+
+Recognize the prepared PDF with its existing, exact optimizer catalog:
+
+```sh
+pdf-redox-ocr --pdf prepared.pdf --source-glyph-catalog catalog.json \
+  --output draft.json --report audit.json
+```
+
+Alternatively collect it in the same optimization transaction:
+
+```sh
+./run-auto.sh original.pdf searchable.pdf --optimized-pdf prepared.pdf \
+  --output-glyph-catalog catalog.json --report audit.json
+```
+
+The input catalog must have schema 2 and match the exact input PDF hash.
+Generated catalogs are bound to the retained optimized PDF, not to the
+unoptimized source or searchable overlay output. Both modes implicitly
+enable the character audit. Full-page primary ink runs are mapped into
+PDF space with the actual crop geometry and raster occurrence transform.
+A source component must have substantial reciprocal polygon coverage and
+be unique among overlapping components. Multiple partial components,
+joined ink and ambiguous CTC associations cannot silently become a label.
+Only the actual accepted ordinary/residual page route supplies votes.
+Exact template / page / occurrence ordinal deduplicates repeated detector
+observations; conflicting observations of the same occurrence are excluded.
+Summary candidates require three agreeing high-line-score observations on
+at least two pages. Scores in these records are actual **line** scores,
+not per-character probabilities, and repeated predictions are not
+independent confirmation. The report never introduces a Unicode mapping
+into the source PDF by itself. Native image and mosaic audits stay in
+their own coordinate frames.
+
+`--recognizer medium` selects PP-OCRv6 Medium recognition while preserving
+the same Small detector, cropping, layout policy and overlay admission.
+The default remains Small. Actual model provenance is retained in drafts
+and reports. Models load lazily; native-only PDFs do not need model files.

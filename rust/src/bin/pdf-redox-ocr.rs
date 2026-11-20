@@ -14,8 +14,8 @@ use pdf_redox_ocr::{
     artifacts::{check_output_paths as check_paths, write_atomic},
     crop_repair::RepairPolicy,
     draft::OcrDraft,
-    inference::OcrInference,
-    input_preparation::PreparedInput,
+    inference::{OcrInference, RecognitionModel},
+    input_preparation::{PreparationMode, PreparedInput},
     mosaic::MosaicBudget,
     native_images::NativeImageBudget,
     pipeline::{
@@ -113,6 +113,12 @@ struct PreparationArgs {
     /// Directory for the scoped intermediate optimized PDF.
     #[arg(long, requires = "optimize")]
     work_dir: Option<PathBuf>,
+    /// Read the exact existing optimizer-generated catalog for this prepared PDF.
+    #[arg(long, conflicts_with = "optimize", requires = "report")]
+    source_glyph_catalog: Option<PathBuf>,
+    /// Collect and retain the prepared PDF's actual reusable outline catalog.
+    #[arg(long, requires_all=["optimize","optimized_pdf","report"])]
+    output_glyph_catalog: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -129,6 +135,9 @@ struct RecognitionArgs {
     /// ONNX intra-operation CPU thread count (default: backend policy).
     #[arg(long)]
     ocr_threads: Option<NonZeroUsize>,
+    /// Select the PP-OCRv6 recognition model, retaining the same detector.
+    #[arg(long, value_enum, default_value = "small")]
+    recognizer: RecognitionModel,
 }
 
 fn configured_policy(args: &Args) -> PipelinePolicy {
@@ -232,10 +241,26 @@ fn write_outputs(
             )?)
         })
         .transpose()?;
+    let catalog_bytes = args
+        .preparation
+        .output_glyph_catalog
+        .as_ref()
+        .map(|_| {
+            input
+                .catalog()
+                .ok_or("missing requested glyph catalog")
+                .and_then(|catalog| {
+                    json_bytes(catalog).map_err(|_| "cannot serialize glyph catalog")
+                })
+        })
+        .transpose()?;
     // Catch a change to either source immediately before publishing.
     input.verify_recognized(draft)?;
     if let Some(path) = &args.preparation.optimized_pdf {
         write_atomic(path, prepared_bytes)?;
+    }
+    if let (Some(path), Some(bytes)) = (&args.preparation.output_glyph_catalog, catalog_bytes) {
+        write_atomic(path, &bytes)?;
     }
     if let (Some(path), Some(bytes)) = (&args.output, serialized) {
         write_atomic(path, &bytes)?;
@@ -304,16 +329,29 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
         args.report.as_deref(),
         args.preparation.optimized_pdf.as_deref(),
         args.capture_residual_dir.as_deref(),
+        args.preparation.output_glyph_catalog.as_deref(),
     ]
     .into_iter()
     .flatten()
     .collect::<Vec<_>>();
     check_paths(&args.pdf, &paths)?;
-    let input = PreparedInput::open(
-        &args.pdf,
-        args.preparation.optimize,
-        args.preparation.work_dir.as_deref(),
-    )?;
+    if let Some(catalog) = &args.preparation.source_glyph_catalog {
+        check_paths(catalog, &paths)?;
+        if fs::canonicalize(catalog)? == fs::canonicalize(&args.pdf)? {
+            return Err("glyph catalog aliases PDF source".into());
+        }
+    }
+    let mode = if args.preparation.optimize {
+        PreparationMode::Processing {
+            work_dir: args.preparation.work_dir.as_deref(),
+            collect_catalog: args.preparation.output_glyph_catalog.is_some(),
+        }
+    } else {
+        PreparationMode::Original {
+            catalog: args.preparation.source_glyph_catalog.as_deref(),
+        }
+    };
+    let input = PreparedInput::open(&args.pdf, mode)?;
     if let Some(evidence) = &input.audit().processing {
         eprintln!(
             "PDF processing optimization: {} -> {} bytes",
@@ -324,21 +362,33 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     if let Some(directory) = &args.capture_residual_dir {
         fs::create_dir(directory)?;
     }
-    let engine = OcrInference::pp_ocrv6_small(
+    let engine = OcrInference::pp_ocrv6(
         args.recognition.ocr_threads,
         RepairPolicy {
             leaders: !args.recognition.no_leader_repair,
             boundaries: args.recognition.boundary_repair,
             minimum_confidence: args.confidence.max(0.97),
         },
-        args.character_audit,
+        args.character_audit || input.catalog().is_some(),
+        args.recognition.recognizer,
     );
-    let result = job.recognize(
+    let mut result = job.recognize(
         &engine,
         CliObserver {
             capture: args.capture_residual_dir.clone(),
         },
     )?;
+    if let Some(catalog) = input.catalog() {
+        result.associate_catalog(catalog)?;
+        if let Some(evidence) = &result.catalog_evidence {
+            eprintln!(
+                "glyph catalog: {} templates, {} placements; {} distinct character associations",
+                evidence.catalog_templates,
+                evidence.catalog_occurrences,
+                evidence.stats.associated_occurrences
+            );
+        }
+    }
     write_outputs(args, &input, job.original_bytes(), &result)
 }
 

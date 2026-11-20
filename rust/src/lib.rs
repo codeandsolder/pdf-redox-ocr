@@ -5,7 +5,10 @@
 
 pub mod artifacts;
 pub mod boundary_ink;
+#[cfg(feature = "pdf-integration")]
+pub mod catalog_evidence;
 pub mod character_alignment;
+pub mod crop_geometry;
 pub mod crop_repair;
 mod disjoint_set;
 pub mod draft;

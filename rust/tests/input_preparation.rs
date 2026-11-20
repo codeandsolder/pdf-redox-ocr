@@ -8,7 +8,7 @@ use pdf_redox::{Config, optimize_pdf};
 use pdf_redox_ocr::{
     Error,
     draft::{OcrDraft, sha256_file},
-    input_preparation::PreparedInput,
+    input_preparation::{PreparationMode, PreparedInput},
 };
 
 mod support;
@@ -29,17 +29,27 @@ fn processing_preparation_exactly_matches_library_and_cleans_up() -> Result<(), 
     let input = dir.path().join("source.pdf");
     let original = fixture();
     fs::write(&input, &original)?;
-    let raw = PreparedInput::open(&input, false, None)?;
+    let raw = PreparedInput::open(&input, PreparationMode::Original { catalog: None })?;
     assert_eq!(raw.path(), input.canonicalize()?);
     assert_eq!(raw.audit().original_sha256, raw.audit().ocr_input_sha256);
     assert!(raw.audit().processing.is_none());
     let work = dir.path().join("work");
     fs::create_dir(&work)?;
-    let prepared = PreparedInput::open(&input, true, Some(&work))?;
+    let prepared = PreparedInput::open(
+        &input,
+        PreparationMode::Processing {
+            work_dir: Some(&work),
+            collect_catalog: true,
+        },
+    )?;
     let path = prepared.path().to_path_buf();
     let (expected, _) = optimize_pdf(&original, &Config::optimize_only().for_processing())?;
     assert_eq!(fs::read(&path)?, expected);
     let audit = prepared.audit();
+    assert_eq!(
+        prepared.catalog().map(|c| c.optimized_pdf_sha256.as_str()),
+        Some(audit.ocr_input_sha256.as_str())
+    );
     assert_eq!(audit.original_sha256, sha256_file(&input)?);
     assert_eq!(audit.ocr_input_sha256, sha256_file(&path)?);
     assert_ne!(audit.original_sha256, audit.ocr_input_sha256);
@@ -116,7 +126,7 @@ fn processing_cli_retains_exact_draft_input_without_model_or_optimizer_binary()
     assert_eq!(draft.pages.len(), 1);
     assert!(draft.pages[0].lines.is_empty());
     let audit: serde_json::Value = serde_json::from_slice(&fs::read(&report_path)?)?;
-    assert_eq!(audit["schema_version"], 7);
+    assert_eq!(audit["schema_version"], 8);
     assert_eq!(
         audit["preparation"]["original_sha256"],
         sha256_file(&input)?

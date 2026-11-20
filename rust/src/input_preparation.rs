@@ -9,7 +9,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use pdf_redox::{Config, OptimizationReport, optimize_pdf};
+use pdf_redox::{
+    Config, GlyphCatalog, OptimizationReport, optimize_pdf, optimize_pdf_with_glyph_catalog,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
@@ -40,6 +42,19 @@ pub struct PreparedInput {
     source: PathBuf,
     optimized: Option<NamedTempFile>,
     audit: PreparationAudit,
+    catalog: Option<GlyphCatalog>,
+}
+
+/// Source data and processing options for one exact prepared input.
+#[derive(Clone, Copy)]
+pub enum PreparationMode<'a> {
+    Original {
+        catalog: Option<&'a Path>,
+    },
+    Processing {
+        work_dir: Option<&'a Path>,
+        collect_catalog: bool,
+    },
 }
 
 impl PreparedInput {
@@ -48,24 +63,52 @@ impl PreparedInput {
     /// # Errors
     /// Returns an error for unreadable/mutated source, optimizer failure or
     /// temporary-file I/O failure.
-    pub fn open(source: &Path, optimize: bool, work_dir: Option<&Path>) -> Result<Self, Error> {
+    pub fn open(source: &Path, mode: PreparationMode<'_>) -> Result<Self, Error> {
         let source = fs::canonicalize(source)?;
-        if !optimize {
-            let digest = sha256_file(&source)?;
-            return Ok(Self {
-                source,
-                optimized: None,
-                audit: PreparationAudit {
-                    original_sha256: digest.clone(),
-                    ocr_input_sha256: digest,
-                    processing: None,
-                },
-            });
-        }
+        let (work_dir, collect_catalog) = match mode {
+            PreparationMode::Original { catalog } => {
+                let digest = sha256_file(&source)?;
+                let catalog = catalog
+                    .map(|path| -> Result<GlyphCatalog, Error> {
+                        let data: GlyphCatalog =
+                            serde_json::from_reader(std::io::BufReader::new(fs::File::open(path)?))
+                                .map_err(|error| {
+                                    Error::Invalid(format!("invalid glyph catalog: {error}"))
+                                })?;
+                        if data.schema_version != 2 || data.optimized_pdf_sha256 != digest {
+                            return Err(Error::Invalid(
+                                "glyph catalog does not match original PDF".into(),
+                            ));
+                        }
+                        Ok(data)
+                    })
+                    .transpose()?;
+                return Ok(Self {
+                    source,
+                    optimized: None,
+                    audit: PreparationAudit {
+                        original_sha256: digest.clone(),
+                        ocr_input_sha256: digest,
+                        processing: None,
+                    },
+                    catalog,
+                });
+            }
+            PreparationMode::Processing {
+                work_dir,
+                collect_catalog,
+            } => (work_dir, collect_catalog),
+        };
         let original = fs::read(&source)?;
         let original_sha256 = hex::encode(Sha256::digest(&original));
         let config = Config::optimize_only().for_processing();
-        let (bytes, report) = optimize_pdf(&original, &config)?;
+        let (bytes, report, catalog) = if collect_catalog {
+            let (bytes, report, catalog) = optimize_pdf_with_glyph_catalog(&original, &config)?;
+            (bytes, report, Some(catalog))
+        } else {
+            let (bytes, report) = optimize_pdf(&original, &config)?;
+            (bytes, report, None)
+        };
         drop(original);
         let ocr_input_sha256 = hex::encode(Sha256::digest(&bytes));
         let mut file = match work_dir {
@@ -82,6 +125,7 @@ impl PreparedInput {
                 ocr_input_sha256,
                 processing: Some(ProcessingEvidence { config, report }),
             },
+            catalog,
         };
         prepared.verify_source()?;
         Ok(prepared)
@@ -99,6 +143,12 @@ impl PreparedInput {
     #[must_use]
     pub const fn audit(&self) -> &PreparationAudit {
         &self.audit
+    }
+
+    /// Exact optimizer-produced outline catalog, if requested.
+    #[must_use]
+    pub const fn catalog(&self) -> Option<&GlyphCatalog> {
+        self.catalog.as_ref()
     }
 
     /// Reject a changed original PDF before publishing results.

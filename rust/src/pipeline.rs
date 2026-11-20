@@ -11,6 +11,7 @@ use tempfile::NamedTempFile;
 
 use crate::{
     Error, PageNumber,
+    catalog_evidence::CatalogEvidence,
     draft::{DraftPage, OcrDraft, OcrLine, sha256_file},
     geometry::{DisplayMapper, Quad},
     hybrid::{
@@ -31,8 +32,8 @@ use crate::{
     pdf_metadata::PdfMetadata,
     rasterize::{RenderPolicy, render_rgb_page},
     recognition::{
-        RasterCharacterAudit, RasterRepairAudit, RecognitionBackend, RecognitionCacheBudget,
-        RecognitionSession, RecognitionStats,
+        PageCharacterMapping, RasterCharacterAudit, RasterRepairAudit, RecognitionBackend,
+        RecognitionCacheBudget, RecognitionSession, RecognitionStats,
     },
     source_ocr::{
         SourceObservation, SourceOnlyResult, source_image_mapper, source_only_candidates,
@@ -118,6 +119,8 @@ pub struct PipelineResult {
     pub recognition: RecognitionStats,
     pub crop_repairs: Vec<RasterRepairAudit>,
     pub character_audits: Vec<RasterCharacterAudit>,
+    pub page_character_mappings: Vec<PageCharacterMapping>,
+    pub catalog_evidence: Option<CatalogEvidence>,
     /// Validated policy used for this complete recognition job.
     pub policy: PipelinePolicy,
     /// Actual source image paint closure and native-only blockers.
@@ -255,7 +258,7 @@ impl ResidualAttempt {
             treated: &work.treated,
             required: &self.required,
         })?;
-        match engine.recognize_page(work.treated, work.mapper) {
+        match engine.recognize_document_page(work.treated, work.mapper, self.page, true) {
             Ok(lines) => {
                 candidate.lines = lines;
                 let rejected = conflicts(&candidate)?;
@@ -309,6 +312,8 @@ pub struct PipelineAudit<'a> {
     recognition: RecognitionStats,
     crop_repairs: &'a [RasterRepairAudit],
     character_audits: &'a [RasterCharacterAudit],
+    page_character_mappings: &'a [PageCharacterMapping],
+    catalog_evidence: Option<&'a CatalogEvidence>,
     routes: &'a BTreeMap<PageNumber, PageRoute>,
     residual_pages: &'a BTreeSet<PageNumber>,
     residual_attempts: &'a [ResidualAttempt],
@@ -334,11 +339,28 @@ impl<'a> PipelineAudit<'a> {
 }
 
 impl PipelineResult {
+    /// Associate primary character evidence with exact optimizer templates.
+    /// No changes are made to the importer draft.
+    ///
+    /// # Errors
+    /// Rejects mismatched provenance or malformed catalog placements.
+    pub fn associate_catalog(&mut self, catalog: &pdf_redox::GlyphCatalog) -> Result<(), Error> {
+        self.catalog_evidence = Some(CatalogEvidence::from_audits(
+            catalog,
+            &self.draft.pdf_sha256,
+            &self.character_audits,
+            &self.page_character_mappings,
+            &self.residual_pages,
+            self.policy.minimum_confidence,
+        )?);
+        Ok(())
+    }
+
     /// Borrow the complete source-bound diagnostic report without copying evidence.
     #[must_use]
     pub const fn audit(&self) -> PipelineAudit<'_> {
         PipelineAudit {
-            schema_version: 7,
+            schema_version: 8,
             preparation: None,
             pdf_sha256: self.draft.pdf_sha256.as_str(),
             model: self.draft.model.as_str(),
@@ -346,6 +368,8 @@ impl PipelineResult {
             recognition: self.recognition,
             crop_repairs: self.crop_repairs.as_slice(),
             character_audits: self.character_audits.as_slice(),
+            page_character_mappings: self.page_character_mappings.as_slice(),
+            catalog_evidence: self.catalog_evidence.as_ref(),
             routes: &self.routes,
             residual_pages: &self.residual_pages,
             residual_attempts: self.residual_attempts.as_slice(),
@@ -567,6 +591,8 @@ impl PreparedOcr {
             recognition,
             crop_repairs: session.take_repair_audits(),
             character_audits: session.take_character_audits(),
+            page_character_mappings: session.take_page_character_mappings(),
+            catalog_evidence: None,
             policy: self.policy,
             paints: prepared.scanned,
             source_observations: prepared.recognized,
@@ -715,7 +741,7 @@ impl PreparedOcr {
             ));
         }
         Ok(FallbackRecognition {
-            lines: engine.recognize_page(ordinary, mapper)?,
+            lines: engine.recognize_document_page(ordinary, mapper, page, false)?,
             evidence,
             attempt,
         })

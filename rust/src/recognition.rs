@@ -74,6 +74,17 @@ pub struct RasterCharacterAudit {
     pub report: CharacterAuditReport,
 }
 
+/// Identifies a full-page raster occurrence, including a reused RGB result.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PageCharacterMapping {
+    pub page: crate::PageNumber,
+    pub rgb_sha256: String,
+    pub dimensions: (u32, u32),
+    pub residual: bool,
+    /// PDF corners of the actual raster extent in TL,TR,BR,BL order.
+    pub page_corners: Quad,
+}
+
 /// A reusable recognizer whose result depends only on the input RGB raster.
 ///
 /// A backend must use the same inference policy throughout a recognition
@@ -167,6 +178,7 @@ pub struct RecognitionSession<'a, B> {
     stats: RecognitionStats,
     repair_audits: Vec<RasterRepairAudit>,
     character_audits: Vec<RasterCharacterAudit>,
+    page_character_mappings: Vec<PageCharacterMapping>,
 }
 
 impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
@@ -178,6 +190,7 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
             entries: VecDeque::new(),
             repair_audits: Vec::new(),
             character_audits: Vec::new(),
+            page_character_mappings: Vec::new(),
             stats: RecognitionStats {
                 inference_calls: 0,
                 cache_hits: 0,
@@ -205,6 +218,48 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
 
     pub fn take_character_audits(&mut self) -> Vec<RasterCharacterAudit> {
         std::mem::take(&mut self.character_audits)
+    }
+
+    pub fn take_page_character_mappings(&mut self) -> Vec<PageCharacterMapping> {
+        std::mem::take(&mut self.page_character_mappings)
+    }
+
+    /// Retain the exact occurrence transform for page-raster character audits.
+    /// Source-image and mosaic rasters deliberately use their own mapping paths.
+    ///
+    /// # Errors
+    /// Returns model/raster errors from page recognition.
+    pub fn recognize_document_page(
+        &mut self,
+        rgb: RgbImage,
+        mapper: DisplayMapper,
+        page: crate::PageNumber,
+        residual: bool,
+    ) -> Result<Vec<OcrLine>, Error> {
+        let key = RasterKey::new(&rgb);
+        let width = f64::from(rgb.width());
+        let height = f64::from(rgb.height());
+        let lines = self
+            .recognize_keyed(rgb, key)?
+            .into_iter()
+            .map(|line| line.into_pdf(&|Point(x, y)| mapper.to_pdf(x / width, y / height)))
+            .collect();
+        let digest = hex::encode(key.digest);
+        if self
+            .character_audits
+            .iter()
+            .any(|audit| audit.rgb_sha256 == digest && audit.dimensions == key.dimensions)
+        {
+            self.page_character_mappings.push(PageCharacterMapping {
+                page,
+                rgb_sha256: digest,
+                dimensions: key.dimensions,
+                residual,
+                page_corners: [Point(0., 0.), Point(1., 0.), Point(1., 1.), Point(0., 1.)]
+                    .map(|Point(u, v)| mapper.to_pdf(u, v)),
+            });
+        }
+        Ok(lines)
     }
 
     fn record_characters(&mut self, key: RasterKey, report: CharacterAuditReport) {
@@ -276,10 +331,14 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
     /// # Errors
     /// Returns an error for an empty raster or failed model inference.
     pub fn recognize_pixels(&mut self, rgb: RgbImage) -> Result<Vec<PixelLine>, Error> {
+        let key = RasterKey::new(&rgb);
+        self.recognize_keyed(rgb, key)
+    }
+
+    fn recognize_keyed(&mut self, rgb: RgbImage, key: RasterKey) -> Result<Vec<PixelLine>, Error> {
         if rgb.width() == 0 || rgb.height() == 0 {
             return Err(Error::Invalid("empty OCR raster".into()));
         }
-        let key = RasterKey::new(&rgb);
         if self.budget.enabled()
             && let Some(index) = self.entries.iter().position(|entry| entry.key == key)
             && let Some(entry) = self.entries.remove(index)

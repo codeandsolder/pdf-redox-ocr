@@ -36,13 +36,35 @@ use oar_ocr::{
 use crate::{
     Error,
     character_alignment::{BatchGeometry, CharacterAuditReport, INPUT_SHAPE, MAX_INPUT_WIDTH},
+    crop_geometry::CropGeometry,
     crop_repair::{BodyPrediction, RepairPolicy, RepairReport, repair_crops},
     geometry::{Point, Quad},
     recognition::{PixelLine, RasterRecognition, RecognitionBackend},
 };
 
 const DETECTION_MODEL: &str = "pp-ocrv6_small_det.onnx";
-const RECOGNITION_MODEL: &str = "pp-ocrv6_small_rec.onnx";
+#[derive(Clone, Copy, Debug, Default)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+pub enum RecognitionModel {
+    #[default]
+    Small,
+    Medium,
+}
+
+impl RecognitionModel {
+    const fn filename(self) -> &'static str {
+        match self {
+            Self::Small => "pp-ocrv6_small_rec.onnx",
+            Self::Medium => "pp-ocrv6_medium_rec.onnx",
+        }
+    }
+    const fn profile(self) -> &'static str {
+        match self {
+            Self::Small => "oar-ocr PP-OCRv6 Small detector-max-2048",
+            Self::Medium => "oar-ocr PP-OCRv6 Small detector-max-2048 + Medium recognizer",
+        }
+    }
+}
 const DICTIONARY: &str = "ppocrv6_dict.txt";
 const REGION_BATCH_SIZE: usize = 4;
 
@@ -52,6 +74,7 @@ pub struct OcrInference {
     threads: Option<NonZeroUsize>,
     repair: RepairPolicy,
     character_audit: bool,
+    model: RecognitionModel,
     profile: String,
 }
 
@@ -104,12 +127,16 @@ impl PrimaryCrop {
 }
 
 impl OcrModels {
-    fn load(threads: Option<NonZeroUsize>, character_audit: bool) -> Result<Self, Error> {
+    fn load(
+        threads: Option<NonZeroUsize>,
+        character_audit: bool,
+        model: RecognitionModel,
+    ) -> Result<Self, Error> {
         let dictionary = std::fs::read_to_string(
             resolve_path(DICTIONARY).map_err(|error| inference_error(&error))?,
         )?;
         let det_path = resolve_path(DETECTION_MODEL).map_err(|error| inference_error(&error))?;
-        let rec_path = resolve_path(RECOGNITION_MODEL).map_err(|error| inference_error(&error))?;
+        let rec_path = resolve_path(model.filename()).map_err(|error| inference_error(&error))?;
         let mut detection = TextDetectionAdapterBuilder::new().with_config(small_detector_config());
         let mut recognition = TextRecognitionAdapterBuilder::new()
             .model_input_shape(INPUT_SHAPE)
@@ -247,7 +274,17 @@ impl OcrModels {
                             .get(batch_index)
                             .copied()
                             .unwrap_or_default();
-                        audit.observe(index, &line, &retained[batch_index], batch, columns, length);
+                        let crop = &retained[batch_index];
+                        if let Some(entry) =
+                            audit.observe(index, &line, crop, batch, columns, length)
+                            && bbox.points.len() == 4
+                        {
+                            entry.geometry = CropGeometry::from_quad(
+                                line.quad,
+                                image.dimensions(),
+                                crop.dimensions(),
+                            );
+                        }
                     }
                     ordered[index] = Some(line);
                 }
@@ -301,21 +338,19 @@ impl OcrModels {
 }
 
 impl OcrInference {
-    /// Stable draft provenance including the detector's resolution policy.
-    pub const MODEL_PROFILE: &str = "oar-ocr PP-OCRv6 Small detector-max-2048";
-
     /// Configure the official PP-OCRv6 Small detector/recognizer pair.
     /// Resolve and load models only on the first recognition. A native-only
     /// document needs no model or ONNX session.
     #[must_use]
-    pub fn pp_ocrv6_small(
+    pub fn pp_ocrv6(
         threads: Option<NonZeroUsize>,
         repair: RepairPolicy,
         character_audit: bool,
+        model: RecognitionModel,
     ) -> Self {
         let profile = threads.map_or_else(
-            || Self::MODEL_PROFILE.to_owned(),
-            |count| format!("{} CPU threads={count}", Self::MODEL_PROFILE),
+            || model.profile().to_owned(),
+            |count| format!("{} CPU threads={count}", model.profile()),
         );
         let profile = format!(
             "{profile}; crop confirmation >= {} (leader={}, boundary={})",
@@ -326,6 +361,7 @@ impl OcrInference {
             threads,
             repair,
             character_audit,
+            model,
             profile,
         }
     }
@@ -333,7 +369,7 @@ impl OcrInference {
     fn backend(&self) -> Result<&OcrModels, Error> {
         self.backend
             .get_or_init(|| {
-                OcrModels::load(self.threads, self.character_audit)
+                OcrModels::load(self.threads, self.character_audit, self.model)
                     .map_err(|error| error.to_string())
             })
             .as_ref()

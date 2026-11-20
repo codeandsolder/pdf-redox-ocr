@@ -6,6 +6,7 @@
 
 use crate::{
     Error,
+    crop_geometry::CropGeometry,
     disjoint_set::DisjointSet,
     glyph_isolation::{InkGroup, isolate_ink},
     ink_polarity::{Polarity, PolarityEvidence, estimate},
@@ -110,6 +111,7 @@ pub struct CharacterLineAudit {
     pub original: PixelLine,
     pub crop_sha256: String,
     pub crop_dimensions: (u32, u32),
+    pub geometry: Option<CropGeometry>,
     pub tensor_width: usize,
     pub resized_width: usize,
     pub sequence_length: usize,
@@ -316,6 +318,7 @@ impl CharacterLineAudit {
             original,
             crop_sha256: hex::encode(Sha256::digest(crop.as_raw())),
             crop_dimensions: dimensions,
+            geometry: None,
             tensor_width: batch.tensor_width,
             resized_width,
             sequence_length,
@@ -338,19 +341,22 @@ impl CharacterAuditReport {
         batch: BatchGeometry,
         columns: &[usize],
         sequence_length: usize,
-    ) {
+    ) -> Option<&mut CharacterLineAudit> {
         let pixels = u64::from(crop.width()) * u64::from(crop.height());
         if pixels > MAX_SAMPLE_PIXELS - self.sampled_pixels {
             self.skipped_budget += 1;
-            return;
+            return None;
         }
         self.sampled_pixels += pixels;
-        match CharacterLineAudit::measure(original.clone(), crop, batch, columns, sequence_length) {
-            Ok(mut entry) => {
-                entry.detection_index = detection_index;
-                self.lines.push(entry);
-            }
-            Err(_) => self.invalid_metadata += 1,
+        if let Ok(mut entry) =
+            CharacterLineAudit::measure(original.clone(), crop, batch, columns, sequence_length)
+        {
+            entry.detection_index = detection_index;
+            self.lines.push(entry);
+            self.lines.last_mut()
+        } else {
+            self.invalid_metadata += 1;
+            None
         }
     }
 }
