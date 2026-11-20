@@ -15,8 +15,7 @@ permissions:
 
 jobs:
   strict-rust:
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@00a63ba02d14f0868af9820edcab51a8da64939a # main
+    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@3119e52afb16c956bd072363d1f64f0fd916afbb # main
     with:
       working-directory: rust
       apt-packages: poppler-utils
-      ban-python-outside-ci: false # transitional: legacy Python remains until Rust pipeline parity

@@ -1,9 +1,9 @@
 # pdf-redox-ocr: native Rust rewrite (development)
 
-The Rust implementation lives in this crate while the existing production
-Python pipeline is used as an independent, tested reference. This is **not**
-a fully equivalent replacement yet. The branch must not displace production
-until the reference corpus and source/image-level visibility tests match.
+The native implementation lives in this crate. The independent legacy
+Python pipeline and research scripts are frozen at Git tag
+`legacy-python-reference-20261120`. This rewrite remains a cutover
+candidate until representative corpus quality and performance are verified.
 
 ## Implemented
 

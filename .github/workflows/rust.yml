@@ -15,9 +15,11 @@ permissions:
 
 jobs:
   stable-core:
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@77dd7bb7dcbb8450e335bbbd1c47591733dc79a4 # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@079cb96347f3dee5a628baaed46e63055c80efa5 # main
     with:
       command: |
+        bash -n run-auto.sh
+        bash tests/test_run_auto.sh
         cd rust
         cargo fmt --all -- --check
         cargo clippy --locked --all-targets --no-default-features -- -D warnings
@@ -26,7 +28,7 @@ jobs:
       rust-toolchain: "1.100.0"
       rust-components: "rustfmt clippy"
   native-pdf:
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@77dd7bb7dcbb8450e335bbbd1c47591733dc79a4 # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@079cb96347f3dee5a628baaed46e63055c80efa5 # main
     with:
       command: |
         if ! command -v pdfimages >/dev/null || ! command -v pdftoppm >/dev/null || ! command -v pdftotext >/dev/null; then
