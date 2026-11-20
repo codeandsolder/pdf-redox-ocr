@@ -391,11 +391,14 @@ pub fn repair_crops(
         }
     }
     let mut report = RepairReport::default();
-    let (leaders, boundaries): (Vec<_>, Vec<_>) = candidates
+    let (leaders, mut boundaries): (Vec<_>, Vec<_>) = candidates
         .into_iter()
         .zip(conflicts)
         .filter_map(|(candidate, conflict)| (!conflict).then_some(candidate))
         .partition(|(_, crop)| matches!(crop.reason, CropReason::PeriodicLeader { .. }));
+    // Sampling priority must not change the boundary inference ordering.
+    // CTC scores depend slightly on the padded width of the other crops.
+    boundaries.sort_unstable_by_key(|(index, _)| *index);
     let kinds: [Vec<_>; 2] = (leaders, boundaries).into();
     for batch_kind in kinds {
         let mut pending = batch_kind.into_iter();
