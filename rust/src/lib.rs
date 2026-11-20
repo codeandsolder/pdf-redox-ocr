@@ -18,7 +18,7 @@ pub mod line_audit;
 pub mod mixed_visibility;
 #[cfg(feature = "pdf-integration")]
 pub mod mosaic;
-#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+#[cfg(feature = "pdf-integration")]
 pub mod mosaic_ocr;
 #[cfg(feature = "pdf-integration")]
 pub mod native_font_mask;
@@ -31,10 +31,13 @@ pub mod paint_isolation;
 pub mod paint_scan;
 #[cfg(feature = "pdf-integration")]
 pub mod pdf_metadata;
+#[cfg(feature = "pdf-integration")]
+pub mod pipeline;
 pub mod pixel_regions;
 pub mod polygon;
 pub mod quality_eval;
 pub mod rasterize;
+pub mod recognition;
 #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
 pub mod refinement;
 #[cfg(feature = "pdf-integration")]

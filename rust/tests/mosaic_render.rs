@@ -1,7 +1,7 @@
 //! Real PDF native-resolution crops agree exactly with complete page painting,
 //! including clipping, alpha masks, rotated pages and nonzero page origins.
 
-#![cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+#![cfg(feature = "pdf-integration")]
 
 use std::{fs, process::Command};
 

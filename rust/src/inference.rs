@@ -13,7 +13,8 @@ use oar_ocr::{
 use crate::{
     Error,
     draft::OcrLine,
-    geometry::{DisplayMapper, Point, Quad},
+    geometry::{Point, Quad},
+    recognition::RecognitionBackend,
 };
 
 /// One warmed CPU OCR pipeline reused across multiple raster and PDF pages.
@@ -59,21 +60,11 @@ impl OcrInference {
             .map_err(|error| Error::Inference(error.to_string()))?;
         Ok(Self { backend })
     }
+}
 
-    /// Detect and recognize text, returning importer-ready PDF-space quads.
-    ///
-    /// # Errors
-    /// Returns an error when the ONNX runtime fails to process an image.
-    pub fn recognize_page(
-        &self,
-        rgb: RgbImage,
-        mapper: DisplayMapper,
-    ) -> Result<Vec<OcrLine>, Error> {
-        let width = f64::from(rgb.width());
-        let height = f64::from(rgb.height());
-        self.recognize_mapped(rgb, |point| {
-            mapper.to_pdf(point.0 / width, point.1 / height)
-        })
+impl RecognitionBackend for OcrInference {
+    fn model_profile(&self) -> &str {
+        Self::MODEL_PROFILE
     }
 
     /// Recognize a cropped or reoriented raster while preserving the exact
@@ -81,10 +72,10 @@ impl OcrInference {
     ///
     /// # Errors
     /// Returns an error for invalid image geometry or ONNX inference failure.
-    pub fn recognize_mapped(
+    fn recognize_mapped(
         &self,
         rgb: RgbImage,
-        pixel_to_pdf: impl Fn(Point) -> Point,
+        pixel_to_pdf: &dyn Fn(Point) -> Point,
     ) -> Result<Vec<OcrLine>, Error> {
         let width = f64::from(rgb.width());
         let height = f64::from(rgb.height());

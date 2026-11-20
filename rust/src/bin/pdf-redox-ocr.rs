@@ -1,41 +1,18 @@
 //! PDF-structure-aware Rust OCR with original vector page preservation.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    error::Error,
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::{error::Error, path::PathBuf};
 
 use clap::Parser;
 use pdf_redox::{OcrDocument, OcrLine as PdfOcrLine, OcrOverlayOptions, OcrPage};
 use pdf_redox_ocr::{
-    PageNumber,
     artifacts::{check_output_paths as check_paths, write_atomic},
-    draft::{DraftPage, OcrDraft},
-    hybrid::{MergeInput, merge_ocr},
+    draft::OcrDraft,
     inference::OcrInference,
-    mixed_visibility::{MixedVisibility, prove_mixed_source_text},
-    mosaic::{
-        MosaicBudget, MosaicPlan, contains_native_fragments, mosaic_page_eligible,
-        plan_raster_mosaics,
-    },
-    mosaic_ocr::recognize_native_mosaics,
-    native_font_mask::mask_native_fonts,
-    native_images::{NativeImageBudget, native_source_images},
-    native_words::native_words_for_pages,
-    page_selection::parse_page_selection,
-    paint_scan::{PaintReport, enumerate_image_paints},
-    pdf_metadata::PdfMetadata,
-    rasterize::{DEFAULT_PAGE_MAX_SIDE, RenderPolicy, render_rgb_page},
-    source_ocr::{
-        SourceObservation, SourceOnlyResult, source_image_mapper, source_only_candidates,
-        source_only_pages,
-    },
-    source_selection::{ImagePlacement, SourcePolicy, choose_mixed_raster_sources},
+    mosaic::MosaicBudget,
+    native_images::NativeImageBudget,
+    pipeline::{PipelinePolicy, PreparedOcr},
+    rasterize::{DEFAULT_PAGE_MAX_SIDE, RenderPolicy},
 };
-use sha2::{Digest, Sha256};
-use tempfile::NamedTempFile;
 
 /// Generate SHA-bound PDF OCR geometry and optionally apply invisible semantic text.
 #[derive(Debug, Parser)]
@@ -94,6 +71,30 @@ struct Args {
     max_native_extraction_pixels: u64,
 }
 
+const fn configured_policy(args: &Args) -> PipelinePolicy {
+    PipelinePolicy {
+        source_budget: NativeImageBudget {
+            max_source_pixels: args.max_native_source_pixels,
+            max_total_pixels: args.max_native_total_pixels,
+            max_sources: args.max_native_sources,
+            max_extraction_pixels: args.max_native_extraction_pixels,
+        },
+        mosaic_budget: MosaicBudget {
+            max_group_pixels: args.max_mosaic_group_pixels,
+            max_page_pixels: args.max_mosaic_page_pixels,
+            max_groups: args.max_mosaic_groups,
+            max_dpi: args.max_mosaic_dpi,
+        },
+        render: RenderPolicy {
+            max_side: args.max_side,
+            dpi: args.dpi,
+        },
+        native_chunk: args.native_chunk,
+        keep_native_text: args.keep_native_text,
+        minimum_confidence: args.confidence,
+    }
+}
+
 fn importer_document(draft: &OcrDraft) -> Result<OcrDocument, Box<dyn Error>> {
     let mut pages = Vec::with_capacity(draft.pages.len());
     for page in &draft.pages {
@@ -125,294 +126,10 @@ fn importer_document(draft: &OcrDraft) -> Result<OcrDocument, Box<dyn Error>> {
     })
 }
 
-/// Distinct source paints proved independently before the final OCR merge.
-struct NativePreparation {
-    source_only: SourceOnlyResult,
-    mixed: MixedVisibility,
-}
-
-type FragmentPlans = (BTreeSet<PageNumber>, BTreeMap<PageNumber, MosaicPlan>);
-
-#[derive(Clone, Copy)]
-struct NativePolicies {
-    source_budget: NativeImageBudget,
-    mosaic_budget: MosaicBudget,
-    render: RenderPolicy,
-    minimum_confidence: f64,
-}
-
-const fn configured_native_policies(args: &Args, render: RenderPolicy) -> NativePolicies {
-    NativePolicies {
-        source_budget: NativeImageBudget {
-            max_source_pixels: args.max_native_source_pixels,
-            max_total_pixels: args.max_native_total_pixels,
-            max_sources: args.max_native_sources,
-            max_extraction_pixels: args.max_native_extraction_pixels,
-        },
-        mosaic_budget: MosaicBudget {
-            max_group_pixels: args.max_mosaic_group_pixels,
-            max_page_pixels: args.max_mosaic_page_pixels,
-            max_groups: args.max_mosaic_groups,
-            max_dpi: args.max_mosaic_dpi,
-        },
-        render,
-        minimum_confidence: args.confidence,
-    }
-}
-
-fn plan_native_fragment_pages(
-    scanned: &PaintReport,
-    doc: &PdfMetadata,
-    budget: MosaicBudget,
-) -> Result<FragmentPlans, Box<dyn Error>> {
-    let mut fragmented = BTreeSet::new();
-    let mut plans = BTreeMap::new();
-    for summary in &scanned.pages {
-        let page = PageNumber::new(summary.page)?;
-        let paints = scanned
-            .placements
-            .iter()
-            .filter(|p| p.page == summary.page)
-            .cloned()
-            .collect::<Vec<_>>();
-        if !mosaic_page_eligible(summary, &paints) {
-            continue;
-        }
-        let box_ = *doc
-            .media_boxes()
-            .get(&page)
-            .ok_or("selected page missing MediaBox")?;
-        let mapper = doc.mapper(page)?;
-        if !contains_native_fragments(&paints, box_, mapper) {
-            continue;
-        }
-        fragmented.insert(page);
-        if summary.native_searchable_shows == 0
-            && let Some(plan) = plan_raster_mosaics(page, &paints, box_, mapper, budget)?
-        {
-            plans.insert(page, plan);
-        }
-    }
-    Ok((fragmented, plans))
-}
-
-fn native_source_ids(
-    scanned: &PaintReport,
-    doc: &PdfMetadata,
-    fragmented: &BTreeSet<PageNumber>,
-    source_budget: NativeImageBudget,
-    render: RenderPolicy,
-) -> Result<BTreeSet<String>, Box<dyn Error>> {
-    let mut source_ids = source_only_candidates(scanned, source_budget.max_source_pixels);
-    let sampling = scanned
-        .placements
-        .iter()
-        .map(|paint| ImagePlacement {
-            page: paint.page,
-            source_id: paint.source_id.clone(),
-            width: paint.width,
-            height: paint.height,
-            ctm: paint.ctm,
-            unsafe_reasons: paint
-                .unsafe_reasons
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-        })
-        .collect::<Vec<_>>();
-    let (mixed, report) = choose_mixed_raster_sources(
-        &sampling,
-        doc.media_boxes(),
-        SourcePolicy {
-            max_side: render.max_side,
-            max_inference_pixels: source_budget.max_total_pixels,
-            max_sources: source_budget.max_sources,
-            minimum_source_pixels: 20_000,
-            min_gain: 2.25,
-        },
-    )?;
-    eprintln!(
-        "source candidates: {} high-detail sources, {} native-only sources",
-        report.native_resolution_candidates,
-        source_ids.len()
-    );
-    source_ids.extend(mixed);
-    // Native source OCR is insufficient on a page where a text line can cross
-    // neighboring fragments; recognize the complete native-pitch group instead.
-    let eligible_elsewhere = scanned
-        .placements
-        .iter()
-        .filter(|paint| !fragmented.iter().any(|page| page.get() == paint.page))
-        .map(|paint| paint.source_id.as_str())
-        .collect::<BTreeSet<_>>();
-    source_ids.retain(|id| eligible_elsewhere.contains(id.as_str()));
-    Ok(source_ids)
-}
-
-fn recognize_native_sources(
-    engine: &OcrInference,
-    pdf: &Path,
-    selected: &[PageNumber],
-    source_ids: &BTreeSet<String>,
-    budget: NativeImageBudget,
-) -> Result<BTreeMap<String, SourceObservation>, Box<dyn Error>> {
-    let decoded = match native_source_images(pdf, selected, source_ids, budget) {
-        Ok(images) => images,
-        Err(error) => {
-            eprintln!("Native source extraction unavailable: {error}; using page OCR");
-            BTreeMap::new()
-        }
-    };
-    let mut recognized = BTreeMap::new();
-    for (source_id, rgb) in decoded {
-        let (width, height) = (rgb.width(), rgb.height());
-        let mapper = source_image_mapper(width, height)?;
-        match engine.recognize_page(rgb, mapper) {
-            Ok(lines) => {
-                eprintln!("source {source_id}: {} OCR observations", lines.len());
-                recognized.insert(
-                    source_id,
-                    SourceObservation {
-                        width,
-                        height,
-                        lines,
-                    },
-                );
-            }
-            Err(error) => eprintln!("source {source_id}: {error}; using page OCR"),
-        }
-    }
-    Ok(recognized)
-}
-
-fn add_reconstructed_mosaics(
-    engine: &OcrInference,
-    pdf: &Path,
-    doc: &PdfMetadata,
-    scanned: &PaintReport,
-    plans: &BTreeMap<PageNumber, MosaicPlan>,
-    budget: MosaicBudget,
-    source_only: &mut SourceOnlyResult,
-) -> Result<usize, Box<dyn Error>> {
-    let mut count = 0;
-    for (&page, plan) in plans {
-        let paints = scanned
-            .placements
-            .iter()
-            .filter(|paint| paint.page == page.get())
-            .cloned()
-            .collect::<Vec<_>>();
-        match recognize_native_mosaics(engine, pdf, doc.mapper(page)?, plan, &paints, budget) {
-            Ok(Some(lines)) => {
-                eprintln!(
-                    "page {} native mosaic: {} OCR lines from {} groups",
-                    page.get(),
-                    lines.len(),
-                    plan.groups.len()
-                );
-                source_only.approved_pages.insert(page);
-                source_only.pages.insert(page, lines);
-                count += 1;
-            }
-            Ok(None) => eprintln!(
-                "page {} native mosaic incomplete; using page OCR",
-                page.get()
-            ),
-            Err(error) => eprintln!(
-                "page {} native mosaic rejected: {error}; using page OCR",
-                page.get()
-            ),
-        }
-    }
-    Ok(count)
-}
-
-/// Decode and recognize original source images, source-resolution fragment
-/// mosaics, and verify exact mixed-page source paint visibility.
-fn prepare_native_sources(
-    engine: &OcrInference,
-    pdf: &Path,
-    doc: &PdfMetadata,
-    selected: &[PageNumber],
-    policies: NativePolicies,
-) -> Result<NativePreparation, Box<dyn Error>> {
-    let NativePolicies {
-        source_budget,
-        mosaic_budget,
-        render,
-        minimum_confidence,
-    } = policies;
-    mosaic_budget.validate()?;
-    let scanned = enumerate_image_paints(doc, selected)?;
-    let (fragmented, plans) = plan_native_fragment_pages(&scanned, doc, mosaic_budget)?;
-    let source_ids = native_source_ids(&scanned, doc, &fragmented, source_budget, render)?;
-    let recognized = recognize_native_sources(engine, pdf, selected, &source_ids, source_budget)?;
-    let mut source_only = source_only_pages(&scanned, &recognized)?;
-    for &page in &fragmented {
-        source_only.approved_pages.remove(&page);
-        source_only.pages.remove(&page);
-    }
-    let mosaics = add_reconstructed_mosaics(
-        engine,
-        pdf,
-        doc,
-        &scanned,
-        &plans,
-        mosaic_budget,
-        &mut source_only,
-    )?;
-    eprintln!(
-        "native mosaics: {} fragment pages, {} reconstructed",
-        fragmented.len(),
-        mosaics
-    );
-    eprintln!(
-        "source-only fast path approved {} of {} selected pages",
-        source_only.approved_pages.len(),
-        selected.len()
-    );
-    let fallback_selected = selected
-        .iter()
-        .copied()
-        .filter(|page| !source_only.approved_pages.contains(page))
-        .collect::<Vec<_>>();
-    let mixed = match prove_mixed_source_text(
-        pdf,
-        doc,
-        &scanned,
-        &recognized,
-        &fallback_selected,
-        render,
-        minimum_confidence,
-    ) {
-        Ok(mixed) => mixed,
-        Err(error) => {
-            eprintln!("Differential proof unavailable: {error}; using page OCR");
-            MixedVisibility::default()
-        }
-    };
-    eprintln!(
-        "mixed source visibility: {} proven labels across {} source paint audits",
-        mixed.proofs.len(),
-        mixed.audited.len()
-    );
-    Ok(NativePreparation { source_only, mixed })
-}
-
-/// Include the actual page-raster sampling policy in every draft's provenance.
-fn model_provenance(stage: &str, render: RenderPolicy) -> String {
-    format!(
-        "{} {stage} page-raster-max-side={} page-raster-dpi={}",
-        OcrInference::MODEL_PROFILE,
-        render.max_side,
-        render.dpi,
-    )
-}
-
 /// Bind OCR observations to their original PDF and atomically publish outputs.
 fn write_draft_and_overlay(
     args: &Args,
-    doc: &PdfMetadata,
+    original_bytes: &[u8],
     draft: &OcrDraft,
 ) -> Result<(), Box<dyn Error>> {
     // Catch a source replacement or mutation while page images were rendered.
@@ -422,7 +139,7 @@ fn write_draft_and_overlay(
     serialized.push(b'\n');
     let annotated = if args.output_pdf.is_some() {
         let (pdf, report) = pdf_redox::apply_ocr_overlay(
-            doc.original_bytes(),
+            original_bytes,
             &importer_document(draft)?,
             OcrOverlayOptions {
                 apply_unreviewed: true,
@@ -444,128 +161,16 @@ fn write_draft_and_overlay(
     Ok(())
 }
 
-/// Build an ephemeral font-suppressed PDF for page-only OCR rendering.
-fn prepare_raster_pdf(
-    args: &Args,
-    doc: &PdfMetadata,
-    selected: &[PageNumber],
-) -> Result<Option<NamedTempFile>, Box<dyn Error>> {
-    if args.keep_native_text {
-        return Ok(None);
-    }
-    let mask = mask_native_fonts(doc, selected)?;
-    eprintln!(
-        "native-font render mask: {} searchable shows hidden, {} Type3/unclassified preserved, {} clipping preserved, {} Forms cloned",
-        mask.stats.hidden_native_shows,
-        mask.stats.preserved_nonsearchable_shows,
-        mask.stats.preserved_clipping_shows,
-        mask.stats.cloned_forms,
-    );
-    mask.bytes
-        .map(|bytes| -> Result<NamedTempFile, Box<dyn Error>> {
-            let mut file = NamedTempFile::new()?;
-            file.write_all(&bytes)?;
-            file.flush()?;
-            Ok(file)
-        })
-        .transpose()
-}
-
 fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     let mut paths = vec![args.output.as_path()];
     if let Some(pdf) = &args.output_pdf {
         paths.push(pdf);
     }
     check_paths(&args.pdf, &paths)?;
-    if !args.confidence.is_finite() || !(0.0..=1.0).contains(&args.confidence) {
-        return Err("confidence threshold outside 0..=1".into());
-    }
-    let policy = RenderPolicy {
-        max_side: args.max_side,
-        dpi: args.dpi,
-    }
-    .validate()?;
-    let doc = PdfMetadata::open(&args.pdf)?;
-    let selection = parse_page_selection(args.pages.as_deref(), doc.page_count())?;
-    let transforms = doc.select_mappers(&selection)?;
-    let natives = native_words_for_pages(&args.pdf, &transforms, args.native_chunk)?;
-    let digest = hex::encode(Sha256::digest(doc.original_bytes()));
-
+    let job = PreparedOcr::open(&args.pdf, args.pages.as_deref(), configured_policy(args))?;
     let engine = OcrInference::pp_ocrv6_small()?;
-    let prepared = prepare_native_sources(
-        &engine,
-        &args.pdf,
-        &doc,
-        &selection,
-        configured_native_policies(args, policy),
-    )?;
-    let temporary_mask = prepare_raster_pdf(args, &doc, &selection)?;
-    let raster_pdf = temporary_mask
-        .as_ref()
-        .map_or(args.pdf.as_path(), NamedTempFile::path);
-    let mut raster_pages = Vec::with_capacity(selection.len());
-    let mut fallback_pages = Vec::new();
-    for &page in &selection {
-        let native_text_regions = natives
-            .get(&page)
-            .cloned()
-            .ok_or("Poppler native text omitted selected page")?;
-        let native_lines = prepared
-            .source_only
-            .pages
-            .get(&page)
-            .cloned()
-            .unwrap_or_default();
-        raster_pages.push(DraftPage {
-            page: page.get(),
-            lines: native_lines,
-            native_text_regions: native_text_regions.clone(),
-        });
-        if !prepared.source_only.approved_pages.contains(&page) {
-            let image = render_rgb_page(raster_pdf, page, policy)?;
-            let mapper = doc.mapper(page)?;
-            let lines = engine.recognize_page(image, mapper)?;
-            eprintln!(
-                "page {} (fallback): {} OCR lines, {} native words",
-                page.get(),
-                lines.len(),
-                native_text_regions.len()
-            );
-            fallback_pages.push(DraftPage {
-                page: page.get(),
-                lines,
-                native_text_regions,
-            });
-        }
-    }
-    let raster_draft = OcrDraft::new(
-        digest.clone(),
-        model_provenance("native-source", policy),
-        raster_pages,
-    );
-    let fallback_draft = OcrDraft::new(
-        digest,
-        model_provenance("page-fallback", policy),
-        fallback_pages,
-    );
-    let (draft, stats, _proposals) = merge_ocr(MergeInput {
-        pdf: &args.pdf,
-        selected: &selection,
-        raster: &raster_draft,
-        image_observations: &prepared.mixed.observations,
-        baseline: &fallback_draft,
-        raster_only: &prepared.source_only.approved_pages,
-        proven_pages: &prepared.mixed.proven_pages,
-        visibility_proofs: &prepared.mixed.proofs,
-        threshold: args.confidence,
-    })?;
-    eprintln!(
-        "OCR merge: {} source-only pages, {} fallback pages, {} verified native labels added",
-        stats.image_source_only_pages,
-        stats.page_fallback_pages,
-        stats.nonoverlapping_image_lines_added,
-    );
-    write_draft_and_overlay(args, &doc, &draft)
+    let result = job.recognize(&engine, |message| eprintln!("{message}"))?;
+    write_draft_and_overlay(args, job.original_bytes(), &result.draft)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -574,8 +179,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_paths, model_provenance, parse_page_selection};
-    use pdf_redox_ocr::rasterize::{DEFAULT_PAGE_MAX_SIDE, RenderPolicy};
+    use super::check_paths;
+    use pdf_redox_ocr::page_selection::parse_page_selection;
     use std::fs;
 
     #[test]
@@ -595,26 +200,6 @@ mod tests {
             assert!(check_paths(&input, &[&link]).is_err());
         }
         Ok(())
-    }
-
-    #[test]
-    fn draft_provenance_records_actual_render_configuration() {
-        let default = RenderPolicy::default();
-        assert_eq!(default.max_side, DEFAULT_PAGE_MAX_SIDE);
-        let fallback = model_provenance("page-fallback", default);
-        assert!(fallback.contains("page-raster-max-side=1920"));
-        assert!(fallback.contains("page-raster-dpi=72"));
-        assert_ne!(fallback, model_provenance("native-source", default));
-        assert_ne!(
-            fallback,
-            model_provenance(
-                "page-fallback",
-                RenderPolicy {
-                    max_side: 1600,
-                    ..default
-                }
-            )
-        );
     }
 
     #[test]

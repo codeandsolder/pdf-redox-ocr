@@ -116,6 +116,27 @@ cargo +stable test --locked --no-default-features. The integrated crate
 requires pinned nightly because the upstream pdf-redox dependency currently
 uses zlib-rs-fast portable SIMD. Shared CI runs strict Clippy for both.
 
+## Library orchestration
+
+The CLI uses the same `pipeline::PreparedOcr` interface available to native Rust
+callers. `PreparedOcr::open` validates the selection and resource policies,
+binds the source bytes, and extracts native word exclusion geometry before
+model initialization. `recognize` then runs source reuse, source-resolution
+mosaics, paint visibility proofs, and the masked full-page fallback through
+one `RecognitionBackend`. The backend receives owned RGB rasters and an
+explicit pixel-to-PDF coordinate mapping; it supplies its model provenance.
+The returned `PipelineResult` includes the v3 importer draft, merge statistics,
+admission proposals and original per-paint visibility audits. Progress goes to
+the caller's callback, not global standard error. The source hash is checked
+during preparation and before/after inference. The CLI alone chooses output
+paths and publishes the draft or optional annotated PDF.
+
+With only `pdf-integration` enabled, the *entire* pipeline can be tested against
+real PDF fixtures using a deterministic mapped recognizer, without ONNX or
+model downloads. Regression coverage includes source deduplication across
+nested Form calls, occlusion, native text exclusion, bounded fallback,
+source-resolution mosaics and stale source rejection.
+
 ## Native Rust recognition-only refinement
 
 The independent second pass is provided by `pdf-redox-ocr-refine`. It consumes

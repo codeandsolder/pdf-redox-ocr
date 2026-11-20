@@ -12,7 +12,6 @@ use crate::{
     Error,
     draft::OcrLine,
     geometry::{DisplayMapper, Point, Quad},
-    inference::OcrInference,
     mosaic::{MosaicAxes, MosaicBudget, MosaicPlan},
     paint_scan::ImagePaint,
     rasterize::{CropPixelMapper, render_rgb_region, sample_whitened},
@@ -306,23 +305,6 @@ pub fn reconstruct_native_mosaics(
         return Ok(None);
     }
     Ok(Some(lines))
-}
-
-/// Run the native OCR model on complete source-resolution PDF paint mosaics.
-///
-/// # Errors
-/// Returns an error for unsuccessful Poppler reconstruction or OCR inference.
-pub fn recognize_native_mosaics(
-    engine: &OcrInference,
-    pdf: &Path,
-    page_mapper: DisplayMapper,
-    plan: &MosaicPlan,
-    paints: &[ImagePaint],
-    budget: MosaicBudget,
-) -> Result<Option<Vec<OcrLine>>, Error> {
-    reconstruct_native_mosaics(pdf, page_mapper, plan, paints, budget, |rgb, mapper| {
-        engine.recognize_mapped(rgb, mapper)
-    })
 }
 
 #[cfg(test)]
