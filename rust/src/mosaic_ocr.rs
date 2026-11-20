@@ -120,13 +120,13 @@ fn paint_clip_mask(
     Ok(())
 }
 
-fn group_dpi(pitch: f64, max_dpi: u32) -> Option<u32> {
+fn group_dpi(pitch: f64, limit: u32) -> Option<u32> {
     if !pitch.is_finite() || pitch <= 0.0 {
         return None;
     }
     let target = (72.0 / pitch).round().max(36.0);
     let dpi = num_traits::ToPrimitive::to_u32(&target)?;
-    (dpi <= max_dpi).then_some(dpi)
+    (dpi <= limit).then_some(dpi)
 }
 
 /// Exact image-space mapping for the oriented mosaic raster.
@@ -237,7 +237,7 @@ pub fn reconstruct_native_mosaics(
     let mut total_pixels = 0_u64;
     let mut seen = HashSet::new();
     for group in &plan.groups {
-        let Some(dpi) = group_dpi(group.pitch, budget.max_dpi) else {
+        let Some(dpi) = group_dpi(group.pitch, budget.dpi) else {
             return Ok(None);
         };
         let mut crop = render_rgb_region(
@@ -246,11 +246,11 @@ pub fn reconstruct_native_mosaics(
             page_mapper,
             group.region,
             dpi,
-            budget.max_group_pixels,
+            budget.group_pixels,
         )?;
         total_pixels =
             total_pixels.saturating_add(u64::from(crop.rgb.width()) * u64::from(crop.rgb.height()));
-        if total_pixels > budget.max_page_pixels {
+        if total_pixels > budget.page_pixels {
             return Ok(None);
         }
         let members = paints
@@ -266,18 +266,14 @@ pub fn reconstruct_native_mosaics(
         }
         let mapper = crop.pixel_mapper();
         paint_clip_mask(&mut crop.rgb, mapper, &members)?;
-        let Some((oriented, frame)) = rectify_group(
-            &crop.rgb,
-            mapper,
-            &members,
-            group.axes,
-            budget.max_group_pixels,
-        ) else {
+        let Some((oriented, frame)) =
+            rectify_group(&crop.rgb, mapper, &members, group.axes, budget.group_pixels)
+        else {
             return Ok(None);
         };
         let output_pixels = u64::from(oriented.width()) * u64::from(oriented.height());
         total_pixels = total_pixels.saturating_add(output_pixels);
-        if total_pixels > budget.max_page_pixels {
+        if total_pixels > budget.page_pixels {
             return Ok(None);
         }
         let pixel_to_pdf = |point| mapper.to_pdf(frame.to_input(point));

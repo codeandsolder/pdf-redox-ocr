@@ -407,8 +407,8 @@ pub fn refine_draft(
     }
     let mut experimental = source.clone();
     experimental.model = format!(
-        "{} + research-only {} hypotheses",
-        source.model, secondary_model
+        "{} + research-only {secondary_model} hypotheses",
+        source.model
     );
     for page in &mut experimental.pages {
         for line in &mut page.lines {

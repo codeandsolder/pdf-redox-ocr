@@ -360,7 +360,7 @@ impl PipelineResult {
     #[must_use]
     pub const fn audit(&self) -> PipelineAudit<'_> {
         PipelineAudit {
-            schema_version: 10,
+            schema_version: 11,
             preparation: None,
             pdf_sha256: self.draft.pdf_sha256.as_str(),
             model: self.draft.model.as_str(),
@@ -811,7 +811,7 @@ impl PreparedOcr {
                         && paint.width > 0
                         && paint.height > 0
                         && u64::from(paint.width) * u64::from(paint.height)
-                            <= source_budget.max_source_pixels
+                            <= source_budget.source_pixels
                 })
                 .map(|paint| paint.source_id.clone())
                 .collect(),
@@ -841,7 +841,7 @@ impl PreparedOcr {
         progress: &mut dyn FnMut(String),
     ) -> Result<BTreeSet<String>, Error> {
         let budget = self.policy.source_budget;
-        let mut ids = source_only_candidates(scanned, budget.max_source_pixels);
+        let mut ids = source_only_candidates(scanned, budget.source_pixels);
         let sampling = scanned
             .placements
             .iter()
@@ -863,8 +863,8 @@ impl PreparedOcr {
             self.doc.media_boxes(),
             SourcePolicy {
                 max_side: self.policy.render.max_side,
-                max_inference_pixels: budget.max_total_pixels,
-                max_sources: budget.max_sources,
+                max_inference_pixels: budget.total_pixels,
+                max_sources: budget.sources,
                 minimum_source_pixels: 20_000,
                 min_gain: 2.25,
             },
@@ -994,9 +994,8 @@ impl PreparedOcr {
         let mosaics =
             self.add_reconstructed_mosaics(engine, &scanned, &plans, &mut source_only, progress)?;
         progress(format!(
-            "native mosaics: {} fragment pages, {} reconstructed",
-            fragmented.len(),
-            mosaics
+            "native mosaics: {} fragment pages, {mosaics} reconstructed",
+            fragmented.len()
         ));
         progress(format!(
             "source-only fast path approved {} of {} selected pages",

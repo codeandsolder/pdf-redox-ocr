@@ -149,7 +149,7 @@ fn group_estimate_or_source_orientation_does_not_bypass_resource_limits()
                 box_,
                 mapper,
                 MosaicBudget {
-                    max_group_pixels: 100,
+                    group_pixels: 100,
                     ..MosaicBudget::default()
                 }
             )?

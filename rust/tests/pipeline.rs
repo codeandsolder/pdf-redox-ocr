@@ -390,7 +390,7 @@ fn native_budget_and_recognizer_failures_preserve_full_page_fallback()
     for budget in [
         NativeImageBudget::default(),
         NativeImageBudget {
-            max_source_pixels: 100,
+            source_pixels: 100,
             ..NativeImageBudget::default()
         },
     ] {
@@ -414,11 +414,7 @@ fn native_budget_and_recognizer_failures_preserve_full_page_fallback()
         assert_eq!(output.draft.pages[0].page, 2);
         assert_eq!(output.draft.pages[0].lines.len(), 1);
         let calls = recognizer.calls.borrow();
-        let expected = if budget.max_source_pixels == 100 {
-            1
-        } else {
-            2
-        };
+        let expected = if budget.source_pixels == 100 { 1 } else { 2 };
         assert_eq!(calls.len(), expected, "{calls:?}");
         assert_eq!(calls.last(), Some(&(1600, 1200)));
     }
@@ -695,7 +691,7 @@ fn audit_binds_raw_source_observations_paints_and_admission_to_original_pdf()
     let result = PreparedOcr::open(&pdf, None, policy)?
         .recognize(&SelectiveRecognizer::default(), |_| {})?;
     let audit = serde_json::to_value(result.audit())?;
-    assert_eq!(audit["schema_version"], 10);
+    assert_eq!(audit["schema_version"], 11);
     assert_eq!(audit["pdf_sha256"], result.draft.pdf_sha256);
     assert_eq!(audit["model"], result.draft.model);
     assert_eq!(audit["policy"]["render"]["max_side"], 600);

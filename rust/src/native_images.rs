@@ -87,22 +87,22 @@ pub fn parse_inventory_line(line: &str) -> Result<Option<ImageInventoryEntry>, E
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct NativeImageBudget {
     /// Maximum pixels for one source `XObject`.
-    pub max_source_pixels: u64,
+    pub source_pixels: u64,
     /// Maximum pixels stored across all distinct sources.
-    pub max_total_pixels: u64,
+    pub total_pixels: u64,
     /// Maximum number of distinct source objects.
-    pub max_sources: usize,
+    pub sources: usize,
     /// Upper bound on all images a single pdfimages invocation may extract.
-    pub max_extraction_pixels: u64,
+    pub extraction_pixels: u64,
 }
 
 impl Default for NativeImageBudget {
     fn default() -> Self {
         Self {
-            max_source_pixels: 8_000_000,
-            max_total_pixels: 16_000_000,
-            max_sources: 12,
-            max_extraction_pixels: 64_000_000,
+            source_pixels: 8_000_000,
+            total_pixels: 16_000_000,
+            sources: 12,
+            extraction_pixels: 64_000_000,
         }
     }
 }
@@ -113,10 +113,10 @@ impl NativeImageBudget {
     /// # Errors
     /// Returns an error for a zero resource ceiling.
     pub fn validate(self) -> Result<Self, Error> {
-        if self.max_source_pixels == 0
-            || self.max_total_pixels == 0
-            || self.max_sources == 0
-            || self.max_extraction_pixels == 0
+        if self.source_pixels == 0
+            || self.total_pixels == 0
+            || self.sources == 0
+            || self.extraction_pixels == 0
         {
             return Err(Error::Invalid("native image budget must be nonzero".into()));
         }
@@ -183,8 +183,8 @@ pub fn native_source_images(
     // One page per call bounds Poppler's temporary output and allows early
     // termination once all requested sources or the memory budget are used.
     for run in contiguous_runs(selected, 1)? {
-        if decoded.len() >= budget.max_sources
-            || used_pixels >= budget.max_total_pixels
+        if decoded.len() >= budget.sources
+            || used_pixels >= budget.total_pixels
             || wanted_ids.iter().all(|id| decoded.contains_key(id))
         {
             break;
@@ -196,7 +196,7 @@ pub fn native_source_images(
         let extraction_pixels = inventory.iter().fold(0_u64, |acc, entry| {
             acc.saturating_add(u64::from(entry.width) * u64::from(entry.height))
         });
-        if extraction_pixels > budget.max_extraction_pixels {
+        if extraction_pixels > budget.extraction_pixels {
             // pdfimages emits every source on the requested page, including
             // ones we don't want, so even rejected sources consume resources.
             continue;
@@ -209,11 +209,11 @@ pub fn native_source_images(
                     .as_ref()
                     .is_some_and(|id| wanted_ids.contains(id) && !decoded.contains_key(id))
                     && entry.kind == "image"
-                    && u64::from(entry.width) * u64::from(entry.height) <= budget.max_source_pixels
+                    && u64::from(entry.width) * u64::from(entry.height) <= budget.source_pixels
                     && entry.width > 0
                     && entry.height > 0
                     && u64::from(entry.width) * u64::from(entry.height)
-                        <= budget.max_total_pixels.saturating_sub(used_pixels)
+                        <= budget.total_pixels.saturating_sub(used_pixels)
             })
             .collect::<Vec<_>>();
         if candidates.is_empty() {
@@ -238,11 +238,11 @@ pub fn native_source_images(
             let Some(source_id) = &entry.source_id else {
                 continue;
             };
-            if decoded.contains_key(source_id) || decoded.len() >= budget.max_sources {
+            if decoded.contains_key(source_id) || decoded.len() >= budget.sources {
                 continue;
             }
             let pixels = u64::from(entry.width) * u64::from(entry.height);
-            if pixels > budget.max_total_pixels.saturating_sub(used_pixels) {
+            if pixels > budget.total_pixels.saturating_sub(used_pixels) {
                 continue;
             }
             // Poppler indexes all emitted images including masks. The summary

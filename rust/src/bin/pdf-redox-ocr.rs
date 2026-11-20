@@ -155,16 +155,16 @@ fn configured_policy(args: &Args) -> PipelinePolicy {
     PipelinePolicy {
         raster_mode: args.raster_mode,
         source_budget: NativeImageBudget {
-            max_source_pixels: args.max_native_source_pixels,
-            max_total_pixels: args.max_native_total_pixels,
-            max_sources: args.max_native_sources,
-            max_extraction_pixels: args.max_native_extraction_pixels,
+            source_pixels: args.max_native_source_pixels,
+            total_pixels: args.max_native_total_pixels,
+            sources: args.max_native_sources,
+            extraction_pixels: args.max_native_extraction_pixels,
         },
         mosaic_budget: MosaicBudget {
-            max_group_pixels: args.max_mosaic_group_pixels,
-            max_page_pixels: args.max_mosaic_page_pixels,
-            max_groups: args.max_mosaic_groups,
-            max_dpi: args.max_mosaic_dpi,
+            group_pixels: args.max_mosaic_group_pixels,
+            page_pixels: args.max_mosaic_page_pixels,
+            groups: args.max_mosaic_groups,
+            dpi: args.max_mosaic_dpi,
         },
         render: RenderPolicy {
             max_side: args.max_side,

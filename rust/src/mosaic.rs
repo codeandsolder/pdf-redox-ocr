@@ -21,22 +21,22 @@ const MAX_BUCKETS_PER_PAINT: u64 = 256;
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct MosaicBudget {
     /// Maximum pixels in one native-resolution group crop.
-    pub max_group_pixels: u64,
+    pub group_pixels: u64,
     /// Maximum pixels rendered across all groups on a page.
-    pub max_page_pixels: u64,
+    pub page_pixels: u64,
     /// Maximum number of groups to render on one page.
-    pub max_groups: usize,
+    pub groups: usize,
     /// Upper native raster DPI bound for local Poppler crop rendering.
-    pub max_dpi: u32,
+    pub dpi: u32,
 }
 
 impl Default for MosaicBudget {
     fn default() -> Self {
         Self {
-            max_group_pixels: 12_000_000,
-            max_page_pixels: 24_000_000,
-            max_groups: 24,
-            max_dpi: 2400,
+            group_pixels: 12_000_000,
+            page_pixels: 24_000_000,
+            groups: 24,
+            dpi: 2400,
         }
     }
 }
@@ -47,10 +47,10 @@ impl MosaicBudget {
     /// # Errors
     /// Returns an error for zero limits or invalid renderer DPI.
     pub fn validate(self) -> Result<Self, Error> {
-        if self.max_group_pixels == 0
-            || self.max_page_pixels == 0
-            || self.max_groups == 0
-            || !(36..=2400).contains(&self.max_dpi)
+        if self.group_pixels == 0
+            || self.page_pixels == 0
+            || self.groups == 0
+            || !(36..=2400).contains(&self.dpi)
         {
             return Err(Error::Invalid(
                 "invalid native fragment mosaic budget".into(),
@@ -407,7 +407,7 @@ pub fn plan_raster_mosaics(
         return Ok(None);
     };
     let components = connected_components(&items, box_);
-    if !components.values().any(|group| group.len() >= 2) || components.len() > budget.max_groups {
+    if !components.values().any(|group| group.len() >= 2) || components.len() > budget.groups {
         return Ok(None);
     }
     let mut groups = Vec::with_capacity(components.len());
@@ -437,11 +437,11 @@ pub fn plan_raster_mosaics(
         else {
             return Ok(None);
         };
-        if pixels == 0 || pixels > budget.max_group_pixels {
+        if pixels == 0 || pixels > budget.group_pixels {
             return Ok(None);
         }
         total_pixels = total_pixels.saturating_add(pixels);
-        if total_pixels > budget.max_page_pixels {
+        if total_pixels > budget.page_pixels {
             return Ok(None);
         }
         groups.push(MosaicGroup {
@@ -670,7 +670,7 @@ mod tests {
                 page,
                 mapper,
                 MosaicBudget {
-                    max_group_pixels: 10,
+                    group_pixels: 10,
                     ..budget
                 }
             )?

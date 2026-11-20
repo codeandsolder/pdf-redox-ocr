@@ -139,7 +139,7 @@ raster dimensions. The default LRU budget retains at most 256 entries and
 inferences are never cached. `--no-recognition-cache` disables lookup and
 retention for diagnostic comparison, and `PipelineResult.recognition`
 reports full-raster calls, cache hits, evictions, retained payload and additional crop batches, with separate leader and boundary candidate outcomes.
-The optional `--report audit.json` writes a separate schema-10 diagnostic
+The optional `--report audit.json` writes a separate schema-11 diagnostic
 report bound to the original PDF digest and model provenance. It includes
 the validated policy, raw native-image observations in source-pixel
 coordinates, original paint paths and native-only blockers, the per-page
@@ -401,7 +401,7 @@ At least one draft, searchable PDF or audit must be requested.
 Retaining a draft with processing requires `--optimized-pdf`, because
 its SHA and user-space geometry bind to the exact prepared PDF, not the
 original source. The optimizer report and actual configuration are recorded
-under `preparation` in schema-10 CLI audits, alongside both input hashes;
+under `preparation` in schema-11 CLI audits, alongside both input hashes;
 the existing `pdf_sha256` refers to the OCR input. Reverify the original
 and prepared source hashes before applying or publishing results.
 Processing is intentionally not lossless in every case (microstroke
@@ -489,7 +489,7 @@ retained, not invented. Failed or conflicting crops leave original
 observations unchanged. Failed repair attempts prevent caching the incomplete
 raster result; successful exact RGB reuse includes the confirmed repairs.
 
-Pipeline audit schema 10 records original pixel-space observations, sample
+Pipeline audit schema 11 records original pixel-space observations, sample
 frame, component bounds, typed crop reason, proposed quad and each actual
 prediction/decision by exact RGB SHA-256 and dimensions. Full-raster inference
 calls remain separate from recognition-only batch counters. Disable the stage
@@ -519,7 +519,7 @@ substitutions are encoded. Accepted crop geometry and model confidence
 replace the original; failures prevent exact-RGB result caching. The
 experimental flag is off by default until broader representative validation.
 All repair kinds share a 2M-pixel per-window and 16M-pixel per-raster sampling
-budget, prioritizing terminal-leader candidates, and schema-10 `crop_repairs` records the original prediction,
+budget, prioritizing terminal-leader candidates, and schema-11 `crop_repairs` records the original prediction,
 actual geometry, type-specific evidence and independent prediction/outcome.
 `recognition.crop_batches` counts actual recognition-only batches (leader and boundary batches are separate to preserve existing leader inference ordering);
 leader/boundary candidate/accepted counters are independent.
@@ -559,13 +559,13 @@ or impossible assignments when glyphs are joined. One unsolvable cluster
 does not discard independent matches elsewhere on the line. Unmatched,
 whitespace and padding emissions have explicit statuses.
 
-Schema-10 `character_audits` groups data by exact parent RGB SHA-256 and
+Schema-11 `character_audits` groups data by exact parent RGB SHA-256 and
 dimensions. Each primary detector entry includes the original line/quad,
 sorted detector index (not final draft index), exact rectified RGB crop
 hash/dimensions, padding geometry, raw CTC column indices, projected ink
 and alignment candidates. Component indices address the entry's component
 array. Positions and ink bounds are in the **rectified recognition-crop
-frame**. schema 10 additionally records a reconstructible projective crop
+frame**. schema 11 additionally records a reconstructible projective crop
 mapping for actual detector quadrilaterals, verified against returned crop
 dimensions and the OAR rotation contract. Full-page raster occurrences have
 explicit SHA-bound page transforms. This permits vector association without
@@ -646,7 +646,7 @@ rejected even if aggregate cluster coverage agrees. No dictionary correction,
 fabricated score or geometry change is used. The second classifier remains
 fallible: matching ink support is not a proof of a character's identity.
 
-Schema-10 character audits retain candidate originals, actual second-model
+Schema-11 character audits retain candidate originals, actual second-model
 text/score/CTC anchors and typed decisions, including failures.
 `confirmation_attempts`, `confirmation_accepted`, `confirmation_batches` and
 `confirmation_failures` distinguish this stage from crop repair and full-raster

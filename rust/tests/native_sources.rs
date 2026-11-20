@@ -43,7 +43,7 @@ fn one_native_image_decodes_once_across_six_paints() -> Result<(), Box<dyn std::
         &pages,
         &source_ids,
         NativeImageBudget {
-            max_source_pixels: 500_000,
+            source_pixels: 500_000,
             ..NativeImageBudget::default()
         },
     )?;
@@ -58,8 +58,8 @@ fn one_native_image_decodes_once_across_six_paints() -> Result<(), Box<dyn std::
         &pages,
         &source_ids,
         NativeImageBudget {
-            max_source_pixels: 500_000,
-            max_total_pixels: 100_000,
+            source_pixels: 500_000,
+            total_pixels: 100_000,
             ..NativeImageBudget::default()
         },
     )?;
@@ -69,7 +69,7 @@ fn one_native_image_decodes_once_across_six_paints() -> Result<(), Box<dyn std::
         &pages,
         &source_ids,
         NativeImageBudget {
-            max_extraction_pixels: 100_000,
+            extraction_pixels: 100_000,
             ..NativeImageBudget::default()
         },
     )?;
@@ -93,7 +93,7 @@ fn inline_images_consume_extraction_ceiling_without_becoming_sources()
         &[page],
         &wanted,
         NativeImageBudget {
-            max_extraction_pixels: 519_999,
+            extraction_pixels: 519_999,
             ..NativeImageBudget::default()
         },
     )?;
@@ -103,7 +103,7 @@ fn inline_images_consume_extraction_ceiling_without_becoming_sources()
         &[page],
         &wanted,
         NativeImageBudget {
-            max_extraction_pixels: 520_000,
+            extraction_pixels: 520_000,
             ..NativeImageBudget::default()
         },
     )?;
