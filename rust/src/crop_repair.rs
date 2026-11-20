@@ -1,18 +1,20 @@
-//! Re-recognize only source-supported text bodies, using the retained input raster.
+//! Re-recognize geometry-supported crop revisions on the retained RGB raster.
 //!
-//! The geometry establishes where layout ink ends; a second recognition must
-//! independently confirm the complete body. It cannot introduce other edits.
+//! Layout-leader removal and boundary extension share sampling, inference,
+//! admission, batching and provenance. No unsupported interior edits.
 
 use image::RgbImage;
 use serde::Serialize;
 
 use crate::{
     Error,
-    geometry::{Point, Quad},
+    boundary_ink::{BoundaryEvidence, detect_boundaries},
+    geometry::{Point, Quad, QuadBounds},
     ink_polarity::Polarity,
     layout_leaders::{LeaderEdge, LeaderEvidence, detect_leaders},
     line_frame::{LineFrame, SampleWindow},
     pixel_regions::{InkBounds, PixelClass, regions},
+    polygon::overlap_fraction,
     recognition::PixelLine,
 };
 
@@ -28,17 +30,31 @@ pub struct BodyPrediction {
 
 /// Evidence in the original recognition raster, not PDF occurrence coordinates.
 #[derive(Clone, Debug, Serialize)]
-pub struct LeaderRepair {
+pub struct CropRepair {
     pub line_index: usize,
     pub original: PixelLine,
-    pub body_quad: Quad,
+    pub proposed_quad: Quad,
     pub sample_quad: Quad,
     pub sample_dimensions: (u32, u32),
     pub observation: InkBounds,
-    pub leaders: Vec<LeaderEvidence>,
+    pub reason: CropReason,
     /// Bounds in the sample frame, indexed by the geometry evidence.
     pub components: Vec<InkBounds>,
     pub outcome: RepairOutcome,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CropReason {
+    PeriodicLeader { leaders: Vec<LeaderEvidence> },
+    BoundaryInk { edges: Vec<BoundaryEvidence> },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RepairPolicy {
+    pub leaders: bool,
+    pub boundaries: bool,
+    pub minimum_confidence: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -63,7 +79,7 @@ impl RepairOutcome {
 
 #[derive(Default)]
 pub struct RepairReport {
-    pub repairs: Vec<LeaderRepair>,
+    pub repairs: Vec<CropRepair>,
     pub batches: usize,
 }
 
@@ -87,20 +103,56 @@ fn has_leader_text(text: &str, edge: LeaderEdge) -> bool {
     }
 }
 
+fn leader_candidate(line: &PixelLine, policy: RepairPolicy) -> bool {
+    policy.leaders
+        && [LeaderEdge::Left, LeaderEdge::Right]
+            .into_iter()
+            .any(|edge| has_leader_text(&line.text, edge))
+}
+
 struct CropEvidence {
     quad: Quad,
     sample_quad: Quad,
     dimensions: (u32, u32),
     observation: InkBounds,
-    leaders: Vec<LeaderEvidence>,
+    reason: CropReason,
     components: Vec<InkBounds>,
+    added_strips: Vec<Quad>,
 }
 
-fn body_evidence(image: &RgbImage, line: &PixelLine, budget: &mut u64) -> Option<CropEvidence> {
-    if ![LeaderEdge::Left, LeaderEdge::Right]
-        .into_iter()
-        .any(|edge| has_leader_text(&line.text, edge))
-    {
+fn significant_overlap(first: &Quad, second: &Quad) -> bool {
+    QuadBounds::new(first).intersects(QuadBounds::new(second))
+        && overlap_fraction(first, second) > 0.01
+}
+
+fn added_strip(
+    window: SampleWindow,
+    frame: LineFrame,
+    observation: InkBounds,
+    edge: &BoundaryEvidence,
+) -> Quad {
+    let bounds = match edge.edge {
+        LeaderEdge::Left => InkBounds {
+            right: observation.left,
+            ..edge.expanded
+        },
+        LeaderEdge::Right => InkBounds {
+            left: observation.right,
+            ..edge.expanded
+        },
+    };
+    window.quad(frame, bounds)
+}
+
+fn crop_evidence(
+    image: &RgbImage,
+    lines: &[PixelLine],
+    index: usize,
+    policy: RepairPolicy,
+    budget: &mut u64,
+) -> Option<CropEvidence> {
+    let line = &lines[index];
+    if !policy.boundaries && !leader_candidate(line, policy) {
         return None;
     }
     let mut frame = LineFrame::new(line.quad, |points| points, MAX_LINE_PIXELS).ok()?;
@@ -129,21 +181,46 @@ fn body_evidence(image: &RgbImage, line: &PixelLine, budget: &mut u64) -> Option
         .normalized_ink(frame, image, |point| point, Polarity::Auto)
         .ok()?;
     let components = regions(&normalized, 192, PixelClass::Ink, observation).ok()?;
-    let leaders = detect_leaders(&components, observation)
-        .into_iter()
-        .filter(|l| has_leader_text(&line.text, l.edge))
+    let all_leaders = detect_leaders(&components, observation);
+    let leaders = all_leaders
+        .iter()
+        .filter(|l| policy.leaders && has_leader_text(&line.text, l.edge))
+        .cloned()
         .collect::<Vec<_>>();
-    if leaders.is_empty() {
+    let (body, reason, added_strips) = if !leaders.is_empty() {
+        let mut body = observation;
+        for leader in &leaders {
+            body.left = body.left.max(leader.body.left);
+            body.right = body.right.min(leader.body.right);
+        }
+        if body.left >= body.right {
+            return None;
+        }
+        (body, CropReason::PeriodicLeader { leaders }, vec![])
+    } else if policy.boundaries && all_leaders.is_empty() {
+        let resolved = detect_boundaries(&components, observation, dimensions.0)
+            .into_iter()
+            .filter_map(|edge| {
+                let quad = added_strip(window, frame, observation, &edge);
+                (!lines
+                    .iter()
+                    .enumerate()
+                    .any(|(i, peer)| i != index && significant_overlap(&quad, &peer.quad)))
+                .then_some((edge, quad))
+            })
+            .collect::<Vec<_>>();
+        if resolved.is_empty() {
+            return None;
+        }
+        let (edges, strips): (Vec<_>, Vec<_>) = resolved.into_iter().unzip();
+        let body = edges
+            .iter()
+            .map(|e| e.expanded)
+            .fold(observation, InkBounds::union);
+        (body, CropReason::BoundaryInk { edges }, strips)
+    } else {
         return None;
-    }
-    let mut body = observation;
-    for leader in &leaders {
-        body.left = body.left.max(leader.body.left);
-        body.right = body.right.min(leader.body.right);
-    }
-    if body.left >= body.right {
-        return None;
-    }
+    };
     // The frame may swap axes for vertical lines. The recognition-only
     // predictor still has to confirm the exact body on the proved edge.
     // Restore original detector corner identity when mapping back.
@@ -164,26 +241,52 @@ fn body_evidence(image: &RgbImage, line: &PixelLine, budget: &mut u64) -> Option
         ),
         dimensions,
         observation,
-        leaders,
+        reason,
+        added_strips,
         components: components.into_iter().map(|c| c.bounds).collect(),
     })
 }
 
 fn accepted(
     original: &str,
-    leaders: &[LeaderEvidence],
+    reason: &CropReason,
     prediction: &BodyPrediction,
     threshold: f64,
 ) -> bool {
-    let mut body = original.trim();
-    for leader in leaders {
-        body = strip_edge(body, leader.edge);
-    }
+    let original = original.trim();
     let text = prediction.text.trim();
-    !body.is_empty()
-        && body != original.trim()
-        && text == body
-        && (threshold..=1.0).contains(&prediction.confidence)
+    if original.is_empty()
+        || !(threshold..=1.0).contains(&prediction.confidence)
+        || original == text
+    {
+        return false;
+    }
+    match reason {
+        CropReason::PeriodicLeader { leaders } => {
+            let body = leaders
+                .iter()
+                .fold(original, |body, leader| strip_edge(body, leader.edge));
+            !body.is_empty() && body != original && text == body
+        }
+        CropReason::BoundaryInk { edges } => {
+            let capacity = |edge| {
+                edges
+                    .iter()
+                    .filter(|e| e.edge == edge)
+                    .map(|e| e.component_indices.len())
+                    .sum::<usize>()
+            };
+            let (left_capacity, right_capacity) =
+                (capacity(LeaderEdge::Left), capacity(LeaderEdge::Right));
+            // Each independently supported edge has its own bound. Do not
+            // transfer left-side evidence to authorize extra right-side text.
+            text.match_indices(original).any(|(start, _)| {
+                let left = text[..start].trim().chars().count();
+                let right = text[start + original.len()..].trim().chars().count();
+                left <= left_capacity && right <= right_capacity && left + right > 0
+            })
+        }
+    }
 }
 
 fn repair_batch(
@@ -201,7 +304,7 @@ fn repair_batch(
     let predictions = match recognize(&quads) {
         Ok(predictions) if predictions.len() == batch.len() => Ok(predictions),
         Ok(_) => Err(Error::Inference(
-            "leader recognition returned wrong batch size".into(),
+            "crop recognition returned wrong batch size".into(),
         )),
         Err(error) => Err(error),
     };
@@ -219,7 +322,7 @@ fn repair_batch(
                 .into_iter()
                 .zip(&batch)
                 .map(|(prediction, (index, crop))| {
-                    if accepted(&lines[*index].text, &crop.leaders, &prediction, threshold) {
+                    if accepted(&lines[*index].text, &crop.reason, &prediction, threshold) {
                         RepairOutcome::Accepted { prediction }
                     } else {
                         RepairOutcome::Rejected { prediction }
@@ -236,14 +339,14 @@ fn repair_batch(
             line.confidence = prediction.confidence;
             line.quad = crop.quad;
         }
-        report.repairs.push(LeaderRepair {
+        report.repairs.push(CropRepair {
             line_index: index,
             original,
-            body_quad: crop.quad,
+            proposed_quad: crop.quad,
             sample_quad: crop.sample_quad,
             sample_dimensions: crop.dimensions,
             observation: crop.observation,
-            leaders: crop.leaders,
+            reason: crop.reason,
             components: crop.components,
             outcome,
         });
@@ -252,36 +355,75 @@ fn repair_batch(
 
 /// Use only bounded crop batches; retain all proposed and rejected evidence.
 /// A failed batch leaves its original lines intact and allows subsequent retry.
-pub fn repair_leaders(
+pub fn repair_crops(
     image: &RgbImage,
     lines: &mut [PixelLine],
-    threshold: f64,
+    policy: RepairPolicy,
     mut recognize: impl FnMut(&[Quad]) -> Result<Vec<BodyPrediction>, Error>,
 ) -> RepairReport {
     let mut budget = MAX_INPUT_SAMPLE_PIXELS;
-    let mut candidates = Vec::with_capacity(BATCH_SIZE);
-    let mut report = RepairReport::default();
-    for index in 0..lines.len() {
-        if let Some(crop) = body_evidence(image, &lines[index], &mut budget) {
-            candidates.push((index, crop));
-            if candidates.len() == BATCH_SIZE {
-                repair_batch(
-                    std::mem::replace(&mut candidates, Vec::with_capacity(BATCH_SIZE)),
-                    lines,
-                    threshold,
-                    &mut recognize,
-                    &mut report,
-                );
+    // Preserve the existing leader scan priority and inference batch shape,
+    // even when boundary repair is also requested. Every line is sampled
+    // at most once and both kinds still share the same total pixel budget.
+    let (priority, remaining): (Vec<_>, Vec<_>) =
+        (0..lines.len()).partition(|&i| leader_candidate(&lines[i], policy));
+    let candidates = priority
+        .into_iter()
+        .chain(remaining)
+        .filter_map(|index| {
+            crop_evidence(image, lines, index, policy, &mut budget).map(|crop| (index, crop))
+        })
+        .collect::<Vec<_>>();
+    let mut conflicts = vec![false; candidates.len()];
+    for (i, (_, crop)) in candidates.iter().enumerate() {
+        if crop.added_strips.is_empty() {
+            continue;
+        }
+        for (j, (_, other)) in candidates.iter().enumerate().skip(i + 1) {
+            if crop
+                .added_strips
+                .iter()
+                .any(|a| other.added_strips.iter().any(|b| significant_overlap(a, b)))
+            {
+                conflicts[i] = true;
+                conflicts[j] = true;
             }
         }
     }
-    repair_batch(candidates, lines, threshold, &mut recognize, &mut report);
+    let mut report = RepairReport::default();
+    let (leaders, boundaries): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .zip(conflicts)
+        .filter_map(|(candidate, conflict)| (!conflict).then_some(candidate))
+        .partition(|(_, crop)| matches!(crop.reason, CropReason::PeriodicLeader { .. }));
+    let kinds: [Vec<_>; 2] = (leaders, boundaries).into();
+    for batch_kind in kinds {
+        let mut pending = batch_kind.into_iter();
+        loop {
+            let batch = pending.by_ref().take(BATCH_SIZE).collect::<Vec<_>>();
+            if batch.is_empty() {
+                break;
+            }
+            repair_batch(
+                batch,
+                lines,
+                policy.minimum_confidence,
+                &mut recognize,
+                &mut report,
+            );
+        }
+    }
     report
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BodyPrediction, repair_leaders};
+    use super::{BodyPrediction, RepairPolicy, repair_crops};
+    const LEADERS: RepairPolicy = RepairPolicy {
+        leaders: true,
+        boundaries: false,
+        minimum_confidence: 0.97,
+    };
     use crate::{Error, geometry::Point, recognition::PixelLine};
     use image::{Rgb, RgbImage};
 
@@ -327,7 +469,7 @@ mod tests {
             ("A.B ..", 0.999, false),
         ] {
             let mut lines = vec![original.clone()];
-            let report = repair_leaders(&image, &mut lines, 0.97, |quads| {
+            let report = repair_crops(&image, &mut lines, LEADERS, |quads| {
                 assert_eq!(quads.len(), 1);
                 assert!(quads[0][1].0 < 88.0 && quads[0][1].0 > 74.0);
                 Ok(vec![BodyPrediction {
@@ -357,7 +499,7 @@ mod tests {
             .map(|Point(x, y)| Point(f64::from(image.height()) - y, x));
         original.quad.rotate_left(1);
         let mut lines = vec![original.clone()];
-        let report = repair_leaders(&rotated, &mut lines, 0.97, |quads| {
+        let report = repair_crops(&rotated, &mut lines, LEADERS, |quads| {
             assert_eq!(quads.len(), 1);
             assert!(quads[0][0].1 > 74.0 && quads[0][0].1 < 88.0);
             assert_eq!(quads[0][2], original.quad[2]);
@@ -390,7 +532,7 @@ mod tests {
                 let call = self.calls.get();
                 self.calls.set(call + 1);
                 let mut lines = vec![self.original.clone()];
-                let leader_repair = repair_leaders(&rgb, &mut lines, 0.97, |_| {
+                let crop_repair = repair_crops(&rgb, &mut lines, LEADERS, |_| {
                     if call == 0 {
                         return Err(Error::Inference("transient body inference".into()));
                     }
@@ -399,10 +541,7 @@ mod tests {
                         confidence: 0.99,
                     }])
                 });
-                Ok(RasterRecognition {
-                    lines,
-                    leader_repair,
-                })
+                Ok(RasterRecognition { lines, crop_repair })
             }
         }
         let (image, original) = sample();
@@ -418,8 +557,8 @@ mod tests {
         let stats = session.stats();
         assert_eq!(stats.inference_calls, 2);
         assert_eq!(stats.cache_hits, 1);
-        assert_eq!(stats.leader_batches, 2);
-        assert_eq!(stats.leader_failures, 1);
+        assert_eq!(stats.crop_batches, 2);
+        assert_eq!(stats.crop_failures, 1);
         assert_eq!(stats.leader_accepted, 1);
         let audits = session.take_repair_audits();
         assert_eq!(audits.len(), 2);
@@ -428,18 +567,136 @@ mod tests {
     }
 
     #[test]
+    fn outside_mark_repair_preserves_body_and_respects_detector_ownership() {
+        let mut image = RgbImage::from_pixel(150, 100, Rgb([255; 3]));
+        for (x, y, w, h) in [
+            (20, 43, 8, 8),
+            (40, 42, 14, 24),
+            (60, 42, 14, 24),
+            (80, 42, 14, 24),
+        ] {
+            for dy in y..y + h {
+                for dx in x..x + w {
+                    image.put_pixel(dx, dy, Rgb([0; 3]));
+                }
+            }
+        }
+        let original = PixelLine {
+            text: "ABC".into(),
+            confidence: 0.99,
+            quad: [
+                Point(30., 70.),
+                Point(100., 70.),
+                Point(100., 35.),
+                Point(30., 35.),
+            ],
+        };
+        let policy = RepairPolicy {
+            leaders: false,
+            boundaries: true,
+            minimum_confidence: 0.97,
+        };
+        for (text, score, ok) in [
+            ("* ABC", 0.99, true),
+            ("ABC*", 0.999, false),
+            ("* ABD", 0.999, false),
+            ("*# ABC", 0.999, false),
+            ("* ABC", 0.96, false),
+        ] {
+            let mut lines = vec![original.clone()];
+            let report = repair_crops(&image, &mut lines, policy, |quads| {
+                assert_eq!(quads.len(), 1);
+                assert!(quads[0][0].0 < 20.);
+                Ok(vec![BodyPrediction {
+                    text: text.into(),
+                    confidence: score,
+                }])
+            });
+            assert_eq!(report.repairs.len(), 1, "{text}");
+            assert_eq!(report.repairs[0].outcome.accepted(), ok, "{text}");
+            assert_eq!(lines[0].text, if ok { text } else { "ABC" });
+        }
+        let peer = PixelLine {
+            text: "*".into(),
+            confidence: 0.99,
+            quad: [
+                Point(17., 55.),
+                Point(29., 55.),
+                Point(29., 40.),
+                Point(17., 40.),
+            ],
+        };
+        let mut lines = vec![original.clone(), peer.clone()];
+        let report = repair_crops(&image, &mut lines, policy, |_| {
+            Err(Error::Inference("should not recognize owned ink".into()))
+        });
+        assert!(report.repairs.is_empty());
+        assert_eq!(lines, vec![original, peer]);
+    }
+
+    #[test]
+    fn boundary_repair_cannot_change_leader_batches() {
+        let (leader_image, leader) = sample();
+        let mut image = RgbImage::from_pixel(240, 250, Rgb([255; 3]));
+        for (x, y, pixel) in leader_image.enumerate_pixels() {
+            image.put_pixel(x, y, *pixel);
+        }
+        for (x, y, w, h) in [
+            (20, 193, 8, 8),
+            (40, 192, 14, 24),
+            (60, 192, 14, 24),
+            (80, 192, 14, 24),
+        ] {
+            for dy in y..y + h {
+                for dx in x..x + w {
+                    image.put_pixel(dx, dy, Rgb([0; 3]));
+                }
+            }
+        }
+        let boundary = PixelLine {
+            text: "ABC".into(),
+            confidence: 0.99,
+            quad: [
+                Point(30., 220.),
+                Point(100., 220.),
+                Point(100., 185.),
+                Point(30., 185.),
+            ],
+        };
+        let mut lines = vec![boundary, leader];
+        let policy = RepairPolicy {
+            boundaries: true,
+            ..LEADERS
+        };
+        let mut batches = vec![];
+        let report = repair_crops(&image, &mut lines, policy, |quads| {
+            assert_eq!(quads.len(), 1);
+            let is_leader = quads[0][0].1 < 100.;
+            batches.push(is_leader);
+            Ok(vec![BodyPrediction {
+                text: if is_leader { "A.B" } else { "* ABC" }.into(),
+                confidence: 0.99,
+            }])
+        });
+        assert_eq!(batches, [true, false]);
+        assert_eq!(report.batches, 2);
+        assert_eq!(lines[0].text, "* ABC");
+        assert_eq!(lines[1].text, "A.B");
+    }
+
+    #[test]
     fn no_candidate_no_model_and_failed_batch_preserves_observations() {
         let (image, original) = sample();
         let mut unpunctuated = original.clone();
         unpunctuated.text = "A.B".into();
         let mut lines = vec![unpunctuated.clone()];
-        let report = repair_leaders(&image, &mut lines, 0.97, |_| {
+        let report = repair_crops(&image, &mut lines, LEADERS, |_| {
             Err(Error::Inference("unexpected".into()))
         });
         assert_eq!(report.batches, 0);
         assert_eq!(lines[0], unpunctuated);
         let mut lines = vec![original.clone(); 9];
-        let report = repair_leaders(&image, &mut lines, 0.97, |_| {
+        let report = repair_crops(&image, &mut lines, LEADERS, |_| {
             Err(Error::Inference("fixture".into()))
         });
         assert_eq!(report.batches, 3);

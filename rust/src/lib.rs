@@ -4,6 +4,8 @@
 //! components are independent of the inference backend.
 
 pub mod artifacts;
+pub mod boundary_ink;
+pub mod crop_repair;
 mod disjoint_set;
 pub mod draft;
 pub mod draft_compare;
@@ -17,7 +19,6 @@ pub mod ink_polarity;
 #[cfg(feature = "pdf-integration")]
 pub mod input_preparation;
 pub mod layout_leaders;
-pub mod leader_repair;
 #[cfg(feature = "pdf-integration")]
 pub mod line_audit;
 mod line_frame;

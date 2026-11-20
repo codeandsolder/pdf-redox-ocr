@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source_pdf_sha256": "1fce7d48e7fe2347759998c27d7bb7bde711ea5620e8219715e4ead54ac71ba1",
-  "provenance": "Manual transcription from visually inspected Poppler-rendered DEFOND pages 8 and 28, using OCR geometries solely for locating the corresponding text boxes. The set is a selected evaluation sample, not a representative corpus.",
+  "provenance": "Manual transcription from visually inspected Poppler-rendered DEFOND pages 8 and 28, using OCR geometries solely for locating the corresponding text boxes. The set is a selected evaluation sample, not a representative corpus. Line 22 transcription corrected after rechecking the rendered line break: 度 belongs to the following line.",
   "coordinate_system": "PDF user space",
   "samples": [
     {
@@ -181,7 +181,7 @@
         458.7,
         582.7
       ],
-      "text": "上限。55是指开关装置于产品外露所承受之基本温度",
+      "text": "上限。55是指开关装置于产品外露所承受之基本温",
       "kind": "cjk"
     },
     {

@@ -7,9 +7,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Error,
+    crop_repair::{CropReason, CropRepair, RepairReport},
     draft::OcrLine,
     geometry::{DisplayMapper, Point, Quad},
-    leader_repair::{LeaderRepair, RepairReport},
 };
 
 /// A model observation in the original input raster's pixel-corner frame.
@@ -40,14 +40,14 @@ impl PixelLine {
 #[derive(Default)]
 pub struct RasterRecognition {
     pub lines: Vec<PixelLine>,
-    pub leader_repair: RepairReport,
+    pub crop_repair: RepairReport,
 }
 
 impl From<Vec<PixelLine>> for RasterRecognition {
     fn from(lines: Vec<PixelLine>) -> Self {
         Self {
             lines,
-            leader_repair: RepairReport::default(),
+            crop_repair: RepairReport::default(),
         }
     }
 }
@@ -59,7 +59,7 @@ pub struct RasterRepairAudit {
     pub dimensions: (u32, u32),
     pub rgb_sha256: String,
     pub batches: usize,
-    pub repairs: Vec<LeaderRepair>,
+    pub repairs: Vec<CropRepair>,
 }
 
 /// A reusable recognizer whose result depends only on the input RGB raster.
@@ -114,10 +114,12 @@ pub struct RecognitionStats {
     pub cache_hits: usize,
     pub evictions: usize,
     pub retained_bytes: usize,
-    pub leader_batches: usize,
+    pub crop_batches: usize,
     pub leader_candidates: usize,
     pub leader_accepted: usize,
-    pub leader_failures: usize,
+    pub boundary_candidates: usize,
+    pub boundary_accepted: usize,
+    pub crop_failures: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,10 +169,12 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
                 cache_hits: 0,
                 evictions: 0,
                 retained_bytes: 0,
-                leader_batches: 0,
+                crop_batches: 0,
                 leader_candidates: 0,
                 leader_accepted: 0,
-                leader_failures: 0,
+                boundary_candidates: 0,
+                boundary_accepted: 0,
+                crop_failures: 0,
             },
         }
     }
@@ -186,15 +190,22 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
     }
 
     fn record_repairs(&mut self, key: RasterKey, report: RepairReport) -> bool {
-        self.stats.leader_batches += report.batches;
-        self.stats.leader_candidates += report.repairs.len();
-        self.stats.leader_accepted += report
-            .repairs
-            .iter()
-            .filter(|r| r.outcome.accepted())
-            .count();
+        self.stats.crop_batches += report.batches;
+        for repair in &report.repairs {
+            let accepted = usize::from(repair.outcome.accepted());
+            match repair.reason {
+                CropReason::PeriodicLeader { .. } => {
+                    self.stats.leader_candidates += 1;
+                    self.stats.leader_accepted += accepted;
+                }
+                CropReason::BoundaryInk { .. } => {
+                    self.stats.boundary_candidates += 1;
+                    self.stats.boundary_accepted += accepted;
+                }
+            }
+        }
         let failures = report.repairs.iter().filter(|r| r.outcome.failed()).count();
-        self.stats.leader_failures += failures;
+        self.stats.crop_failures += failures;
         if !report.repairs.is_empty() {
             self.repair_audits.push(RasterRepairAudit {
                 dimensions: key.dimensions,
@@ -251,11 +262,8 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
             return Ok(result);
         }
         self.stats.inference_calls += 1;
-        let RasterRecognition {
-            lines,
-            leader_repair,
-        } = self.backend.recognize_pixels(rgb)?;
-        let complete = self.record_repairs(key, leader_repair);
+        let RasterRecognition { lines, crop_repair } = self.backend.recognize_pixels(rgb)?;
+        let complete = self.record_repairs(key, crop_repair);
         if self.budget.enabled() && complete {
             self.remember(key, &lines);
         }

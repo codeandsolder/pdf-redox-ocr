@@ -116,7 +116,7 @@ pub struct PipelineResult {
     pub residual_attempts: Vec<ResidualAttempt>,
     /// Model calls and reuse across all raster recognition paths.
     pub recognition: RecognitionStats,
-    pub leader_repairs: Vec<RasterRepairAudit>,
+    pub crop_repairs: Vec<RasterRepairAudit>,
     /// Validated policy used for this complete recognition job.
     pub policy: PipelinePolicy,
     /// Actual source image paint closure and native-only blockers.
@@ -306,7 +306,7 @@ pub struct PipelineAudit<'a> {
     model: &'a str,
     policy: PipelinePolicy,
     recognition: RecognitionStats,
-    leader_repairs: &'a [RasterRepairAudit],
+    crop_repairs: &'a [RasterRepairAudit],
     routes: &'a BTreeMap<PageNumber, PageRoute>,
     residual_pages: &'a BTreeSet<PageNumber>,
     residual_attempts: &'a [ResidualAttempt],
@@ -336,13 +336,13 @@ impl PipelineResult {
     #[must_use]
     pub const fn audit(&self) -> PipelineAudit<'_> {
         PipelineAudit {
-            schema_version: 5,
+            schema_version: 6,
             preparation: None,
             pdf_sha256: self.draft.pdf_sha256.as_str(),
             model: self.draft.model.as_str(),
             policy: self.policy,
             recognition: self.recognition,
-            leader_repairs: self.leader_repairs.as_slice(),
+            crop_repairs: self.crop_repairs.as_slice(),
             routes: &self.routes,
             residual_pages: &self.residual_pages,
             residual_attempts: self.residual_attempts.as_slice(),
@@ -541,13 +541,15 @@ impl PreparedOcr {
             "recognition: {} model calls, {} exact RGB cache hits, {} retained bytes",
             recognition.inference_calls, recognition.cache_hits, recognition.retained_bytes
         ));
-        if recognition.leader_candidates > 0 {
+        if recognition.leader_candidates + recognition.boundary_candidates > 0 {
             observer.message(format!(
-                "leader repair: {} accepted of {} candidates in {} batches ({} failed)",
+                "crop repairs: leader {}/{}, boundary {}/{} in {} batches ({} failed)",
                 recognition.leader_accepted,
                 recognition.leader_candidates,
-                recognition.leader_batches,
-                recognition.leader_failures
+                recognition.boundary_accepted,
+                recognition.boundary_candidates,
+                recognition.crop_batches,
+                recognition.crop_failures
             ));
         }
         self.verify_source()?;
@@ -560,7 +562,7 @@ impl PreparedOcr {
             residual_pages,
             residual_attempts,
             recognition,
-            leader_repairs: session.take_repair_audits(),
+            crop_repairs: session.take_repair_audits(),
             policy: self.policy,
             paints: prepared.scanned,
             source_observations: prepared.recognized,

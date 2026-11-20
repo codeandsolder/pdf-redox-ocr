@@ -116,7 +116,7 @@ fn processing_cli_retains_exact_draft_input_without_model_or_optimizer_binary()
     assert_eq!(draft.pages.len(), 1);
     assert!(draft.pages[0].lines.is_empty());
     let audit: serde_json::Value = serde_json::from_slice(&fs::read(&report_path)?)?;
-    assert_eq!(audit["schema_version"], 5);
+    assert_eq!(audit["schema_version"], 6);
     assert_eq!(
         audit["preparation"]["original_sha256"],
         sha256_file(&input)?

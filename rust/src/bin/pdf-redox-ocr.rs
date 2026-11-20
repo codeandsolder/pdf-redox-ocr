@@ -12,6 +12,7 @@ use image::{ImageEncoder, RgbImage, codecs::png::PngEncoder};
 use pdf_redox::{OcrDocument, OcrLine as PdfOcrLine, OcrOverlayOptions, OcrPage};
 use pdf_redox_ocr::{
     artifacts::{check_output_paths as check_paths, write_atomic},
+    crop_repair::RepairPolicy,
     draft::OcrDraft,
     inference::OcrInference,
     input_preparation::PreparedInput,
@@ -119,6 +120,9 @@ struct RecognitionArgs {
     /// Disable geometry-confirmed re-recognition of dotted layout leaders.
     #[arg(long)]
     no_leader_repair: bool,
+    /// Experimentally confirm geometry-supported boundary ink with recognition-only crops.
+    #[arg(long)]
+    boundary_repair: bool,
     /// ONNX intra-operation CPU thread count (default: backend policy).
     #[arg(long)]
     ocr_threads: Option<NonZeroUsize>,
@@ -319,7 +323,11 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     }
     let engine = OcrInference::pp_ocrv6_small(
         args.recognition.ocr_threads,
-        (!args.recognition.no_leader_repair).then_some(args.confidence.max(0.97)),
+        RepairPolicy {
+            leaders: !args.recognition.no_leader_repair,
+            boundaries: args.recognition.boundary_repair,
+            minimum_confidence: args.confidence.max(0.97),
+        },
     );
     let result = job.recognize(
         &engine,

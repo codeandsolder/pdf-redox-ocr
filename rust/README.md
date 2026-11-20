@@ -138,14 +138,14 @@ raster dimensions. The default LRU budget retains at most 256 entries and
 4 MiB of observation payload; input image buffers are not retained. Failed
 inferences are never cached. `--no-recognition-cache` disables lookup and
 retention for diagnostic comparison, and `PipelineResult.recognition`
-reports full-raster calls, cache hits, evictions, retained payload and additional leader crop batches/candidate outcomes.
-The optional `--report audit.json` writes a separate schema-5 diagnostic
+reports full-raster calls, cache hits, evictions, retained payload and additional crop batches, with separate leader and boundary candidate outcomes.
+The optional `--report audit.json` writes a separate schema-6 diagnostic
 report bound to the original PDF digest and model provenance. It includes
 the validated policy, raw native-image observations in source-pixel
 coordinates, original paint paths and native-only blockers, the per-page
 routing/residual decisions, differential visibility evidence, merge
 proposals, per-page residual attempt outcomes and original rejected recognition
-lines/quads, exact-RGB-bound leader repair evidence and recognition reuse counters. It is not an importer draft and
+lines/quads, exact-RGB-bound crop repair evidence and recognition reuse counters. It is not an importer draft and
 cannot authorize an overlay.
 The scanner also certifies native-only or empty pages using shared paint
 closure and source context; those pages retain their native word regions
@@ -401,7 +401,7 @@ At least one draft, searchable PDF or audit must be requested.
 Retaining a draft with processing requires `--optimized-pdf`, because
 its SHA and user-space geometry bind to the exact prepared PDF, not the
 original source. The optimizer report and actual configuration are recorded
-under `preparation` in schema-5 CLI audits, alongside both input hashes;
+under `preparation` in schema-6 CLI audits, alongside both input hashes;
 the existing `pdf_sha256` refers to the OCR input. Reverify the original
 and prepared source hashes before applying or publishing results.
 Processing is intentionally not lossless in every case (microstroke
@@ -456,7 +456,7 @@ a new directory whose parent already exists. The observer writes the exact
 ordinary and transferred treated RGB inputs as lossless PNG immediately
 before attempted residual inference. This is opt-in, uses borrowed images
 without changing model inputs, and performs no additional rendering.
-Schema-5 pipeline audits identify the required per-page source observations
+Schema-6 pipeline audits identify the required per-page source observations
 and retain rejected residual text/quads for correlation with the captures.
 
 Source candidates are vetoed by overlap only with page observations that
@@ -474,7 +474,7 @@ Normal inference confirms dotted layout leader corrections using the same
 PP-OCRv6 Small recognition session as the initial detection/crop pipeline.
 The OAR task adapters keep the original detector configuration, quad sorting,
 crop rectification, stable aspect-ratio ordering and four-region batching.
-Only observations with terminal dot-like punctuation enter bounded geometry
+With boundary repair disabled, only observations with terminal dot-like punctuation enter bounded geometry
 sampling (two line heights of padding, up to 2M sample pixels per line and
 16M per raster). The same sampler and polarity estimation as the standalone
 line audit provide periodic ink-chain evidence. Only the proved boundary
@@ -489,10 +489,43 @@ retained, not invented. Failed or conflicting crops leave original
 observations unchanged. Failed repair attempts prevent caching the incomplete
 raster result; successful exact RGB reuse includes the confirmed repairs.
 
-Pipeline audit schema 5 records original pixel-space observations, sample
-frame, component bounds, leader evidence, body crop quad and each actual
+Pipeline audit schema 6 records original pixel-space observations, sample
+frame, component bounds, typed crop reason, proposed quad and each actual
 prediction/decision by exact RGB SHA-256 and dimensions. Full-raster inference
 calls remain separate from recognition-only batch counters. Disable the stage
 with `--no-leader-repair` for exact policy A/B comparisons. Native-only pages
 still initialize no model. The standalone line-audit tool remains purely
 diagnostic; its schema 5 and original PDF coordinate contract are unchanged.
+
+
+### Experimental boundary-ink recovery
+
+`--boundary-repair` extends the retained-raster crop repair policy to clipped
+or omitted edge ink. The geometry phase uses local connected components in
+the rectified line's own band. A connected component crossing the original
+edge, or a nearby detached compact mark with plausible separation from
+the body, can authorize extension with a small background margin. Repeated
+leaders are not extension candidates. Reject newly intersected unrelated
+ink, strips already owned by other detector observations, and conflicting
+extension proposals before recognizing any repaired line. Planning uses
+immutable original geometry, not partially repaired lines.
+
+The same recognition adapter and four-crop batches confirm the full expanded
+crop. Only exact original-body preservation plus additional Unicode scalars
+on a geometry-authorized edge are admissible, bounded separately by that
+edge's source component count. Confidence must meet both 0.97 and the
+overlay threshold; no score is fabricated, no specific character
+substitutions are encoded. Accepted crop geometry and model confidence
+replace the original; failures prevent exact-RGB result caching. The
+experimental flag is off by default until broader representative validation.
+All repair kinds share a 2M-pixel per-window and 16M-pixel per-raster sampling
+budget, prioritizing terminal-leader candidates, and schema-6 `crop_repairs` records the original prediction,
+actual geometry, type-specific evidence and independent prediction/outcome.
+`recognition.crop_batches` counts actual recognition-only batches (leader and boundary batches are separate to preserve existing leader inference ordering);
+leader/boundary candidate/accepted counters are independent.
+
+DEFOND's manually transcribed p8 line 22 reference was corrected: the
+final 度 starts the next line, which OCR had already recognized correctly.
+The real p8 errors were the missing asterisk before "Optional mark :" and
+period after "(See Table A)". Both can be recovered by source-supported
+crop extension rather than dictionary corrections.

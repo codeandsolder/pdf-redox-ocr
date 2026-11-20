@@ -35,8 +35,8 @@ use oar_ocr::{
 
 use crate::{
     Error,
+    crop_repair::{BodyPrediction, RepairPolicy, RepairReport, repair_crops},
     geometry::{Point, Quad},
-    leader_repair::{BodyPrediction, repair_leaders},
     recognition::{PixelLine, RasterRecognition, RecognitionBackend},
 };
 
@@ -49,7 +49,7 @@ const REGION_BATCH_SIZE: usize = 4;
 pub struct OcrInference {
     backend: OnceLock<Result<OcrModels, String>>,
     threads: Option<NonZeroUsize>,
-    leader_threshold: Option<f64>,
+    repair: RepairPolicy,
     profile: String,
 }
 
@@ -261,20 +261,19 @@ impl OcrInference {
     /// Resolve and load models only on the first recognition. A native-only
     /// document needs no model or ONNX session.
     #[must_use]
-    pub fn pp_ocrv6_small(threads: Option<NonZeroUsize>, leader_threshold: Option<f64>) -> Self {
+    pub fn pp_ocrv6_small(threads: Option<NonZeroUsize>, repair: RepairPolicy) -> Self {
         let profile = threads.map_or_else(
             || Self::MODEL_PROFILE.to_owned(),
             |count| format!("{} CPU threads={count}", Self::MODEL_PROFILE),
         );
-        let profile = if let Some(threshold) = leader_threshold {
-            format!("{profile}; periodic-leader body confirmation >= {threshold}")
-        } else {
-            profile
-        };
+        let profile = format!(
+            "{profile}; crop confirmation >= {} (leader={}, boundary={})",
+            repair.minimum_confidence, repair.leaders, repair.boundaries
+        );
         Self {
             backend: OnceLock::new(),
             threads,
-            leader_threshold,
+            repair,
             profile,
         }
     }
@@ -300,17 +299,14 @@ impl RecognitionBackend for OcrInference {
         let rgb = Arc::new(rgb);
         let backend = self.backend()?;
         let mut lines = backend.recognize_primary(&rgb)?;
-        let leader_repair = self
-            .leader_threshold
-            .map_or_else(Default::default, |threshold| {
-                repair_leaders(&rgb, &mut lines, threshold, |quads| {
-                    backend.recognize_bodies(&rgb, quads)
-                })
-            });
-        Ok(RasterRecognition {
-            lines,
-            leader_repair,
-        })
+        let crop_repair = if self.repair.leaders || self.repair.boundaries {
+            repair_crops(&rgb, &mut lines, self.repair, |quads| {
+                backend.recognize_bodies(&rgb, quads)
+            })
+        } else {
+            RepairReport::default()
+        };
+        Ok(RasterRecognition { lines, crop_repair })
     }
 }
 
