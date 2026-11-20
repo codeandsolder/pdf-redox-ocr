@@ -141,6 +141,34 @@ nothing qualifies for refinement. When searchable native fonts overlap
 selected pages, an ephemeral render-only font mask is used as in primary OCR.
 Both CLIs share strict page-selection and atomic output handling.
 
+## Source-bound manual OCR quality evaluation
+
+The native `pdf-redox-ocr-eval` command evaluates an unchanged v3 OCR draft
+against manually transcribed PDF-space anchors. A human reference must contain
+the original PDF SHA-256, provenance, coordinate system `PDF user space`,
+and selected `{page, center: [x, y], text, kind}` samples. The command
+verifies the original PDF bytes and refuses a mismatched or duplicate anchor.
+The matching procedure uses actual (possibly rotated) text quadrilaterals,
+a maximum-cardinality one-to-one assignment, and never matches arbitrary
+strings elsewhere on a page. Missing observations count as full-length text
+errors. Exact and NFKC/whitespace-insensitive character error rates use
+Unicode scalar values, including technical units and CJK.
+
+```sh
+pdf-redox-ocr-eval --pdf source.pdf --draft primary.json \
+  --reference inspected-labels.json --report quality.json
+```
+
+Its JSON report has per-sample predictions (including absent observations),
+confidence, candidate ambiguity, error counts, overall totals and per-kind
+metrics. The evaluator needs neither ONNX models nor a PDF rendering engine,
+and never edits the input draft or source PDF. The two small, manually reviewed reference manifests are versioned in
+`tests/fixtures/quality/` (86 DEFOND and 10 Walsin anchors). Original supplier
+PDFs, full OCR observations and benchmark outputs remain in the separate
+benchmark workspace; the manifests carry the original PDF digests and
+visual-review provenance. The Notion worklog documents their precise paths,
+selected-sample limitations and experimental comparisons.
+
 ## Correctness policy
 
 A source-image result may replace full-page OCR only if the page is pure

@@ -56,3 +56,8 @@ required-features = ["native-inference", "pdf-integration", "cli"]
 name = "pdf-redox-ocr-refine"
 path = "src/bin/pdf-redox-ocr-refine.rs"
 required-features = ["native-inference", "pdf-integration", "cli"]
+
+[[bin]]
+name = "pdf-redox-ocr-eval"
+path = "src/bin/pdf-redox-ocr-eval.rs"
+required-features = ["cli"]

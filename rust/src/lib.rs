@@ -27,6 +27,7 @@ pub mod paint_scan;
 #[cfg(feature = "pdf-integration")]
 pub mod pdf_metadata;
 pub mod polygon;
+pub mod quality_eval;
 pub mod rasterize;
 #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
 pub mod refinement;
