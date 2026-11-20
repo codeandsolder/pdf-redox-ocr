@@ -3,8 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
-    fs,
-    io::{BufWriter, Write},
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -12,6 +11,7 @@ use clap::Parser;
 use pdf_redox::{OcrDocument, OcrLine as PdfOcrLine, OcrOverlayOptions, OcrPage};
 use pdf_redox_ocr::{
     PageNumber,
+    artifacts::{check_output_paths as check_paths, write_atomic},
     draft::{DraftPage, OcrDraft},
     hybrid::{MergeInput, merge_ocr},
     inference::OcrInference,
@@ -24,6 +24,7 @@ use pdf_redox_ocr::{
     native_font_mask::mask_native_fonts,
     native_images::{NativeImageBudget, native_source_images},
     native_words::native_words_for_pages,
+    page_selection::parse_page_selection,
     paint_scan::{PaintReport, enumerate_image_paints},
     pdf_metadata::PdfMetadata,
     rasterize::{RenderPolicy, render_rgb_page},
@@ -91,95 +92,6 @@ struct Args {
     /// Maximum aggregate pixels that one Poppler extraction may produce.
     #[arg(long, default_value_t = 64_000_000)]
     max_native_extraction_pixels: u64,
-}
-
-fn parse_page_selection(
-    specification: Option<&str>,
-    count: usize,
-) -> Result<Vec<PageNumber>, Box<dyn Error>> {
-    let count = u32::try_from(count)?;
-    let Some(specification) = specification else {
-        return (1..=count)
-            .map(|index| PageNumber::new(index).map_err(Into::into))
-            .collect();
-    };
-    let mut pages = BTreeSet::new();
-    for part in specification.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            return Err("empty page in selection".into());
-        }
-        if let Some((start, end)) = part.split_once('-') {
-            let start = start.trim().parse::<u32>()?;
-            let end = end.trim().parse::<u32>()?;
-            if start == 0 || start > end || end > count {
-                return Err("invalid page range".into());
-            }
-            for number in start..=end {
-                if !pages.insert(number) {
-                    return Err("duplicate page selection".into());
-                }
-            }
-        } else {
-            let number = part.parse::<u32>()?;
-            if number == 0 || number > count || !pages.insert(number) {
-                return Err("invalid or duplicate selected page".into());
-            }
-        }
-    }
-    if pages.is_empty() {
-        return Err("empty page selection".into());
-    }
-    pages
-        .into_iter()
-        .map(|number| PageNumber::new(number).map_err(Into::into))
-        .collect()
-}
-
-fn normalized_existing(path: &Path) -> Result<Option<PathBuf>, std::io::Error> {
-    match fs::canonicalize(path) {
-        Ok(normalized) => Ok(Some(normalized)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-fn check_paths(input: &Path, paths: &[&Path]) -> Result<(), Box<dyn Error>> {
-    let input = fs::canonicalize(input)?;
-    let mut targets = BTreeSet::new();
-    for output in paths {
-        let parent = output
-            .parent()
-            .filter(|dir| !dir.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let file_name = output.file_name().ok_or("output must name a file")?;
-        let normalized = match normalized_existing(output)? {
-            Some(existing) => existing,
-            None => fs::canonicalize(parent)?.join(file_name),
-        };
-        if normalized == input {
-            return Err("output path aliases the original source PDF".into());
-        }
-        if !targets.insert(normalized) {
-            return Err("two output paths resolve to the same file".into());
-        }
-    }
-    Ok(())
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
-    let parent = path
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut temporary = NamedTempFile::new_in(parent)?;
-    {
-        let mut writer = BufWriter::new(&mut temporary);
-        writer.write_all(bytes)?;
-        writer.flush()?;
-    }
-    temporary.persist(path)?;
-    Ok(())
 }
 
 fn importer_document(draft: &OcrDraft) -> Result<OcrDocument, Box<dyn Error>> {

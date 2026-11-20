@@ -3,6 +3,7 @@
 //! The deterministic geometry, native text extraction and source sampling
 //! components are independent of the inference backend.
 
+pub mod artifacts;
 pub mod draft;
 pub mod geometry;
 pub mod hybrid;
@@ -18,6 +19,7 @@ pub mod mosaic_ocr;
 pub mod native_font_mask;
 pub mod native_images;
 pub mod native_words;
+pub mod page_selection;
 #[cfg(feature = "pdf-integration")]
 pub mod paint_isolation;
 #[cfg(feature = "pdf-integration")]
@@ -26,6 +28,8 @@ pub mod paint_scan;
 pub mod pdf_metadata;
 pub mod polygon;
 pub mod rasterize;
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+pub mod refinement;
 #[cfg(feature = "pdf-integration")]
 pub mod source_mask;
 #[cfg(feature = "pdf-integration")]

@@ -112,6 +112,31 @@ cargo +stable test --locked --no-default-features. The integrated crate
 requires pinned nightly because the upstream pdf-redox dependency currently
 uses zlib-rs-fast portable SIMD. Shared CI runs strict Clippy for both.
 
+## Native Rust recognition-only refinement
+
+The independent second pass is provided by `pdf-redox-ocr-refine`. It consumes
+an exact-PDF-bound v3 draft, selects uncertain lines, perspective-crops only
+those quads from the original page raster, and runs the PP-OCRv6 medium
+recognition model without re-detecting lines. The OAR text-line orientation
+classifier corrects upside-down crops by default (disable with `--no-cls`).
+Models and dictionary default to OAR's verified cache; explicit ONNX,
+orientation-model and dictionary paths are supported.
+
+```sh
+pdf-redox-ocr-refine --pdf input.pdf --primary-ocr observations.json \
+  --report medium-comparison.json --experimental-draft medium-hypotheses.json \
+  --max-primary-score 0.97 --pages 8,10
+```
+
+Output is a comparison report and a distinct experimental v3 draft, never an
+automatic rewrite of the primary PDF. The experimental draft has every line
+unreviewed with confidence **zero**, including unchanged lines. Unicode NFKC
+and whitespace differences are recorded as equivalent, but altered case,
+digits, punctuation, and units remain distinct. No second model is loaded if
+nothing qualifies for refinement. When searchable native fonts overlap
+selected pages, an ephemeral render-only font mask is used as in primary OCR.
+Both CLIs share strict page-selection and atomic output handling.
+
 ## Correctness policy
 
 A source-image result may replace full-page OCR only if the page is pure
