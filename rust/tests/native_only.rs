@@ -242,7 +242,10 @@ fn all_three_routes_preserve_selected_order_and_native_words()
             assert_eq!(page.lines.len(), 0);
         }
         if matches!(page.page, 1 | 2 | 13) {
-            assert!(!page.native_text_regions.is_empty());
+            assert_ne!(
+                page.native_text_regions,
+                [] as [pdf_redox_ocr::geometry::Quad; 0]
+            );
         }
     }
     result.draft.verify_pdf(&path)?;
@@ -279,7 +282,10 @@ fn native_only_selection_and_keep_native_text_control_recognition()
     let result = forced.recognize(&recognizer, |_| {})?;
     assert_eq!(result.stats.page_fallback_pages, 4);
     assert_eq!(recognizer.0.borrow().len(), 4);
-    assert!(!result.draft.pages[0].native_text_regions.is_empty());
+    assert_ne!(
+        result.draft.pages[0].native_text_regions,
+        [] as [pdf_redox_ocr::geometry::Quad; 0]
+    );
     Ok(())
 }
 
