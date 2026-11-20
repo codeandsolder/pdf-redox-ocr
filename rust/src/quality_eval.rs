@@ -60,6 +60,10 @@ pub struct QualitySample {
     pub kind: String,
     pub reference: String,
     pub predicted: Option<String>,
+    /// Zero-based index in the original, unreordered draft page; absent for unmatched anchors.
+    pub line_index: Option<usize>,
+    /// Exact selected observation geometry, retained even with overlapping candidates.
+    pub line_quad: Option<Quad>,
     pub confidence: Option<f64>,
     pub candidate_count: usize,
     pub exact: bool,
@@ -353,15 +357,16 @@ fn claim(
 fn candidate_lines<'a>(
     reference: &GroundTruth,
     draft: &'a OcrDraft,
-) -> (Vec<&'a OcrLine>, Vec<Vec<usize>>) {
+) -> (Vec<(usize, &'a OcrLine)>, Vec<Vec<usize>>) {
     let all = draft
         .pages
         .iter()
         .flat_map(|page| {
             page.lines
                 .iter()
-                .filter(|line| !line.text.trim().is_empty())
-                .map(move |line| (page.page, line))
+                .enumerate()
+                .filter(|(_, line)| !line.text.trim().is_empty())
+                .map(move |(index, line)| (page.page, index, line))
         })
         .collect::<Vec<_>>();
     let mut options = Vec::with_capacity(reference.samples.len());
@@ -369,8 +374,10 @@ fn candidate_lines<'a>(
         let mut found = all
             .iter()
             .enumerate()
-            .filter(|(_, (page, line))| *page == sample.page && contains(&line.quad, sample.center))
-            .map(|(index, (_, line))| {
+            .filter(|(_, (page, _, line))| {
+                *page == sample.page && contains(&line.quad, sample.center)
+            })
+            .map(|(index, (_, _, line))| {
                 let center_x = line.quad.iter().map(|p| p.0).sum::<f64>() / 4.0;
                 let center_y = line.quad.iter().map(|p| p.1).sum::<f64>() / 4.0;
                 let dx = center_x - sample.center.0;
@@ -381,7 +388,12 @@ fn candidate_lines<'a>(
         found.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         options.push(found.into_iter().map(|(index, _)| index).collect());
     }
-    (all.into_iter().map(|(_, line)| line).collect(), options)
+    (
+        all.into_iter()
+            .map(|(_, index, line)| (index, line))
+            .collect(),
+        options,
+    )
 }
 
 /// Evaluate the reference against existing, unchanged OCR observations.
@@ -408,7 +420,8 @@ pub fn evaluate(reference: &GroundTruth, draft: &OcrDraft) -> Result<QualityRepo
     let mut kinds = BTreeMap::<String, Counters>::new();
     let mut samples = Vec::with_capacity(reference.samples.len());
     for (index, label) in reference.samples.iter().enumerate() {
-        let line = matched[index].map(|index| lines[index]);
+        let selected = matched[index].map(|index| lines[index]);
+        let line = selected.map(|(_, line)| line);
         let predicted = line.map_or("", |line| line.text.as_str());
         let sample = QualitySample {
             page: label.page,
@@ -416,6 +429,8 @@ pub fn evaluate(reference: &GroundTruth, draft: &OcrDraft) -> Result<QualityRepo
             kind: label.kind.clone(),
             reference: label.text.clone(),
             predicted: line.map(|line| line.text.clone()),
+            line_index: selected.map(|(index, _)| index),
+            line_quad: line.map(|line| line.quad),
             confidence: line.map(|line| line.confidence),
             candidate_count: options[index].len(),
             exact: line.is_some_and(|_| label.text == predicted),
@@ -439,7 +454,7 @@ pub fn evaluate(reference: &GroundTruth, draft: &OcrDraft) -> Result<QualityRepo
         metrics.normalized_character_edits
     );
     Ok(QualityReport {
-        schema_version: 2,
+        schema_version: 3,
         pdf_sha256: draft.pdf_sha256.clone(),
         reference_provenance: reference.provenance.clone(),
         draft_model: draft.model.clone(),
@@ -592,6 +607,13 @@ mod tests {
         assert_eq!(report.overall.matched, 1);
         assert_eq!(report.overall.missing, 2);
         assert_eq!(report.samples[0].predicted, None);
+        assert_eq!(report.samples[0].line_index, None);
+        assert_eq!(report.samples[0].line_quad, None);
+        assert_eq!(report.samples[1].line_index, Some(1));
+        assert_eq!(
+            report.samples[1].line_quad,
+            Some(source.pages[0].lines[1].quad)
+        );
         Ok(())
     }
 
@@ -641,6 +663,8 @@ mod tests {
         assert_eq!(report.overall.matched, 2);
         assert_eq!(report.overall.exact, 2);
         assert_eq!(report.samples[0].candidate_count, 2);
+        assert_eq!(report.samples[0].line_index, Some(1));
+        assert_eq!(report.samples[1].line_index, Some(0));
         Ok(())
     }
 
@@ -684,6 +708,8 @@ mod tests {
             kind: "technical".into(),
             reference: reference.into(),
             predicted: predicted.map(str::to_owned),
+            line_index: None,
+            line_quad: None,
             confidence,
             candidate_count: 1,
             exact: false,

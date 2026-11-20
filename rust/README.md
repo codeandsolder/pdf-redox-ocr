@@ -181,8 +181,11 @@ what share of manually anchored labels would be admitted and their empirical
 normalized-text error rate. Missing OCR observations never enter the admitted
 set; tied confidence values are always evaluated together. This reports
 actual high-confidence failures instead of treating numerical confidence as a
-calibrated probability or authorization to insert text. The version-2 quality
-report additionally contains a Unicode character-confusion histogram produced
+calibrated probability or authorization to insert text. The version-3 quality
+report retains each matched observation's original zero-based `line_index` and
+`line_quad` (null for unmatched references), so refinement and line audit can
+address the same observation without repeating spatial matching. It also contains
+a Unicode character-confusion histogram produced
 by a minimum-edit alignment of the reference and OCR strings, covering
 substitutions, insertions, and deletions. Each recurring confusion includes its
 frequency and highest line confidence, exposing high-confidence technical-glyph
