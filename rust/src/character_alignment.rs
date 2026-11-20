@@ -9,6 +9,7 @@ use crate::{
     crop_geometry::CropGeometry,
     crop_repair::BodyPrediction,
     disjoint_set::DisjointSet,
+    glyph_appearance::GlyphShape,
     glyph_confirmation::{ConfirmationDecision, ConfirmationPolicy},
     glyph_isolation::{InkGroup, isolate_ink},
     ink_polarity::{Polarity, PolarityEvidence, estimate},
@@ -121,6 +122,7 @@ pub struct CharacterLineAudit {
     pub components: Vec<PixelRegion>,
     pub runs: Vec<InkGroup>,
     pub anchors: Vec<CharacterAnchor>,
+    pub run_appearances: Vec<Option<GlyphShape>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -412,6 +414,17 @@ impl CharacterLineAudit {
             sequence_length,
             &isolation.groups,
         )?;
+        let mut run_appearances = (0..isolation.groups.len())
+            .map(|_| None)
+            .collect::<Vec<_>>();
+        for anchor in &anchors {
+            if let RunAlignment::Unique { run } = anchor.alignment {
+                let group = &isolation.groups[run];
+                if !group.touches_line_edge {
+                    run_appearances[run] = Some(GlyphShape::measure(&normalized, group.run.ink)?);
+                }
+            }
+        }
         Ok(Self {
             detection_index: 0,
             original,
@@ -425,6 +438,7 @@ impl CharacterLineAudit {
             components: isolation.components,
             runs: isolation.groups,
             anchors,
+            run_appearances,
         })
     }
 }

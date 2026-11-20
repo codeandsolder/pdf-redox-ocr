@@ -21,8 +21,10 @@ use pdf_redox_ocr::{
     pipeline::{
         PipelineObserver, PipelinePolicy, PipelineResult, PreparedOcr, RasterMode, ResidualInput,
     },
+    quality_eval::GroundTruth,
     rasterize::{DEFAULT_PAGE_MAX_SIDE, RenderPolicy},
     recognition::RecognitionCacheBudget,
+    reviewed_glyphs::ReviewedGlyphBank,
 };
 
 /// Generate SHA-bound PDF OCR geometry and optionally apply invisible semantic text.
@@ -49,6 +51,12 @@ struct Args {
     /// Include actual CTC positions and independent source ink group evidence.
     #[arg(long, requires = "report")]
     character_audit: bool,
+    /// Source-SHA-bound manual reference for labeling uniquely aligned glyphs.
+    #[arg(long, requires = "glyph_samples")]
+    glyph_reference: Option<PathBuf>,
+    /// Export reviewed glyph appearance samples without modifying OCR text.
+    #[arg(long, requires = "glyph_reference")]
+    glyph_samples: Option<PathBuf>,
     /// Explicit new directory for lossless ordinary/treated residual raster captures.
     #[arg(long)]
     capture_residual_dir: Option<PathBuf>,
@@ -316,18 +324,25 @@ impl PipelineObserver for CliObserver {
     }
 }
 
-fn run(args: &Args) -> Result<(), Box<dyn Error>> {
+fn validate_inputs(args: &Args) -> Result<Option<GroundTruth>, Box<dyn Error>> {
     if args.recognition.confirm_with == Some(args.recognition.recognizer) {
         return Err("alternative recognizer must differ from primary".into());
     }
-    if args.output.is_none() && args.output_pdf.is_none() && args.report.is_none() {
+    if args.output.is_none()
+        && args.output_pdf.is_none()
+        && args.report.is_none()
+        && args.glyph_samples.is_none()
+    {
         return Err("request at least one draft, searchable PDF or audit output".into());
     }
     if args.preparation.optimize
-        && args.output.is_some()
+        && (args.output.is_some() || args.glyph_samples.is_some())
         && args.preparation.optimized_pdf.is_none()
     {
-        return Err("retaining an optimized-input draft requires --optimized-pdf".into());
+        return Err(
+            "retaining an optimized-input draft or glyph sample bank requires --optimized-pdf"
+                .into(),
+        );
     }
     let paths = [
         args.output.as_deref(),
@@ -336,6 +351,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
         args.preparation.optimized_pdf.as_deref(),
         args.capture_residual_dir.as_deref(),
         args.preparation.output_glyph_catalog.as_deref(),
+        args.glyph_samples.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -347,6 +363,21 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
             return Err("glyph catalog aliases PDF source".into());
         }
     }
+    args.glyph_reference
+        .as_ref()
+        .map(|path| -> Result<GroundTruth, Box<dyn Error>> {
+            check_paths(path, &paths)?;
+            Ok(serde_json::from_reader(std::io::BufReader::new(
+                fs::File::open(path)?,
+            ))?)
+        })
+        .transpose()
+}
+
+fn prepare_input(
+    args: &Args,
+    reference: Option<&GroundTruth>,
+) -> Result<PreparedInput, Box<dyn Error>> {
     let mode = if args.preparation.optimize {
         PreparationMode::Processing {
             work_dir: args.preparation.work_dir.as_deref(),
@@ -364,6 +395,18 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
             evidence.report.before.input_bytes, evidence.report.after_bytes
         );
     }
+    if reference
+        .as_ref()
+        .is_some_and(|r| r.source_pdf_sha256 != input.audit().ocr_input_sha256)
+    {
+        return Err("glyph reference does not describe the actual OCR input PDF".into());
+    }
+    Ok(input)
+}
+
+fn run(args: &Args) -> Result<(), Box<dyn Error>> {
+    let reference = validate_inputs(args)?;
+    let input = prepare_input(args, reference.as_ref())?;
     let job = PreparedOcr::open(input.path(), args.pages.as_deref(), configured_policy(args))?;
     if let Some(directory) = &args.capture_residual_dir {
         fs::create_dir(directory)?;
@@ -375,7 +418,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
             boundaries: args.recognition.boundary_repair,
             minimum_confidence: args.confidence.max(0.97),
         },
-        args.character_audit || input.catalog().is_some(),
+        args.character_audit || input.catalog().is_some() || reference.is_some(),
         args.recognition.recognizer,
         args.recognition.confirm_with.map(|model| {
             pdf_redox_ocr::inference::AlternativeRecognizer {
@@ -403,7 +446,28 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
             );
         }
     }
-    write_outputs(args, &input, job.original_bytes(), &result)
+    let reviewed = reference
+        .as_ref()
+        .map(|reference| {
+            ReviewedGlyphBank::from_audits(
+                reference,
+                &result.draft,
+                &result.character_audits,
+                &result.page_character_mappings,
+                &result.residual_pages,
+            )
+        })
+        .transpose()?;
+    write_outputs(args, &input, job.original_bytes(), &result)?;
+    if let (Some(path), Some(bank)) = (&args.glyph_samples, reviewed) {
+        input.verify_recognized(&result.draft)?;
+        eprintln!(
+            "reviewed glyphs: {} from {} matched source lines",
+            bank.stats.labeled_glyphs, bank.stats.matched_lines
+        );
+        write_atomic(path, &json_bytes(&bank)?)?;
+    }
+    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {

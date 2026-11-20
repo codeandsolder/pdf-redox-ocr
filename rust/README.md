@@ -139,7 +139,7 @@ raster dimensions. The default LRU budget retains at most 256 entries and
 inferences are never cached. `--no-recognition-cache` disables lookup and
 retention for diagnostic comparison, and `PipelineResult.recognition`
 reports full-raster calls, cache hits, evictions, retained payload and additional crop batches, with separate leader and boundary candidate outcomes.
-The optional `--report audit.json` writes a separate schema-9 diagnostic
+The optional `--report audit.json` writes a separate schema-10 diagnostic
 report bound to the original PDF digest and model provenance. It includes
 the validated policy, raw native-image observations in source-pixel
 coordinates, original paint paths and native-only blockers, the per-page
@@ -401,7 +401,7 @@ At least one draft, searchable PDF or audit must be requested.
 Retaining a draft with processing requires `--optimized-pdf`, because
 its SHA and user-space geometry bind to the exact prepared PDF, not the
 original source. The optimizer report and actual configuration are recorded
-under `preparation` in schema-9 CLI audits, alongside both input hashes;
+under `preparation` in schema-10 CLI audits, alongside both input hashes;
 the existing `pdf_sha256` refers to the OCR input. Reverify the original
 and prepared source hashes before applying or publishing results.
 Processing is intentionally not lossless in every case (microstroke
@@ -489,7 +489,7 @@ retained, not invented. Failed or conflicting crops leave original
 observations unchanged. Failed repair attempts prevent caching the incomplete
 raster result; successful exact RGB reuse includes the confirmed repairs.
 
-Pipeline audit schema 9 records original pixel-space observations, sample
+Pipeline audit schema 10 records original pixel-space observations, sample
 frame, component bounds, typed crop reason, proposed quad and each actual
 prediction/decision by exact RGB SHA-256 and dimensions. Full-raster inference
 calls remain separate from recognition-only batch counters. Disable the stage
@@ -519,7 +519,7 @@ substitutions are encoded. Accepted crop geometry and model confidence
 replace the original; failures prevent exact-RGB result caching. The
 experimental flag is off by default until broader representative validation.
 All repair kinds share a 2M-pixel per-window and 16M-pixel per-raster sampling
-budget, prioritizing terminal-leader candidates, and schema-9 `crop_repairs` records the original prediction,
+budget, prioritizing terminal-leader candidates, and schema-10 `crop_repairs` records the original prediction,
 actual geometry, type-specific evidence and independent prediction/outcome.
 `recognition.crop_batches` counts actual recognition-only batches (leader and boundary batches are separate to preserve existing leader inference ordering);
 leader/boundary candidate/accepted counters are independent.
@@ -559,13 +559,13 @@ or impossible assignments when glyphs are joined. One unsolvable cluster
 does not discard independent matches elsewhere on the line. Unmatched,
 whitespace and padding emissions have explicit statuses.
 
-Schema-9 `character_audits` groups data by exact parent RGB SHA-256 and
+Schema-10 `character_audits` groups data by exact parent RGB SHA-256 and
 dimensions. Each primary detector entry includes the original line/quad,
 sorted detector index (not final draft index), exact rectified RGB crop
 hash/dimensions, padding geometry, raw CTC column indices, projected ink
 and alignment candidates. Component indices address the entry's component
 array. Positions and ink bounds are in the **rectified recognition-crop
-frame**. Schema 9 additionally records a reconstructible projective crop
+frame**. schema 10 additionally records a reconstructible projective crop
 mapping for actual detector quadrilaterals, verified against returned crop
 dimensions and the OAR rotation contract. Full-page raster occurrences have
 explicit SHA-bound page transforms. This permits vector association without
@@ -646,9 +646,52 @@ rejected even if aggregate cluster coverage agrees. No dictionary correction,
 fabricated score or geometry change is used. The second classifier remains
 fallible: matching ink support is not a proof of a character's identity.
 
-Schema-9 character audits retain candidate originals, actual second-model
+Schema-10 character audits retain candidate originals, actual second-model
 text/score/CTC anchors and typed decisions, including failures.
 `confirmation_attempts`, `confirmation_accepted`, `confirmation_batches` and
 `confirmation_failures` distinguish this stage from crop repair and full-raster
 inference. Incomplete attempts prevent exact-RGB result caching.
 The mode remains opt-in; native-only pages load neither recognizer.
+
+### Independently reviewed glyph appearance
+
+Export actual primary recognition ink shapes using a source-bound manual
+reference file:
+
+```sh
+pdf-redox-ocr --pdf prepared.pdf --pages 28 \
+  --glyph-reference tests/fixtures/quality/defond-manual-groundtruth.json \
+  --glyph-samples reviewed28.json --output draft.json
+```
+
+The reference must describe the exact recognition PDF. If processing is
+enabled, the prepared PDF must be retained. Unique raw detector lines
+are located by the reviewed source-space anchor; ambiguous occurrences
+are excluded. All minimum edit-distance alignments must agree on the
+reviewed label of an emitted scalar, and the original CTC/ink mapping
+must independently identify a unique unclipped ink group. Whitespace is
+excluded from scalar alignment without case folding. Each exported
+sample retains its source PDF and crop identity, actual prediction,
+line score, page, ink geometry and 24x24 grayscale ink coverage together
+with the original dimensions. No reference text is applied to the draft.
+
+Compare held-out pages using the model-free matcher:
+
+```sh
+pdf-redox-ocr-glyph-match --query reviewed28.json \
+  --training reviewed29.json --page 28 --report match.json \
+  --max-distance 0.16 --min-margin 0.025 --min-independent-crops 2
+```
+
+The matcher excludes the entire queried PDF page and identical crop
+hashes across every donor bank, compares distinct labels and preserves
+the nearest and competing occurrences. Its distances are not OCR
+probabilities. The thresholds above describe an exploratory evaluation,
+not a production policy. The manually reviewed page-29 donor fixture is
+independent from the page-28 evaluation. On 299 held-out DEFOND page-28
+glyphs, cross-font matching admitted 116 candidates (106 correct, ten
+wrong substitutions, no corrected primary errors). Page-29-only donors
+admitted nine candidates (three correct, six wrong substitutions); both
+diameter queries ranked the reviewed label first but failed the distance
+limit. Raw shape matching is diagnostic only; its evidence does not
+authorize Unicode substitution or overlay admission.

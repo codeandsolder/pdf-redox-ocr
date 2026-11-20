@@ -226,72 +226,58 @@ mod tests {
     fn actual_score_and_ink_identity_gate_local_substitution() {
         let primary = [token('A', 0), token('0', 1), token('1', 2)];
         let corrected = [token('A', 0), token('Ø', 1), token('1', 2)];
-        assert_eq!(
-            decide(
+        let deleted = [token('A', 0), token('1', 2)];
+        let unrelated = [token('B', 0), token('C', 1), token('D', 2)];
+        for (score, alternative_score, candidate, expected) in [
+            (
                 0.93,
                 0.98,
-                ConfirmationPolicy::for_overlay(0.97),
-                &primary,
-                &corrected,
-                3
+                corrected.as_slice(),
+                ConfirmationDecision::InkSupportedSubstitution,
             ),
-            ConfirmationDecision::InkSupportedSubstitution
-        );
-        assert_eq!(
-            decide(
+            (
                 0.98,
                 0.99,
-                ConfirmationPolicy::for_overlay(0.97),
-                &primary,
-                &corrected,
-                3
+                corrected.as_slice(),
+                ConfirmationDecision::AlreadyEligible,
             ),
-            ConfirmationDecision::AlreadyEligible
-        );
-        assert_eq!(
-            decide(
+            (
                 0.93,
                 0.96,
-                ConfirmationPolicy::for_overlay(0.97),
-                &primary,
-                &corrected,
-                3
+                corrected.as_slice(),
+                ConfirmationDecision::ScoreTooLow,
             ),
-            ConfirmationDecision::ScoreTooLow
-        );
-        assert_eq!(
-            decide(
+            (
                 0.93,
                 0.98,
-                ConfirmationPolicy::for_overlay(0.97),
-                &primary,
-                &primary,
-                3
+                primary.as_slice(),
+                ConfirmationDecision::Agreement,
             ),
-            ConfirmationDecision::Agreement
-        );
-        assert_eq!(
-            decide(
+            (
                 0.93,
                 0.98,
-                ConfirmationPolicy::for_overlay(0.97),
-                &primary,
-                &[token('A', 0), token('1', 2)],
-                3
+                deleted.as_slice(),
+                ConfirmationDecision::ChangedSegmentation,
             ),
-            ConfirmationDecision::ChangedSegmentation
-        );
-        assert_eq!(
-            decide(
+            (
                 0.93,
                 0.98,
-                ConfirmationPolicy::for_overlay(0.97),
-                &primary,
-                &[token('B', 0), token('C', 1), token('D', 2)],
-                3
+                unrelated.as_slice(),
+                ConfirmationDecision::NoSharedText,
             ),
-            ConfirmationDecision::NoSharedText
-        );
+        ] {
+            assert_eq!(
+                decide(
+                    score,
+                    alternative_score,
+                    ConfirmationPolicy::for_overlay(0.97),
+                    &primary,
+                    candidate,
+                    3
+                ),
+                expected
+            );
+        }
     }
     #[test]
     fn substitution_cannot_expand_individual_ink_support() {

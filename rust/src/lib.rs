@@ -14,8 +14,10 @@ mod disjoint_set;
 pub mod draft;
 pub mod draft_compare;
 pub mod geometry;
+pub mod glyph_appearance;
 pub mod glyph_confirmation;
 pub mod glyph_isolation;
+pub mod glyph_matching;
 pub mod glyph_topology;
 pub mod hybrid;
 #[cfg(feature = "native-inference")]
@@ -53,6 +55,7 @@ pub mod rasterize;
 pub mod recognition;
 #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
 pub mod refinement;
+pub mod reviewed_glyphs;
 #[cfg(feature = "pdf-integration")]
 pub mod source_mask;
 #[cfg(feature = "pdf-integration")]

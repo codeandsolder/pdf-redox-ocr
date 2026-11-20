@@ -131,24 +131,6 @@ impl<'a> CatalogIndex<'a> {
     }
 }
 
-/// Affine page mapper derived from the actual raster occurrence, independent
-/// of the reusable recognition crop. Handles all quarter-turns and origins.
-fn page_quad(mapping: &PageCharacterMapping, quad: Quad) -> Quad {
-    let [top_left, top_right, _, bottom_left] = mapping.page_corners;
-    quad.map(|Point(x, y)| {
-        let (u, v) = (
-            x / f64::from(mapping.dimensions.0),
-            y / f64::from(mapping.dimensions.1),
-        );
-        Point(
-            (top_right.0 - top_left.0)
-                .mul_add(u, (bottom_left.0 - top_left.0).mul_add(v, top_left.0)),
-            (top_right.1 - top_left.1)
-                .mul_add(u, (bottom_left.1 - top_left.1).mul_add(v, top_left.1)),
-        )
-    })
-}
-
 struct Match<'a> {
     placement: &'a Placement<'a>,
     ink_coverage: f64,
@@ -218,7 +200,7 @@ fn collect_votes(
                 stats.unmappable += 1;
                 continue;
             };
-            let ink = page_quad(mapping, ink);
+            let ink = mapping.to_pdf(ink);
             let matched = match associate(&ink, placements) {
                 Association::None => {
                     stats.no_component += 1;

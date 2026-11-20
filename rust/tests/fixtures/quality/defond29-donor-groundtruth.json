@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "source_pdf_sha256": "1fce7d48e7fe2347759998c27d7bb7bde711ea5620e8219715e4ead54ac71ba1",
+  "coordinate_system": "PDF user space",
+  "provenance": "Manual visual transcription of DEFOND p29 mechanical dimension drawing viewed from 300-DPI source crop on 2026-11-20; source glyphs transcribed before running OCR. Anchors derived from manually observed source-crop pixels. Independent donor page, p28 held out.",
+  "samples": [
+    {
+      "page": 29,
+      "center": [
+        312.368,
+        669.709
+      ],
+      "text": "28.0",
+      "kind": "technical"
+    },
+    {
+      "page": 29,
+      "center": [
+        499.616,
+        651.661
+      ],
+      "text": "9.0",
+      "kind": "technical"
+    },
+    {
+      "page": 29,
+      "center": [
+        426.296,
+        592.629
+      ],
+      "text": "24.8",
+      "kind": "technical"
+    },
+    {
+      "page": 29,
+      "center": [
+        406.744,
+        583.229
+      ],
+      "text": "15.0",
+      "kind": "technical"
+    },
+    {
+      "page": 29,
+      "center": [
+        387.192,
+        576.085
+      ],
+      "text": "12.5",
+      "kind": "technical"
+    },
+    {
+      "page": 29,
+      "center": [
+        368.392,
+        568.941
+      ],
+      "text": "8.5",
+      "kind": "technical"
+    },
+    {
+      "page": 29,
+      "center": [
+        339.816,
+        571.573
+      ],
+      "text": "1.0",
+      "kind": "technical"
+    },
+    {
+      "page": 29,
+      "center": [
+        368.768,
+        548.261
+      ],
+      "text": "5.0",
+      "kind": "technical"
+    },
+    {
+      "page": 29,
+      "center": [
+        311.616,
+        519.685
+      ],
+      "text": "26.0",
+      "kind": "technical"
+    },
+    {
+      "page": 29,
+      "center": [
+        463.52,
+        527.581
+      ],
+      "text": "Ø3.0",
+      "kind": "technical"
+    },
+    {
+      "page": 29,
+      "center": [
+        445.472,
+        453.133
+      ],
+      "text": "Ø2.4",
+      "kind": "technical"
+    },
+    {
+      "page": 29,
+      "center": [
+        498.488,
+        507.653
+      ],
+      "text": "12.6",
+      "kind": "technical"
+    },
+    {
+      "page": 29,
+      "center": [
+        498.864,
+        492.237
+      ],
+      "text": "15.6",
+      "kind": "technical"
+    }
+  ]
+}

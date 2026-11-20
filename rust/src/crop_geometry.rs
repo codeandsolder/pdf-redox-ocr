@@ -151,26 +151,22 @@ mod tests {
     use super::*;
     #[test]
     fn integer_and_rotated_crop_associations() -> Result<(), crate::Error> {
-        let q = [
-            Point(10., 20.),
-            Point(50., 20.),
-            Point(50., 30.),
-            Point(10., 30.),
-        ];
-        let g = CropGeometry::from_quad(q, (100, 100), (40, 10))
-            .ok_or_else(|| crate::Error::Invalid("fixture crop".into()))?;
-        assert!(g.integer_crop);
-        assert_eq!(g.map(Point(3., 4.)), Some(Point(13., 24.)));
-        let q = [
-            Point(10., 20.),
-            Point(20., 20.),
-            Point(20., 60.),
-            Point(10., 60.),
-        ];
-        let g = CropGeometry::from_quad(q, (100, 100), (40, 10))
-            .ok_or_else(|| crate::Error::Invalid("fixture rotation".into()))?;
-        assert!(g.rotate270);
-        assert_eq!(g.map(Point(3., 4.)), Some(Point(16., 23.)));
+        for (right, bottom, rotation, mapped) in [
+            (50., 30., false, Point(13., 24.)),
+            (20., 60., true, Point(16., 23.)),
+        ] {
+            let quad = [
+                Point(10., 20.),
+                Point(right, 20.),
+                Point(right, bottom),
+                Point(10., bottom),
+            ];
+            let geometry = CropGeometry::from_quad(quad, (100, 100), (40, 10))
+                .ok_or_else(|| crate::Error::Invalid("fixture crop".into()))?;
+            assert!(geometry.integer_crop);
+            assert_eq!(geometry.rotate270, rotation);
+            assert_eq!(geometry.map(Point(3., 4.)), Some(mapped));
+        }
         Ok(())
     }
     #[test]

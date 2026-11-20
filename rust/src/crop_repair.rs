@@ -573,22 +573,20 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn outside_mark_repair_preserves_body_and_respects_detector_ownership() {
-        let mut image = RgbImage::from_pixel(150, 100, Rgb([255; 3]));
+    fn draw_boundary_fixture(image: &mut RgbImage, y_offset: u32) -> PixelLine {
         for (x, y, w, h) in [
             (20, 43, 8, 8),
             (40, 42, 14, 24),
             (60, 42, 14, 24),
             (80, 42, 14, 24),
         ] {
-            for dy in y..y + h {
+            for dy in y + y_offset..y + y_offset + h {
                 for dx in x..x + w {
                     image.put_pixel(dx, dy, Rgb([0; 3]));
                 }
             }
         }
-        let original = PixelLine {
+        PixelLine {
             text: "ABC".into(),
             confidence: 0.99,
             quad: [
@@ -596,8 +594,15 @@ mod tests {
                 Point(100., 70.),
                 Point(100., 35.),
                 Point(30., 35.),
-            ],
-        };
+            ]
+            .map(|Point(x, y)| Point(x, y + f64::from(y_offset))),
+        }
+    }
+
+    #[test]
+    fn outside_mark_repair_preserves_body_and_respects_detector_ownership() {
+        let mut image = RgbImage::from_pixel(150, 100, Rgb([255; 3]));
+        let original = draw_boundary_fixture(&mut image, 0);
         let policy = RepairPolicy {
             leaders: false,
             boundaries: true,
@@ -648,28 +653,7 @@ mod tests {
         for (x, y, pixel) in leader_image.enumerate_pixels() {
             image.put_pixel(x, y, *pixel);
         }
-        for (x, y, w, h) in [
-            (20, 193, 8, 8),
-            (40, 192, 14, 24),
-            (60, 192, 14, 24),
-            (80, 192, 14, 24),
-        ] {
-            for dy in y..y + h {
-                for dx in x..x + w {
-                    image.put_pixel(dx, dy, Rgb([0; 3]));
-                }
-            }
-        }
-        let boundary = PixelLine {
-            text: "ABC".into(),
-            confidence: 0.99,
-            quad: [
-                Point(30., 220.),
-                Point(100., 220.),
-                Point(100., 185.),
-                Point(30., 185.),
-            ],
-        };
+        let boundary = draw_boundary_fixture(&mut image, 150);
         let mut lines = vec![boundary, leader];
         let policy = RepairPolicy {
             boundaries: true,

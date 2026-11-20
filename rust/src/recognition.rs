@@ -85,6 +85,26 @@ pub struct PageCharacterMapping {
     pub page_corners: Quad,
 }
 
+impl PageCharacterMapping {
+    /// Map actual raster pixel corners to PDF space with the occurrence affine transform.
+    #[must_use]
+    pub fn to_pdf(&self, quad: Quad) -> Quad {
+        let [top_left, top_right, _, bottom_left] = self.page_corners;
+        quad.map(|Point(x, y)| {
+            let (u, v) = (
+                x / f64::from(self.dimensions.0),
+                y / f64::from(self.dimensions.1),
+            );
+            Point(
+                (top_right.0 - top_left.0)
+                    .mul_add(u, (bottom_left.0 - top_left.0).mul_add(v, top_left.0)),
+                (top_right.1 - top_left.1)
+                    .mul_add(u, (bottom_left.1 - top_left.1).mul_add(v, top_left.1)),
+            )
+        })
+    }
+}
+
 /// A reusable recognizer whose result depends only on the input RGB raster.
 ///
 /// A backend must use the same inference policy throughout a recognition

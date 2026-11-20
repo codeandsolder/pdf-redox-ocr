@@ -986,7 +986,7 @@ source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56
 [[package]]
 name = "hayro-syntax"
 version = "0.9.0"
-source = "git+https://github.com/codeandsolder/pdf-redox?rev=eef5e69ddd3c7e352bb73e097872284189c05944#eef5e69ddd3c7e352bb73e097872284189c05944"
+source = "git+https://github.com/codeandsolder/pdf-redox?rev=61457e4408aa8321954a5376d865e18df4b7c6a1#61457e4408aa8321954a5376d865e18df4b7c6a1"
 dependencies = [
  "hayro-ccitt",
  "hayro-jbig2",
@@ -1846,7 +1846,7 @@ checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 [[package]]
 name = "pdf-redox"
 version = "0.1.0"
-source = "git+https://github.com/codeandsolder/pdf-redox?rev=eef5e69ddd3c7e352bb73e097872284189c05944#eef5e69ddd3c7e352bb73e097872284189c05944"
+source = "git+https://github.com/codeandsolder/pdf-redox?rev=61457e4408aa8321954a5376d865e18df4b7c6a1#61457e4408aa8321954a5376d865e18df4b7c6a1"
 dependencies = [
  "color_quant 2.0.0",
  "fast_image_resize",

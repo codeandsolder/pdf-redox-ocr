@@ -262,7 +262,7 @@ pub fn character_edits(reference: &str, prediction: &str) -> usize {
 }
 
 /// Half-plane membership for an arbitrary convex OCR quadrilateral.
-fn contains(quad: &Quad, point: Point) -> bool {
+pub(crate) fn contains(quad: &Quad, point: Point) -> bool {
     if !point.0.is_finite()
         || !point.1.is_finite()
         || quad.iter().any(|p| !p.0.is_finite() || !p.1.is_finite())
@@ -285,7 +285,7 @@ fn contains(quad: &Quad, point: Point) -> bool {
     !(positive && negative) && signed_area.is_finite() && signed_area.abs() > 1e-10
 }
 
-fn validate(reference: &GroundTruth, draft: &OcrDraft) -> Result<(), Error> {
+pub(crate) fn validate(reference: &GroundTruth, draft: &OcrDraft) -> Result<(), Error> {
     if reference.schema_version != 1
         || reference.coordinate_system != "PDF user space"
         || reference.source_pdf_sha256 != draft.pdf_sha256
