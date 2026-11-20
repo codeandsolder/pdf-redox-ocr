@@ -105,6 +105,28 @@ struct NativePreparation {
 
 type FragmentPlans = (BTreeSet<PageNumber>, BTreeMap<PageNumber, MosaicPlan>);
 
+/// Extract only from pages known to paint a wanted source. Keep all such
+/// occurrences in document order: a later repetition can still decode when
+/// an earlier page exceeds the extraction budget or has an unsupported codec.
+struct NativeSourcePlan {
+    ids: BTreeSet<String>,
+    pages: Vec<PageNumber>,
+}
+
+impl NativeSourcePlan {
+    fn from_paints(ids: BTreeSet<String>, scanned: &PaintReport) -> Result<Self, Error> {
+        let pages = scanned
+            .placements
+            .iter()
+            .filter(|paint| ids.contains(&paint.source_id))
+            .map(|paint| PageNumber::new(paint.page))
+            .collect::<Result<BTreeSet<_>, _>>()?
+            .into_iter()
+            .collect();
+        Ok(Self { ids, pages })
+    }
+}
+
 fn model_provenance(profile: &str, stage: &str, render: RenderPolicy) -> String {
     format!(
         "{profile} {stage} page-raster-max-side={} page-raster-dpi={}",
@@ -278,12 +300,12 @@ impl PreparedOcr {
         Ok((fragmented, plans))
     }
 
-    fn native_source_ids(
+    fn plan_native_sources(
         &self,
         scanned: &PaintReport,
         fragmented: &BTreeSet<PageNumber>,
         progress: &mut dyn FnMut(String),
-    ) -> Result<BTreeSet<String>, Error> {
+    ) -> Result<NativeSourcePlan, Error> {
         let doc = &self.doc;
         let source_budget = self.policy.source_budget;
         let render = self.policy.render;
@@ -330,19 +352,25 @@ impl PreparedOcr {
             .map(|paint| paint.source_id.as_str())
             .collect::<BTreeSet<_>>();
         source_ids.retain(|id| eligible_elsewhere.contains(id.as_str()));
-        Ok(source_ids)
+        let plan = NativeSourcePlan::from_paints(source_ids, scanned)?;
+        progress(format!(
+            "native source extraction planned: {} sources across {} candidate pages",
+            plan.ids.len(),
+            plan.pages.len()
+        ));
+        Ok(plan)
     }
 
     fn recognize_native_sources(
         &self,
         engine: &impl RecognitionBackend,
-        source_ids: &BTreeSet<String>,
+        plan: &NativeSourcePlan,
         progress: &mut dyn FnMut(String),
     ) -> Result<BTreeMap<String, SourceObservation>, Error> {
         let decoded = match native_source_images(
             &self.pdf,
-            &self.selected,
-            source_ids,
+            &plan.pages,
+            &plan.ids,
             self.policy.source_budget,
         ) {
             Ok(images) => images,
@@ -435,8 +463,8 @@ impl PreparedOcr {
     ) -> Result<NativePreparation, Error> {
         let scanned = enumerate_image_paints(&self.doc, &self.selected)?;
         let (fragmented, plans) = self.plan_native_fragment_pages(&scanned)?;
-        let source_ids = self.native_source_ids(&scanned, &fragmented, progress)?;
-        let recognized = self.recognize_native_sources(engine, &source_ids, progress)?;
+        let source_plan = self.plan_native_sources(&scanned, &fragmented, progress)?;
+        let recognized = self.recognize_native_sources(engine, &source_plan, progress)?;
         let mut source_only = source_only_pages(&scanned, &recognized)?;
         for &page in &fragmented {
             source_only.approved_pages.remove(&page);
@@ -547,5 +575,34 @@ impl PreparedOcr {
                 Ok(file)
             })
             .transpose()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NativeSourcePlan;
+    use crate::{PageNumber, paint_scan::enumerate_image_paints, pdf_metadata::PdfMetadata};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn source_plan_retains_all_requested_repetitions_without_unrelated_pages()
+    -> Result<(), crate::Error> {
+        let doc = PdfMetadata::from_bytes(
+            include_bytes!("../tests/fixtures/repeated-image-six-pages.pdf").to_vec(),
+        )?;
+        let selected = [6, 3, 1]
+            .map(PageNumber::new)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        let scan = enumerate_image_paints(&doc, &selected)?;
+        let plan = NativeSourcePlan::from_paints(BTreeSet::from(["9:0".into()]), &scan)?;
+        assert_eq!(
+            plan.pages.iter().map(|p| p.get()).collect::<Vec<_>>(),
+            [1, 3, 6]
+        );
+        assert_eq!(plan.ids, BTreeSet::from(["9:0".to_owned()]));
+        let empty = NativeSourcePlan::from_paints(BTreeSet::new(), &scan)?;
+        assert_eq!(empty.pages, [] as [PageNumber; 0]);
+        Ok(())
     }
 }

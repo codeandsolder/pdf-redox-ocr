@@ -384,12 +384,13 @@ pub fn merge_ocr(
         proposals.extend(page_proposals);
         merged_pages.push(output_page);
     }
+    let model = if stats.native_only_pages == selected.len() {
+        "PDF native-searchable paint proof: no OCR required".into()
+    } else {
+        format!("{}; fallback {}", raster.model, baseline.model)
+    };
     Ok((
-        OcrDraft::new(
-            raster.pdf_sha256.clone(),
-            format!("{}; fallback {}", raster.model, baseline.model),
-            merged_pages,
-        ),
+        OcrDraft::new(raster.pdf_sha256.clone(), model, merged_pages),
         stats,
         proposals,
     ))
@@ -541,6 +542,10 @@ mod tests {
         let (draft, stats, _) = merge_ocr(input)?;
         assert_eq!(draft.pages[0].native_text_regions, words);
         assert_eq!(stats.native_only_pages, 1);
+        assert_eq!(
+            draft.model,
+            "PDF native-searchable paint proof: no OCR required"
+        );
         assert_eq!(stats.image_source_only_pages, 0);
         assert_eq!(stats.page_fallback_pages, 0);
         assert!(

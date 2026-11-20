@@ -211,7 +211,13 @@ fn all_three_routes_preserve_selected_order_and_native_words()
         },
     )?;
     let model = Recognizer::default();
-    let result = doc.recognize(&model, |_| {})?;
+    let mut progress = Vec::new();
+    let result = doc.recognize(&model, |message| progress.push(message))?;
+    assert!(
+        progress.iter().any(|message| message
+            == "native source extraction planned: 1 sources across 1 candidate pages"),
+        "{progress:#?}"
+    );
     assert_eq!(result.stats.native_only_pages, 4, "{:?}", result.routes);
     assert_eq!(result.stats.image_source_only_pages, 1);
     assert_eq!(result.stats.page_fallback_pages, 10);
@@ -271,6 +277,10 @@ fn native_only_selection_and_keep_native_text_control_recognition()
     let result = doc.recognize(&recognizer, |_| {})?;
     assert_eq!(recognizer.0.borrow().len(), 0);
     assert_eq!(result.stats.native_only_pages, 4);
+    assert_eq!(
+        result.draft.model,
+        "PDF native-searchable paint proof: no OCR required"
+    );
     let forced = PreparedOcr::open(
         &path,
         Some("1-3,13"),
@@ -321,6 +331,10 @@ fn native_cli_needs_no_model_cache_or_onnx_session() -> Result<(), Box<dyn std::
         [1, 2, 3, 13]
     );
     assert!(draft.pages.iter().all(|p| p.lines.is_empty()));
+    assert_eq!(
+        draft.model,
+        "PDF native-searchable paint proof: no OCR required"
+    );
     draft.verify_pdf(&pdf)?;
     assert_eq!(fs::read(cache)?, b"a file is not a model-cache directory");
     Ok(())

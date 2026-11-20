@@ -134,7 +134,10 @@ pattern color spaces, unsupported paint, clipping, extended graphics state,
 annotations and malformed content scopes cannot obtain native-only closure.
 Pages with visible native shows but no extracted native words also fall back.
 The native model loads lazily, so no ONNX session or model download is
-needed for a document consisting entirely of native-only pages. The
+needed for a document consisting entirely of native-only pages; the draft
+explicitly declares that OCR was unnecessary. Source extraction queries only
+pages known to paint selected image objects, retaining repeated appearances
+for a later decode if an earlier occurrence exceeds its resource budget. The
 `--keep-native-text` diagnostic disables native-only bypass.
 
 The returned `PipelineResult` includes the v3 importer draft, merge statistics,
