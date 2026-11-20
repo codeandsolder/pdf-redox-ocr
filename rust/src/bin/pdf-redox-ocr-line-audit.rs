@@ -6,9 +6,27 @@ use clap::Parser;
 use pdf_redox_ocr::{
     artifacts::{check_output_paths, write_atomic},
     draft::OcrDraft,
+    ink_polarity::Polarity,
     line_audit::{LineAuditPolicy, audit_lines},
     page_selection::parse_exact_lines,
 };
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum ForegroundMode {
+    Auto,
+    Dark,
+    Light,
+}
+
+impl From<ForegroundMode> for Polarity {
+    fn from(value: ForegroundMode) -> Self {
+        match value {
+            ForegroundMode::Auto => Self::Auto,
+            ForegroundMode::Dark => Self::Dark,
+            ForegroundMode::Light => Self::Light,
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "pdf-redox-ocr-line-audit", version)]
@@ -28,7 +46,13 @@ struct Args {
     /// Maximum source or oriented crop size, in pixels, per line.
     #[arg(long, default_value_t = 2_000_000)]
     max_pixels: u64,
-    /// Foreground luminance cutoff for column segmentation.
+    /// Foreground polarity; auto uses measured perimeter luminance classes.
+    #[arg(long, value_enum, default_value = "auto")]
+    polarity: ForegroundMode,
+    /// Extra source pixels around the observation, clipped to page bounds.
+    #[arg(long, default_value_t = 0)]
+    padding_pixels: u32,
+    /// Contrast-normalized foreground cutoff for column segmentation.
     #[arg(long, default_value_t = 192)]
     segmentation_threshold: u8,
     /// Topology luminance cutoffs; repeatable.
@@ -48,6 +72,8 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
         dpi: args.dpi,
         max_pixels: args.max_pixels,
         segmentation_threshold: args.segmentation_threshold,
+        polarity: args.polarity.into(),
+        padding_pixels: args.padding_pixels,
         ..LineAuditPolicy::default()
     };
     if !args.threshold.is_empty() {

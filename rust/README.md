@@ -235,10 +235,27 @@ pdf-redox-ocr-line-audit --pdf source.pdf --primary-ocr draft.json \
 The command checks the original PDF digest, renders only the specified line's
 bounding region (600 DPI by default), and rectifies its ordered quadrilateral
 into an oriented grayscale raster. An elongated vertical observation uses
-the longer axis; this does not determine reading direction. It divides the
-raster at blank columns at the selected segmentation threshold (default
-192); touching ink remains joined, while detached marks sharing columns
-remain together. Each group reports its half-open ink/crop pixel bounds,
+the longer axis; this does not determine reading direction. The original
+observation's luminance histogram is partitioned using Otsu's method. The
+background class is estimated from unique perimeter pixels (overall class
+occupancy breaks ties). The measured background is mapped to white after
+orienting the foreground, while the physical luminance endpoint anchors
+black. This preserves the original gray levels on white backgrounds rather
+than widening antialiased strokes by stretching the foreground median. The report retains both class medians, counts and
+perimeter support; uniform observations produce no ink. Explicit
+`--polarity dark` and `--polarity light` override the automatic orientation.
+The raster is divided at blank columns in normalized contrast at the
+selected segmentation threshold (default 192); touching ink remains joined,
+while detached marks sharing columns remain together.
+
+Optional `--padding-pixels N` (default 0) expands the sampled source region
+on each side within the actual page, retaining the original rectification
+scale. Padding is not painted synthetically and does not affect polarity
+estimation. Version-2 reports identify the original observation rectangle
+inside the padded sampling rectangle, both quads, and per-group foreground
+pixel counts inside and outside the original observation, plus original
+boundary contact. Padding can also introduce unrelated neighboring ink:
+even padded-only groups are retained as evidence, not inferred characters. Each group reports its half-open ink/crop pixel bounds,
 original PDF-space quadrilaterals, line-edge contact at the segmentation
 threshold, and topology at the selected cutoffs (64/128/192/224 by default).
 Topology at a higher threshold can include additional ink at the crop edge.

@@ -11,6 +11,7 @@ pub mod glyph_topology;
 pub mod hybrid;
 #[cfg(feature = "native-inference")]
 pub mod inference;
+pub mod ink_polarity;
 #[cfg(feature = "pdf-integration")]
 pub mod line_audit;
 #[cfg(feature = "pdf-integration")]

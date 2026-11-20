@@ -5,32 +5,29 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    path::Path,
 };
 
 use pdf_redox_ocr::{
     PageNumber,
     draft::{DraftPage, OcrDraft, OcrLine, sha256_file},
-    geometry::Point,
+    geometry::{Point, Quad},
     line_audit::{LineAuditPolicy, audit_lines},
 };
 
-#[test]
-fn source_ink_topology_and_pdf_mapping_survive_all_page_rotations()
--> Result<(), Box<dyn std::error::Error>> {
-    let directory = tempfile::tempdir()?;
-    let pdf = directory.path().join("source.pdf");
-    fs::write(&pdf, include_bytes!("fixtures/line-audit-rotations.pdf"))?;
-    let quad = [
-        Point(50.0, 65.0),
-        Point(125.0, 65.0),
-        Point(125.0, 91.0),
-        Point(50.0, 91.0),
-    ];
+type Targets = BTreeMap<PageNumber, BTreeSet<usize>>;
+
+fn fixture_draft(
+    pdf: &Path,
+    quad: Quad,
+    text: &str,
+) -> Result<(OcrDraft, Targets), Box<dyn std::error::Error>> {
+    fs::write(pdf, include_bytes!("fixtures/line-audit-rotations.pdf"))?;
     let pages = (1..=4)
         .map(|page| DraftPage {
             page,
             lines: vec![OcrLine {
-                text: "08i".into(),
+                text: text.into(),
                 confidence: 0.999,
                 quad,
                 reviewed: false,
@@ -38,10 +35,25 @@ fn source_ink_topology_and_pdf_mapping_survive_all_page_rotations()
             native_text_regions: vec![],
         })
         .collect();
-    let mut draft = OcrDraft::new(sha256_file(&pdf)?, "synthetic vector ink".into(), pages);
+    let draft = OcrDraft::new(sha256_file(pdf)?, "synthetic vector ink".into(), pages);
     let targets = (1..=4)
         .map(|number| Ok((PageNumber::new(number)?, BTreeSet::from([0]))))
-        .collect::<Result<BTreeMap<_, _>, pdf_redox_ocr::Error>>()?;
+        .collect::<Result<Targets, pdf_redox_ocr::Error>>()?;
+    Ok((draft, targets))
+}
+
+#[test]
+fn source_ink_topology_and_pdf_mapping_survive_all_page_rotations()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let pdf = directory.path().join("source.pdf");
+    let quad = [
+        Point(50.0, 65.0),
+        Point(125.0, 65.0),
+        Point(125.0, 91.0),
+        Point(50.0, 91.0),
+    ];
+    let (draft, targets) = fixture_draft(&pdf, quad, "08i")?;
     let report = audit_lines(&pdf, &draft, &targets, &LineAuditPolicy::default())?;
     assert_eq!(report.lines.len(), 4);
     for line in report.lines {
@@ -62,6 +74,59 @@ fn source_ink_topology_and_pdf_mapping_survive_all_page_rotations()
                 assert_eq!(topology.enclosed_background_regions.len(), expected_holes);
             }
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn source_padding_recovers_clipped_stroke_across_rotations()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let pdf = directory.path().join("source.pdf");
+    // Crop the first ring through its top border. A sufficiently padded
+    // audit restores the real stroke, rather than drawing a closing edge.
+    let clipped_quad = [
+        Point(50.0, 65.0),
+        Point(70.0, 65.0),
+        Point(70.0, 82.5),
+        Point(50.0, 82.5),
+    ];
+    let (mut draft, targets) = fixture_draft(&pdf, clipped_quad, "0")?;
+    let unpadded = audit_lines(&pdf, &draft, &targets, &LineAuditPolicy::default())?;
+    let padded = audit_lines(
+        &pdf,
+        &draft,
+        &targets,
+        &LineAuditPolicy {
+            padding_pixels: 36,
+            ..LineAuditPolicy::default()
+        },
+    )?;
+    for (before, after) in unpadded.lines.iter().zip(&padded.lines) {
+        assert_eq!(before.groups.len(), 1);
+        assert!(
+            before.groups[0]
+                .group
+                .topology
+                .iter()
+                .all(|topology| topology.enclosed_background_regions.is_empty())
+        );
+        assert_eq!(after.groups.len(), 1);
+        let group = &after.groups[0];
+        assert!(
+            group
+                .group
+                .topology
+                .iter()
+                .all(|topology| topology.enclosed_background_regions.len() == 1)
+        );
+        assert!(group.observation_support.inside_pixels > 0);
+        assert!(group.observation_support.outside_pixels > 0);
+        assert!(group.observation_support.touches_observation_edge);
+        assert!(!group.group.touches_line_edge);
+        assert_eq!(before.polarity.foreground, after.polarity.foreground);
+        assert_eq!(before.polarity.class_medians, after.polarity.class_medians);
+        assert_eq!(before.original_quad, after.original_quad);
     }
     assert!(
         audit_lines(
