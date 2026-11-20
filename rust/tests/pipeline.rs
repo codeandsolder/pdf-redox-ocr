@@ -23,7 +23,7 @@ struct Recognizer {
 }
 
 impl RecognitionBackend for Recognizer {
-    fn model_profile(&self) -> &str {
+    fn model_profile(&self) -> &'static str {
         "fixture recognizer"
     }
 
@@ -104,7 +104,10 @@ fn repeated_visible_source_is_recognized_once_and_occluded_paints_never_admitted
     for page in &output.draft.pages {
         assert_eq!(page.lines.len(), 1);
         assert_eq!(page.lines[0].text, "CAPACITOR 47uF 16V");
-        assert!(page.native_text_regions.is_empty());
+        assert_eq!(
+            page.native_text_regions,
+            [] as [pdf_redox_ocr::geometry::Quad; 0]
+        );
         let candidates = output
             .proposals
             .iter()
