@@ -413,3 +413,153 @@ fn invalid_policy_selection_and_modified_prepared_source_are_rejected()
     assert!(recognizer.calls.borrow().is_empty());
     Ok(())
 }
+
+mod support;
+
+/// One bitmap contains two independent labels. Both invocations on page 1
+/// expose a different subset; page 2 excludes a visible label using native
+/// searchable text. The source is recognized once across both pages.
+fn selective_fixture() -> Vec<u8> {
+    let mut samples = vec![255; 600 * 200];
+    for row in samples.chunks_exact_mut(600).skip(80).take(40) {
+        row[70..230].fill(0);
+        row[370..530].fill(0);
+    }
+    support::pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 600 200] /Resources << /XObject << /Im 5 0 R >> /Font << /F 6 0 R >> >> >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Contents 8 0 R >>".to_vec(),
+        support::stream("/Type /XObject /Subtype /Image /Width 600 /Height 200 /BitsPerComponent 8 /ColorSpace /DeviceGray", &samples),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        support::stream("", b"q 120 0 0 40 50 100 cm /Im Do Q q 120 0 0 40 350 100 cm /Im Do Q 1 g 55 110 50 20 re f 415 110 50 20 re f 0 g 275 20 40 10 re f"),
+        support::stream("", b"q 120 0 0 40 50 100 cm /Im Do Q BT /F 10 Tf 3 Tr 65 118 Td (ALPHA) Tj ET BT /F 12 Tf 0 Tr 300 150 Td (Visible native text) Tj ET 0 g 275 20 40 10 re f"),
+    ])
+}
+
+#[derive(Default)]
+struct SelectiveRecognizer {
+    calls: RefCell<Vec<RgbImage>>,
+}
+
+impl RecognitionBackend for SelectiveRecognizer {
+    fn model_profile(&self) -> &str {
+        "selective fixture"
+    }
+
+    fn recognize_mapped(
+        &self,
+        rgb: RgbImage,
+        mapper: &dyn Fn(Point) -> Point,
+    ) -> Result<Vec<OcrLine>, Error> {
+        // Native and fallback rasters have identical dimensions in this
+        // fixture, so use deterministic call order to distinguish them.
+        let mut calls = self.calls.borrow_mut();
+        let source = calls.is_empty();
+        calls.push(rgb);
+        if !source {
+            return Ok(Vec::new());
+        }
+        Ok([("ALPHA", 50.0, 250.0), ("BETA", 350.0, 550.0)]
+            .into_iter()
+            .map(|(text, left, right)| OcrLine {
+                text: text.into(),
+                confidence: 0.99,
+                quad: [
+                    Point(left, 130.0),
+                    Point(right, 130.0),
+                    Point(right, 70.0),
+                    Point(left, 70.0),
+                ]
+                .map(mapper),
+                reviewed: false,
+            })
+            .collect())
+    }
+}
+
+#[test]
+fn selective_masks_preserve_unproved_and_native_excluded_lines()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let pdf = dir.path().join("selective.pdf");
+    fs::write(&pdf, selective_fixture())?;
+    let policy = PipelinePolicy {
+        render: RenderPolicy {
+            max_side: 600,
+            dpi: 72,
+        },
+        ..policy()
+    };
+    let job = PreparedOcr::open(&pdf, None, policy)?;
+    let recognizer = SelectiveRecognizer::default();
+    let mut progress = Vec::new();
+    let result = job.recognize(&recognizer, |msg| progress.push(msg))?;
+    assert_eq!(
+        result
+            .residual_pages
+            .iter()
+            .map(|p| p.get())
+            .collect::<Vec<_>>(),
+        [1, 2],
+        "{progress:#?}"
+    );
+    assert_eq!(result.stats.nonoverlapping_image_lines_added, 3);
+    assert_eq!(
+        result.draft.pages[0]
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>(),
+        ["BETA", "ALPHA"]
+    );
+    assert_eq!(
+        result.draft.pages[1]
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>(),
+        ["BETA"]
+    );
+    assert_eq!(
+        result
+            .visibility
+            .audited
+            .iter()
+            .map(|audit| audit.visible_lines)
+            .collect::<Vec<_>>(),
+        [1, 1, 2]
+    );
+    let calls = recognizer.calls.borrow();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[1].dimensions(), (600, 200));
+    let original_first = render_rgb_page(&pdf, PageNumber::new(1)?, policy.render)?;
+    let original_second = render_rgb_page(&pdf, PageNumber::new(2)?, policy.render)?;
+    // Opaque vector occlusion stays byte-identical. Suppressed image ink
+    // must match the original image's white background in that same render
+    // (Poppler's DeviceGray conversion can produce RGB 254 instead of 255).
+    for x in [80, 440] {
+        assert_eq!(calls[1].get_pixel(x, 80), original_first.get_pixel(x, 80));
+    }
+    for x in [140, 380] {
+        assert_ne!(calls[1].get_pixel(x, 80), original_first.get_pixel(x, 80));
+        assert_eq!(calls[1].get_pixel(x, 80), original_first.get_pixel(x, 65));
+    }
+    assert_eq!(
+        calls[2].get_pixel(80, 80),
+        original_second.get_pixel(80, 80)
+    );
+    assert_ne!(
+        calls[2].get_pixel(140, 80),
+        original_second.get_pixel(140, 80)
+    );
+    assert_eq!(
+        calls[2].get_pixel(140, 80),
+        original_second.get_pixel(140, 65)
+    );
+    for (image, original) in calls[1..].iter().zip([original_first, original_second]) {
+        assert_eq!(image.get_pixel(290, 175), original.get_pixel(290, 175));
+    }
+    result.draft.verify_pdf(&pdf)?;
+    Ok(())
+}

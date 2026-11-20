@@ -14,7 +14,7 @@ use crate::{
     draft::{DraftPage, OcrDraft, OcrLine, sha256_file},
     geometry::Quad,
     hybrid::{
-        MergeInput, MergeProposal, MergeStats, PageRoute, merge_ocr, preserves_masked_sources,
+        MergeInput, MergeProposal, MergeStats, PageRoute, masked_source_conflicts, merge_ocr,
     },
     mixed_visibility::{MixedVerifier, MixedVisibility, PageVerification},
     mosaic::{
@@ -371,32 +371,59 @@ impl PreparedOcr {
         };
         let mapper = self.doc.mapper(page)?;
         if let Some(alternative) = alternative {
-            let crate::mixed_visibility::ResidualRaster { image, paints } = alternative;
+            let crate::mixed_visibility::ResidualRaster {
+                image,
+                required,
+                paint_count,
+            } = alternative;
             let mut candidate = DraftPage {
                 page: page.get(),
                 lines: Vec::new(),
                 native_text_regions: native.to_vec(),
             };
-            let preserves = |draft: &DraftPage| {
-                preserves_masked_sources(
+            let conflicts = |draft: &DraftPage| {
+                masked_source_conflicts(
                     draft,
                     &evidence.observations,
                     &evidence.proofs,
-                    &paints,
+                    &required,
                     self.policy.minimum_confidence,
                 )
             };
             // First check the source/native exclusions without spending inference.
-            if preserves(&candidate)? {
+            if conflicts(&candidate)?.is_empty() {
                 match engine.recognize_page(image, mapper) {
                     Ok(lines) => {
                         candidate.lines = lines;
-                        if preserves(&candidate)? {
+                        let rejected = conflicts(&candidate)?;
+                        if rejected.is_empty() {
                             progress(format!(
-                                "page {}: verified residual OCR accepted",
-                                page.get()
+                                "page {}: verified residual OCR accepted ({} paints, {} source labels)",
+                                page.get(),
+                                paint_count,
+                                required.len()
                             ));
                             return Ok((candidate.lines, true, evidence));
+                        }
+                        for (index, reason) in rejected {
+                            let source = &evidence.observations[index];
+                            let conflicting = candidate
+                                .lines
+                                .iter()
+                                .filter(|line| {
+                                    crate::polygon::overlap_fraction(&source.line.quad, &line.quad)
+                                        >= 0.30
+                                })
+                                .map(|line| line.text.as_str())
+                                .collect::<Vec<_>>();
+                            progress(format!(
+                                "page {} residual source {:?} rejected: page overlap {}, native overlap {}, residual lines {:?}",
+                                page.get(),
+                                reason.raster_text,
+                                reason.page_overlap,
+                                reason.native_overlap,
+                                conflicting
+                            ));
                         }
                     }
                     Err(error) => progress(format!(

@@ -19,11 +19,10 @@ use crate::{
     Error, PageNumber,
     draft::OcrLine,
     geometry::{DisplayMapper, Point, Quad},
-    hybrid::{ImageObservation, VisibilityProof},
+    hybrid::{ImageObservation, SourceAdmission, VisibilityProof},
     paint_isolation::{PaintReplacement, isolate_source_paints},
     paint_scan::{ImagePaint, PaintReport, PdfMatrix},
     pdf_metadata::PdfMetadata,
-    polygon::overlap_fraction,
     rasterize::{RenderPolicy, render_rgb_page},
     source_mask::{MaskedSourceObject, mask_source_object},
     source_ocr::{SourceObservation, map_observations_to_paint},
@@ -105,7 +104,10 @@ pub fn prove_mixed_source_text(
 /// same per-paint proof and admission evidence used by the final merge.
 pub(crate) struct ResidualRaster {
     pub(crate) image: RgbImage,
-    pub(crate) paints: BTreeSet<u32>,
+    /// Page-local observation indices that must remain admitted by the merger.
+    pub(crate) required: BTreeSet<usize>,
+    /// Number of actual paint replacements, for diagnostics.
+    pub(crate) paint_count: usize,
 }
 
 impl ResidualRaster {
@@ -203,6 +205,7 @@ impl<'a> MixedVerifier<'a> {
         };
         let mut evidence = MixedVisibility::default();
         let mut residual = ResidualBuilder::default();
+        let mut variants = BTreeMap::new();
         for &paint in relevant {
             let source = self
                 .recognized
@@ -215,8 +218,8 @@ impl<'a> MixedVerifier<'a> {
             {
                 continue;
             }
+            let id = ObjectId::new(paint.object_number, i32::from(paint.generation));
             if !self.masked_cache.contains_key(&paint.source_id) {
-                let id = ObjectId::new(paint.object_number, i32::from(paint.generation));
                 let masked = match mask_source_object(
                     self.document.source(),
                     id,
@@ -240,17 +243,51 @@ impl<'a> MixedVerifier<'a> {
                 if !proven.proofs.is_empty() {
                     evidence.proven_pages.insert(page);
                 }
+                let ProbedSource {
+                    observations,
+                    proofs,
+                    audit,
+                    treatment,
+                    source_indices,
+                } = proven;
                 if let Some(native) = native {
-                    residual.consider(paint, native, &control, &proven);
+                    // Simulate the real source order, including candidates that
+                    // are not going to be suppressed. Retain only observations
+                    // that can be admitted with an empty fallback.
+                    let chosen = residual.plan(
+                        &observations,
+                        &source_indices,
+                        native,
+                        self.minimum_confidence,
+                        evidence.observations.len(),
+                    );
+                    if !chosen.is_empty() {
+                        let key = MaskKey {
+                            source_id: paint.source_id.clone(),
+                            indices: chosen.indices.clone(),
+                        };
+                        if chosen.indices.len() == audit.candidate_lines {
+                            residual.consider(
+                                paint,
+                                key,
+                                chosen.required,
+                                &masked.object,
+                                &control,
+                                treatment,
+                            );
+                        } else if let Some((object, image)) =
+                            probe.selective_treatment(paint, source, &key, &mut variants)
+                        {
+                            residual.consider(paint, key, chosen.required, object, &control, image);
+                        }
+                    }
                 }
-                evidence.observations.extend(proven.observations);
-                evidence.proofs.extend(proven.proofs);
-                evidence.audited.push(proven.audit);
+                evidence.observations.extend(observations);
+                evidence.proofs.extend(proofs);
+                evidence.audited.push(audit);
             }
         }
-        // Multi-paint treatments are accepted only when the actual grouped PDF
-        // render exactly matches the disjoint independently verified changes.
-        let residual = residual.finish(&probe, &self.masked_cache).unwrap_or(None);
+        let residual = residual.finish(&probe).unwrap_or(None);
         Ok(PageVerification {
             evidence,
             control: Some(control),
@@ -259,76 +296,109 @@ impl<'a> MixedVerifier<'a> {
     }
 }
 
+/// A mask's identity includes the exact original native observation indices,
+/// since reused images may be suppressed differently at different paint sites.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct MaskKey {
+    source_id: String,
+    indices: Vec<usize>,
+}
+
+type MaskVariants = BTreeMap<MaskKey, Option<MaskedSourceObject>>;
+
+#[derive(Default)]
+struct ChosenLines {
+    indices: Vec<usize>,
+    required: BTreeSet<usize>,
+}
+
+impl ChosenLines {
+    const fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+}
+
 #[derive(Default)]
 struct ResidualBuilder<'a> {
     image: Option<RgbImage>,
-    paints: Vec<&'a ImagePaint>,
+    groups: BTreeMap<MaskKey, PaintReplacement<'a>>,
+    required: BTreeSet<usize>,
+    planned_quads: Vec<Quad>,
+    paint_count: usize,
 }
 
 impl<'a> ResidualBuilder<'a> {
+    fn plan(
+        &mut self,
+        observations: &[ImageObservation],
+        source_indices: &[usize],
+        native: &[Quad],
+        threshold: f64,
+        offset: usize,
+    ) -> ChosenLines {
+        let mut chosen = ChosenLines::default();
+        for (index, (observation, &source_index)) in
+            observations.iter().zip(source_indices).enumerate()
+        {
+            if SourceAdmission::evaluate(
+                &observation.line,
+                self.planned_quads.iter(),
+                native,
+                true,
+                threshold,
+            )
+            .included
+            {
+                self.planned_quads.push(observation.line.quad);
+                chosen.indices.push(source_index);
+                chosen.required.insert(offset + index);
+            }
+        }
+        chosen
+    }
+
     fn consider(
         &mut self,
         paint: &'a ImagePaint,
-        native: &[Quad],
+        key: MaskKey,
+        required: BTreeSet<usize>,
+        replacement: &pdf_redox::OwnedObject,
         control: &RgbImage,
-        proven: &ProbedSource,
+        treatment: RgbImage,
     ) {
-        // A source mask may cover several labels. Never suppress a paint if
-        // even one suppressed label lacks proof or conflicts with native words.
-        if proven.proofs.is_empty()
-            || proven.proofs.len() != proven.audit.candidate_lines
-            || proven.observations.iter().any(|observation| {
-                native
-                    .iter()
-                    .any(|word| overlap_fraction(&observation.line.quad, word) >= 0.20)
-            })
-        {
-            return;
-        }
         if let Some(image) = &mut self.image {
-            if !combine_disjoint_changes(control, image, &proven.treatment) {
+            if !combine_disjoint_changes(control, image, &treatment) {
                 return;
             }
         } else {
-            self.image = Some(proven.treatment.clone());
+            self.image = Some(treatment);
         }
-        self.paints.push(paint);
+        self.groups
+            .entry(key)
+            .or_insert_with(|| PaintReplacement {
+                image: replacement.clone(),
+                paints: Vec::new(),
+            })
+            .paints
+            .push(paint);
+        self.required.extend(required);
+        self.paint_count += 1;
     }
 
-    fn finish(
-        self,
-        probe: &PageProbe<'_>,
-        cache: &BTreeMap<String, Option<MaskedSourceObject>>,
-    ) -> Result<Option<ResidualRaster>, Error> {
+    fn finish(self, probe: &PageProbe<'_>) -> Result<Option<ResidualRaster>, Error> {
         let Some(image) = self.image else {
             return Ok(None);
         };
-        if self.paints.len() > 1 {
-            let mut groups = BTreeMap::<&str, Vec<&ImagePaint>>::new();
-            for &paint in &self.paints {
-                groups.entry(&paint.source_id).or_default().push(paint);
-            }
-            let replacements = groups
-                .into_iter()
-                .map(|(id, paints)| {
-                    let masked = cache
-                        .get(id)
-                        .and_then(Option::as_ref)
-                        .ok_or_else(|| Error::Invalid("missing verified replacement".into()))?;
-                    Ok(PaintReplacement {
-                        image: masked.object.clone(),
-                        paints,
-                    })
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            let combined = probe.render_treatment(replacements)?;
+        if self.paint_count > 1 {
+            let combined = probe.render_treatment(self.groups.into_values())?;
             if combined != image {
                 return Ok(None);
             }
         }
         Ok(Some(ResidualRaster {
             image,
-            paints: self.paints.iter().map(|paint| paint.paint_index).collect(),
+            required: self.required,
+            paint_count: self.paint_count,
         }))
     }
 }
@@ -362,6 +432,7 @@ struct ProbedSource {
     proofs: Vec<VisibilityProof>,
     audit: SourceVisibilityAudit,
     treatment: RgbImage,
+    source_indices: Vec<usize>,
 }
 
 struct PageProbe<'a> {
@@ -405,6 +476,47 @@ impl PageProbe<'_> {
         render_rgb_page(temp.path(), self.page, self.policy)
     }
 
+    /// Re-prove the exact subset, rather than using pixels from a treatment
+    /// that also erased excluded/unverified candidates. Variants are cached
+    /// within this page only, bounding resident combinations across documents.
+    fn selective_treatment<'a>(
+        &self,
+        paint: &ImagePaint,
+        source: &SourceObservation,
+        key: &MaskKey,
+        variants: &'a mut MaskVariants,
+    ) -> Option<(&'a pdf_redox::OwnedObject, RgbImage)> {
+        let lines = key
+            .indices
+            .iter()
+            .map(|&index| source.lines.get(index).cloned())
+            .collect::<Option<Vec<_>>>()?;
+        let subset = SourceObservation {
+            width: source.width,
+            height: source.height,
+            lines,
+        };
+        let masked = variants
+            .entry(key.clone())
+            .or_insert_with(|| {
+                let id = ObjectId::new(paint.object_number, i32::from(paint.generation));
+                mask_source_object(
+                    self.document.source(),
+                    id,
+                    &subset.lines,
+                    self.minimum_confidence,
+                )
+                .ok()
+                .flatten()
+            })
+            .as_ref()?;
+        let proof = self.examine(paint, &subset, masked).ok().flatten()?;
+        if proof.proofs.len() != subset.lines.len() {
+            return None;
+        }
+        Some((&masked.object, proof.treatment))
+    }
+
     fn examine(
         &self,
         paint: &ImagePaint,
@@ -414,14 +526,15 @@ impl PageProbe<'_> {
         if source.width == 0 || source.height == 0 {
             return Err(Error::Invalid("invalid source OCR dimensions".into()));
         }
-        let lines = source
+        let (indices, lines): (Vec<_>, Vec<_>) = source
             .lines
             .iter()
-            .filter(|line| {
+            .enumerate()
+            .filter(|(_, line)| {
                 line.confidence >= self.minimum_confidence && line.text.trim().chars().count() >= 2
             })
-            .cloned()
-            .collect::<Vec<_>>();
+            .map(|(index, line)| (index, line.clone()))
+            .unzip();
         if lines.is_empty() {
             return Ok(None);
         }
@@ -462,7 +575,8 @@ impl PageProbe<'_> {
             / (f64::from(source.width) * f64::from(source.height));
         let mut observations = Vec::new();
         let mut proofs = Vec::new();
-        for (line, metric) in projections.iter().zip(&masked.metrics) {
+        let mut source_indices = Vec::new();
+        for ((line, metric), index) in projections.iter().zip(&masked.metrics).zip(indices) {
             if !paint.wholly_visible_in_clip(&line.quad) {
                 continue;
             }
@@ -475,6 +589,7 @@ impl PageProbe<'_> {
             if metric.changed_source_pixels < 10 || observed < (expected * 0.35).max(8.0) {
                 continue;
             }
+            source_indices.push(index);
             observations.push(ImageObservation {
                 page: self.page.get(),
                 source_id: paint.source_id.clone(),
@@ -502,6 +617,7 @@ impl PageProbe<'_> {
             proofs,
             audit,
             treatment,
+            source_indices,
         }))
     }
 }
@@ -682,7 +798,8 @@ mod tests {
         treatment.put_pixel(1, 0, Rgb([255; 3]));
         let residual = || ResidualRaster {
             image: treatment.clone(),
-            paints: BTreeSet::from([4]),
+            required: BTreeSet::from([4]),
+            paint_count: 1,
         };
         let mut baseline = original.clone();
         baseline.put_pixel(0, 0, Rgb([128; 3]));
@@ -693,7 +810,7 @@ mod tests {
             result.image.as_raw(),
             &[128, 128, 128, 255, 255, 255, 0, 0, 0]
         );
-        assert_eq!(result.paints, BTreeSet::from([4]));
+        assert_eq!(result.required, BTreeSet::from([4]));
         baseline.put_pixel(1, 0, Rgb([128; 3]));
         assert!(residual().transfer(&original, &baseline).is_none());
         Ok(())
@@ -752,7 +869,8 @@ mod tests {
             );
             let residual = result.residual.ok_or("grouped treatment rejected")?;
             let control = result.control.ok_or("missing proof control")?;
-            assert_eq!(residual.paints, BTreeSet::from([0, 1]));
+            assert_eq!(residual.required, BTreeSet::from([0, 1]));
+            assert_eq!(residual.paint_count, 2);
             let mut changed = [0, 0];
             for (i, (a, b)) in control.pixels().zip(residual.image.pixels()).enumerate() {
                 if a != b {

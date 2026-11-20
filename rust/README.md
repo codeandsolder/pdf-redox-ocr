@@ -148,6 +148,11 @@ for a later decode if an earlier occurrence exceeds its resource budget. The
 Mixed-page verification now runs page-locally, retaining the original proof
 control for fallback and using the independently proved treatment raster
 directly when all its suppressed source labels remain eligible for merge.
+The suppression plan follows the same merge gates at the individual source
+line level. Partially occluded or native-excluded labels stay unaltered;
+the exact remaining subset is separately masked and re-proved, with
+variants shared by original source identity and observation indices within
+the page. Different uses of one image may therefore receive different masks.
 Several treatments can be combined when their changed RGB pixels are
 disjoint and the actual grouped copy-on-write PDF renders exactly to the
 same pixels. Native-font masking may be combined with those changes only

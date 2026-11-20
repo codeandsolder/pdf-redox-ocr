@@ -396,6 +396,43 @@ pub fn merge_ocr(
     ))
 }
 
+/// Shared geometric and confidence gates for source admission and
+/// provisional residual planning. Final proof identity is still checked
+/// independently by the merger.
+pub(crate) struct SourceAdmission {
+    pub(crate) page_overlap: f64,
+    pub(crate) native_overlap: f64,
+    pub(crate) included: bool,
+}
+
+impl SourceAdmission {
+    pub(crate) fn evaluate<'a>(
+        line: &OcrLine,
+        existing: impl Iterator<Item = &'a Quad>,
+        native: &[Quad],
+        visible: bool,
+        threshold: f64,
+    ) -> Self {
+        let page_overlap = existing
+            .map(|quad| overlap_fraction(&line.quad, quad))
+            .fold(0.0_f64, f64::max);
+        let native_overlap = native
+            .iter()
+            .map(|quad| overlap_fraction(&line.quad, quad))
+            .fold(0.0_f64, f64::max);
+        let included = visible
+            && page_overlap < 0.30
+            && native_overlap < 0.20
+            && line.confidence >= threshold
+            && line.text.trim().chars().count() >= 2;
+        Self {
+            page_overlap,
+            native_overlap,
+            included,
+        }
+    }
+}
+
 fn merge_fallback_page(
     threshold: f64,
     page_verified: bool,
@@ -410,18 +447,6 @@ fn merge_fallback_page(
     };
     let mut proposals = Vec::new();
     for &image in observations {
-        // Include lines already admitted from other native-image paints:
-        // two individually visible sources can still overlap at page level.
-        let page_overlap = output_page
-            .lines
-            .iter()
-            .map(|line| overlap_fraction(&image.line.quad, &line.quad))
-            .fold(0.0_f64, f64::max);
-        let native_overlap = baseline_page
-            .native_text_regions
-            .iter()
-            .map(|quad| overlap_fraction(&image.line.quad, quad))
-            .fold(0.0_f64, f64::max);
         let visible = page_verified
             && proofs
                 .get(&(
@@ -433,23 +458,25 @@ fn merge_fallback_page(
                 .is_some_and(|candidates| {
                     candidates.iter().any(|proof| proof_matches(image, proof))
                 });
-        let eligible = visible
-            && page_overlap < 0.30
-            && native_overlap < 0.20
-            && image.line.confidence >= threshold
-            && image.line.text.trim().chars().count() >= 2;
+        let admission = SourceAdmission::evaluate(
+            &image.line,
+            output_page.lines.iter().map(|line| &line.quad),
+            &baseline_page.native_text_regions,
+            visible,
+            threshold,
+        );
         proposals.push(MergeProposal {
             page: baseline_page.page,
             raster_text: image.line.text.clone(),
             source_id: image.source_id.clone(),
             paint_index: image.paint_index,
             raster_confidence: image.line.confidence,
-            page_overlap: round4(page_overlap),
-            native_overlap: round4(native_overlap),
+            page_overlap: round4(admission.page_overlap),
+            native_overlap: round4(admission.native_overlap),
             verified_visible_source: visible,
-            included_as_extra: eligible,
+            included_as_extra: admission.included,
         });
-        if eligible {
+        if admission.included {
             output_page.lines.push(image.line.clone());
             stats.nonoverlapping_image_lines_added += 1;
         } else {
@@ -459,17 +486,16 @@ fn merge_fallback_page(
     (output_page, stats, proposals)
 }
 
-/// Test the same final admission logic before committing to a masked raster.
-/// Every observation from a suppressed paint must survive the actual merge,
-/// including conflicts with residual OCR, other source labels and native words.
+/// Use the exact final merger to evaluate every suppressed observation,
+/// not merely its paint. Indices refer to the original page-local order.
 #[cfg(feature = "pdf-integration")]
-pub(crate) fn preserves_masked_sources(
+pub(crate) fn masked_source_conflicts(
     baseline: &DraftPage,
     observations: &[ImageObservation],
     proofs: &[VisibilityProof],
-    required_paints: &BTreeSet<u32>,
+    required: &BTreeSet<usize>,
     threshold: f64,
-) -> Result<bool, Error> {
+) -> Result<Vec<(usize, MergeProposal)>, Error> {
     let page = PageNumber::new(baseline.page)?;
     let (indexed, proofs) = index_merge_evidence(observations, proofs, &BTreeSet::from([page]))?;
     let (_, _, proposals) = merge_fallback_page(
@@ -479,13 +505,16 @@ pub(crate) fn preserves_masked_sources(
         indexed.get(&page).map_or(&[], Vec::as_slice),
         &proofs,
     );
-    Ok(required_paints.iter().all(|paint| {
-        let mut matching = proposals
-            .iter()
-            .filter(|proposal| proposal.paint_index == *paint);
-        matching.next().is_some_and(|first| first.included_as_extra)
-            && matching.all(|proposal| proposal.included_as_extra)
-    }))
+    if required.iter().any(|&index| index >= proposals.len()) {
+        return Err(Error::Invalid(
+            "residual mask refers to missing source observation".into(),
+        ));
+    }
+    Ok(proposals
+        .into_iter()
+        .enumerate()
+        .filter(|(index, proposal)| required.contains(index) && !proposal.included_as_extra)
+        .collect())
 }
 
 fn pages_by_number(pages: &[DraftPage]) -> Result<BTreeMap<PageNumber, &DraftPage>, Error> {
