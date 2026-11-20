@@ -37,6 +37,8 @@ struct Args {
     output: Option<PathBuf>,
     #[command(flatten)]
     preparation: PreparationArgs,
+    #[command(flatten)]
+    recognition: RecognitionArgs,
     /// Write an optional PDF annotated through the Rust pdf-redox importer.
     #[arg(long)]
     output_pdf: Option<PathBuf>,
@@ -67,18 +69,9 @@ struct Args {
     /// Diagnostic: recognize the complete fallback raster, even with source proofs.
     #[arg(long)]
     no_residual_ocr: bool,
-    /// Diagnostic: disable job-local exact RGB recognition reuse.
-    #[arg(long)]
-    no_recognition_cache: bool,
-    /// Disable geometry-confirmed re-recognition of dotted layout leaders.
-    #[arg(long)]
-    no_leader_repair: bool,
     /// Automatic, exhaustive bounded, or disabled native-raster recognition.
     #[arg(long, value_enum, default_value = "auto")]
     raster_mode: RasterMode,
-    /// ONNX intra-operation CPU thread count (default: backend policy).
-    #[arg(long)]
-    ocr_threads: Option<NonZeroUsize>,
     /// Maximum pixels allowed in a single decoded native-image OCR source.
     #[arg(long, default_value_t = 8_000_000)]
     max_native_source_pixels: u64,
@@ -118,6 +111,19 @@ struct PreparationArgs {
     work_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, clap::Args)]
+struct RecognitionArgs {
+    /// Diagnostic: disable job-local exact RGB recognition reuse.
+    #[arg(long)]
+    no_recognition_cache: bool,
+    /// Disable geometry-confirmed re-recognition of dotted layout leaders.
+    #[arg(long)]
+    no_leader_repair: bool,
+    /// ONNX intra-operation CPU thread count (default: backend policy).
+    #[arg(long)]
+    ocr_threads: Option<NonZeroUsize>,
+}
+
 fn configured_policy(args: &Args) -> PipelinePolicy {
     PipelinePolicy {
         raster_mode: args.raster_mode,
@@ -140,7 +146,7 @@ fn configured_policy(args: &Args) -> PipelinePolicy {
         native_chunk: args.native_chunk,
         keep_native_text: args.keep_native_text,
         residual_ocr: !args.no_residual_ocr,
-        recognition_cache: if args.no_recognition_cache {
+        recognition_cache: if args.recognition.no_recognition_cache {
             RecognitionCacheBudget::DISABLED
         } else {
             RecognitionCacheBudget::default()
@@ -312,8 +318,8 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
         fs::create_dir(directory)?;
     }
     let engine = OcrInference::pp_ocrv6_small(
-        args.ocr_threads,
-        (!args.no_leader_repair).then_some(args.confidence.max(0.97)),
+        args.recognition.ocr_threads,
+        (!args.recognition.no_leader_repair).then_some(args.confidence.max(0.97)),
     );
     let result = job.recognize(
         &engine,
