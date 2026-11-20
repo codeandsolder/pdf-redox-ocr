@@ -39,10 +39,26 @@ use crate::{
     source_selection::{ImagePlacement, SourcePolicy, choose_mixed_raster_sources},
 };
 
+/// Native raster recognition strategy. Safety proofs and resource limits
+/// apply identically to every mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+#[serde(rename_all = "snake_case")]
+pub enum RasterMode {
+    /// Select high-detail sources and reconstruct native fragment pages.
+    #[default]
+    Auto,
+    /// Consider every independently safe source within the configured budget.
+    All,
+    /// Disable native image and fragment OCR; retain native-text-only bypass.
+    Off,
+}
+
 /// Independent source raster, mosaic and fallback policy for an OCR job.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct PipelinePolicy {
     pub source_budget: NativeImageBudget,
+    pub raster_mode: RasterMode,
     pub mosaic_budget: MosaicBudget,
     pub render: RenderPolicy,
     pub minimum_confidence: f64,
@@ -58,6 +74,7 @@ impl Default for PipelinePolicy {
     fn default() -> Self {
         Self {
             source_budget: NativeImageBudget::default(),
+            raster_mode: RasterMode::Auto,
             mosaic_budget: MosaicBudget::default(),
             render: RenderPolicy::default(),
             minimum_confidence: 0.97,
@@ -545,10 +562,48 @@ impl PreparedOcr {
         fragmented: &BTreeSet<PageNumber>,
         progress: &mut dyn FnMut(String),
     ) -> Result<NativeSourcePlan, Error> {
-        let doc = &self.doc;
         let source_budget = self.policy.source_budget;
-        let render = self.policy.render;
-        let mut source_ids = source_only_candidates(scanned, source_budget.max_source_pixels);
+        let mut source_ids = match self.policy.raster_mode {
+            RasterMode::Off => BTreeSet::new(),
+            RasterMode::All => scanned
+                .placements
+                .iter()
+                .filter(|paint| {
+                    paint.unsafe_reasons.is_empty()
+                        && paint.width > 0
+                        && paint.height > 0
+                        && u64::from(paint.width) * u64::from(paint.height)
+                            <= source_budget.max_source_pixels
+                })
+                .map(|paint| paint.source_id.clone())
+                .collect(),
+            RasterMode::Auto => self.auto_source_candidates(scanned, progress)?,
+        };
+        // Native source OCR is insufficient on a page where a text line can cross
+        // neighboring fragments; recognize the complete native-pitch group instead.
+        let eligible_elsewhere = scanned
+            .placements
+            .iter()
+            .filter(|paint| !fragmented.iter().any(|page| page.get() == paint.page))
+            .map(|paint| paint.source_id.as_str())
+            .collect::<BTreeSet<_>>();
+        source_ids.retain(|id| eligible_elsewhere.contains(id.as_str()));
+        let plan = NativeSourcePlan::from_paints(source_ids, scanned)?;
+        progress(format!(
+            "native source extraction planned: {} sources across {} candidate pages",
+            plan.ids.len(),
+            plan.pages.len()
+        ));
+        Ok(plan)
+    }
+
+    fn auto_source_candidates(
+        &self,
+        scanned: &PaintReport,
+        progress: &mut dyn FnMut(String),
+    ) -> Result<BTreeSet<String>, Error> {
+        let budget = self.policy.source_budget;
+        let mut ids = source_only_candidates(scanned, budget.max_source_pixels);
         let sampling = scanned
             .placements
             .iter()
@@ -567,11 +622,11 @@ impl PreparedOcr {
             .collect::<Vec<_>>();
         let (mixed, report) = choose_mixed_raster_sources(
             &sampling,
-            doc.media_boxes(),
+            self.doc.media_boxes(),
             SourcePolicy {
-                max_side: render.max_side,
-                max_inference_pixels: source_budget.max_total_pixels,
-                max_sources: source_budget.max_sources,
+                max_side: self.policy.render.max_side,
+                max_inference_pixels: budget.max_total_pixels,
+                max_sources: budget.max_sources,
                 minimum_source_pixels: 20_000,
                 min_gain: 2.25,
             },
@@ -579,25 +634,10 @@ impl PreparedOcr {
         progress(format!(
             "source candidates: {} high-detail sources, {} native-only sources",
             report.native_resolution_candidates,
-            source_ids.len()
+            ids.len()
         ));
-        source_ids.extend(mixed);
-        // Native source OCR is insufficient on a page where a text line can cross
-        // neighboring fragments; recognize the complete native-pitch group instead.
-        let eligible_elsewhere = scanned
-            .placements
-            .iter()
-            .filter(|paint| !fragmented.iter().any(|page| page.get() == paint.page))
-            .map(|paint| paint.source_id.as_str())
-            .collect::<BTreeSet<_>>();
-        source_ids.retain(|id| eligible_elsewhere.contains(id.as_str()));
-        let plan = NativeSourcePlan::from_paints(source_ids, scanned)?;
-        progress(format!(
-            "native source extraction planned: {} sources across {} candidate pages",
-            plan.ids.len(),
-            plan.pages.len()
-        ));
-        Ok(plan)
+        ids.extend(mixed);
+        Ok(ids)
     }
 
     fn recognize_native_sources(
@@ -701,7 +741,11 @@ impl PreparedOcr {
         progress: &mut dyn FnMut(String),
     ) -> Result<NativePreparation, Error> {
         let scanned = enumerate_image_paints(&self.doc, &self.selected)?;
-        let (fragmented, plans) = self.plan_native_fragment_pages(&scanned)?;
+        let (fragmented, plans) = if self.policy.raster_mode == RasterMode::Off {
+            (BTreeSet::new(), BTreeMap::new())
+        } else {
+            self.plan_native_fragment_pages(&scanned)?
+        };
         let source_plan = self.plan_native_sources(&scanned, &fragmented, progress)?;
         let recognized = self.recognize_native_sources(engine, &source_plan, progress)?;
         let mut source_only = source_only_pages(&scanned, &recognized)?;

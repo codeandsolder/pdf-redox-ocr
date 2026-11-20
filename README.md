@@ -1,9 +1,16 @@
 # pdf-redox independent OCR workflow
 
-Standalone Python inference companion to [pdf-redox](https://github.com/codeandsolder/pdf-redox), which owns the Rust optimizer and invisible-text importer. The Python and Rust repositories are independent: keep both checkouts beside one another, or set `PDF_REDOX_RELEASE_BIN_DIR` to the directory containing compiled `pdf-redox` and `pdf-redox-ocr-overlay` executables. On Acer, the canonical checkout is `/home/jan/projects/pdf-redox-ocr`; `/home/jan/tools/pdf-redox-ocr` is a symlink to it. The launcher resolves the Python adapter from its own directory and the Rust binaries from its sibling checkout by default.
+Native Rust inference companion to [pdf-redox](https://github.com/codeandsolder/pdf-redox), using PP-OCRv6 Small through oar-ocr and ONNX Runtime. The automatic launcher runs the Rust optimizer, if requested, and then the Rust OCR executable, which applies semantic text directly. No Python interpreter is needed for this path; the Python adapters remain research/reference implementations.
 
-PDF optimization is Rust; OCR inference uses RapidOCR in an isolated uv
-environment; the Rust importer inserts invisible Unicode text.
+Build the native executable in the `rust/` crate (see [native architecture and build requirements](rust/README.md)). Keep the optimizer beside this checkout or set `PDF_REDOX_RELEASE_BIN_DIR` to the directory containing its compiled `pdf-redox` binary. Set `PDF_REDOX_OCR_BIN` to override the default `rust/target/release/pdf-redox-ocr` executable.
+
+```sh
+./run-auto.sh input.pdf searchable.pdf --ocr-only --report audit.json
+```
+
+Omit `--ocr-only` to first optimize for processing. The default native render limit is 1920 pixels, and the model's detector limit is 2048 pixels. `--draft` optionally retains the exact SHA-bound importer JSON; when optimization is enabled it binds to the optimized input, not the unoptimized source. `--report` retains a separate audit. `--confidence` controls both source admission and overlay application. `--ocr-threads` supplies an explicit ONNX intra-operation thread count. All intermediate files use a scoped temporary directory, removed on exit.
+
+The remainder of this document records the earlier Python-based workflow and research experiments; current native implementation details are in [rust/README.md](rust/README.md).
 
 **Page geometry:** all raster extraction, native-word coordinates, paint
 clipping, fragment reconstruction and diagnostic overlays use the MediaBox,
@@ -12,7 +19,7 @@ CropBox does not suppress material visible in the default MediaBox render.
 For an explicitly cropped render (`pdftoppm -cropbox`), request the matching
 `page_box="cropbox"` geometry explicitly; never mix the frames.
 
-**Current raster OCR (2026-11-17):** embedded PDF images are OCR'd at their
+**Python reference raster OCR (2026-11-17):** embedded PDF images are OCR'd at their
 original source-pixel resolution, once per reusable Image XObject. When an
 image-only page is assembled from many tiny bitmap fragments, the hybrid
 groups their native pixels using actual PDF paint order/geometry, clips and
@@ -40,7 +47,7 @@ it with exact-pixel cropped control regions around candidate text, and reuses
 the full treatment raster for remaining page OCR. If proof fails, the
 unaltered control page is rendered for fallback OCR. Each page is processed
 and released before the next one, bounding raster memory.
-The default command is still:
+The native automatic launcher accepts the same raster strategy names:
 
     ./run-auto.sh input.pdf searchable.pdf --raster-mode auto
 
@@ -85,12 +92,11 @@ unreviewed predictions are used. OCR model output may contain mistakes.
 
 ## End-to-end automatic workflow
 
-    /home/jan/tools/pdf-redox-ocr/run-auto.sh input.pdf output.pdf --min-confidence 0.97
+    /home/jan/tools/pdf-redox-ocr/run-auto.sh input.pdf output.pdf --confidence 0.97
 
-Optional --pages 8,10, --max-side 1600, --ocr-threads 6. Uses scoped automatic temporary
-directories under /home/jan/benchmarks and cleans up intermediate artifacts.
+Optional --pages 8,10, --max-side 1920, --ocr-threads 6. Temporary artifacts are scoped to PDF_REDOX_WORK_DIR (or TMPDIR), and cleaned automatically.
 
-## Review-first workflow
+## Review-first workflow (Python reference)
 
     pdf-redox input.pdf --optimize-for processing -o optimized.pdf
     uv run --python 3.12 /home/jan/tools/pdf-redox-ocr/batch_rapidocr.py --pdf optimized.pdf --output draft.json

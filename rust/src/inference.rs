@@ -3,10 +3,11 @@
 //! No Python interpreter, bindings or subprocess is involved in inference.
 //! All recognitions use the original page-image frame, with no `UVDoc` warping.
 
-use std::sync::OnceLock;
+use std::{num::NonZeroUsize, sync::OnceLock};
 
 use image::RgbImage;
 use oar_ocr::{
+    core::config::OrtSessionConfig,
     domain::tasks::TextDetectionConfig,
     prelude::{OAROCR, OAROCRBuilder, PpOcrV6Size},
     processors::LimitType,
@@ -21,6 +22,8 @@ use crate::{
 /// One lazily initialized CPU OCR pipeline reused across multiple raster and PDF pages.
 pub struct OcrInference {
     backend: OnceLock<Result<OAROCR, String>>,
+    threads: Option<NonZeroUsize>,
+    profile: String,
 }
 
 /// Retain actual page/native-source detail up to a bounded detector size.
@@ -49,21 +52,33 @@ impl OcrInference {
     /// Resolve and load models only on the first recognition; a native-only
     /// document needs no model files or ONNX session at all.
     #[must_use]
-    pub const fn pp_ocrv6_small() -> Self {
+    pub fn pp_ocrv6_small(threads: Option<NonZeroUsize>) -> Self {
+        let profile = threads.map_or_else(
+            || Self::MODEL_PROFILE.to_owned(),
+            |count| format!("{} CPU threads={count}", Self::MODEL_PROFILE),
+        );
         Self {
             backend: OnceLock::new(),
+            threads,
+            profile,
         }
     }
 
     fn backend(&self) -> Result<&OAROCR, Error> {
         self.backend
             .get_or_init(|| {
-                OAROCRBuilder::pp_ocrv6(PpOcrV6Size::Small)
+                let mut builder = OAROCRBuilder::pp_ocrv6(PpOcrV6Size::Small)
                     .text_detection_config(small_detector_config())
                     .image_batch_size(1)
-                    .region_batch_size(4)
-                    .build()
-                    .map_err(|error| error.to_string())
+                    .region_batch_size(4);
+                if let Some(threads) = self.threads {
+                    builder = builder.ort_session(
+                        OrtSessionConfig::new()
+                            .with_intra_threads(threads.get())
+                            .with_inter_threads(1),
+                    );
+                }
+                builder.build().map_err(|error| error.to_string())
             })
             .as_ref()
             .map_err(|error| Error::Inference(error.clone()))
@@ -72,7 +87,7 @@ impl OcrInference {
 
 impl RecognitionBackend for OcrInference {
     fn model_profile(&self) -> &str {
-        Self::MODEL_PROFILE
+        &self.profile
     }
 
     /// Recognize the original input raster without applying PDF placement geometry.

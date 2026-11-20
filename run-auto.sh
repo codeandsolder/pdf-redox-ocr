@@ -1,54 +1,92 @@
 #!/usr/bin/env bash
+# Optimize once, recognize in Rust, and import invisible text in-process.
 set -euo pipefail
-export PYTHONDONTWRITEBYTECODE=1
+
+usage() {
+    printf '%s\n' "Usage: $0 SOURCE.pdf OUTPUT.pdf [--ocr-only] [--pages 1,8,10] [--confidence 0.97] [--max-side 1920] [--ocr-threads N] [--raster-mode auto|all|off] [--keep-native-text] [--report PATH] [--draft PATH]"
+}
+
+if [[ ${1:-} == --help ]]; then
+    usage
+    exit 0
+fi
 if (( $# < 2 )); then
-  printf 'Usage: %s SOURCE.pdf OUTPUT.pdf [--pages 1,8,10] [--min-confidence 0.97] [--max-side 1600] [--ocr-threads 6] [--raster-mode auto|all|off] [--ocr-only] [--keep-native-text]\n' "$0" >&2
-  exit 2
+    usage >&2
+    exit 2
 fi
-SOURCE=$(realpath -- "$1")
-OUTPUT=$2
+source_pdf=$(realpath -e -- "$1")
+output_pdf=$(realpath -m -- "$2")
 shift 2
-PAGES=''
-CONFIDENCE=0.97
-SIDE=1600
-THREADS=''
-KEEP_NATIVE=0
-OCR_ONLY=0
-RASTER_MODE=auto
+
+ocr_only=0
+draft=''
+report=''
+args=()
 while (( $# )); do
-  case "$1" in
-    --pages) PAGES=$2; shift 2;;
-    --min-confidence) CONFIDENCE=$2; shift 2;;
-    --max-side) SIDE=$2; shift 2;;
-    --ocr-threads) THREADS=$2; shift 2;;
-    --raster-mode) RASTER_MODE=$2; shift 2;;
-    --keep-native-text) KEEP_NATIVE=1; shift;;
-    --ocr-only) OCR_ONLY=1; shift;;
-    *) printf 'Unknown option: %s\n' "$1" >&2; exit 2;;
-  esac
+    case "$1" in
+        --ocr-only) ocr_only=1; shift ;;
+        --keep-native-text|--no-residual-ocr|--no-recognition-cache)
+            args+=("$1"); shift ;;
+        --pages|--confidence|--max-side|--ocr-threads|--raster-mode|--dpi|--native-chunk|--max-native-source-pixels|--max-native-total-pixels|--max-native-sources|--max-native-extraction-pixels|--max-mosaic-group-pixels|--max-mosaic-page-pixels|--max-mosaic-groups|--max-mosaic-dpi|--report|--draft)
+            if (( $# < 2 )); then
+                printf 'Missing value for %s\n' "$1" >&2
+                exit 2
+            fi
+            case "$1" in
+                --report) report=$(realpath -m -- "$2") ;;
+                --draft) draft=$(realpath -m -- "$2") ;;
+                *) args+=("$1" "$2") ;;
+            esac
+            shift 2 ;;
+        *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
+    esac
 done
-if [[ "$SOURCE" == "$(realpath -m -- "$OUTPUT")" ]]; then
-  printf 'Output must not overwrite the source PDF\n' >&2; exit 2
+
+# Protect the original input even when the recognizer sees an optimized copy.
+targets=("$output_pdf")
+for path in "$draft" "$report"; do
+    if [[ -n "$path" ]]; then targets+=("$path"); fi
+done
+for ((i=0; i<${#targets[@]}; i++)); do
+    if [[ "${targets[i]}" == "$source_pdf" ]]; then
+        printf 'Output must not overwrite the source PDF: %s\n' "${targets[i]}" >&2
+        exit 2
+    fi
+    for ((j=0; j<i; j++)); do
+        if [[ "${targets[i]}" == "${targets[j]}" ]]; then
+            printf 'Outputs must be distinct: %s\n' "${targets[i]}" >&2
+            exit 2
+        fi
+    done
+done
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+optimizer="${PDF_REDOX_RELEASE_BIN_DIR:-$(dirname -- "$script_dir")/pdf-redox/target/release}/pdf-redox"
+recognizer="${PDF_REDOX_OCR_BIN:-$script_dir/rust/target/release/pdf-redox-ocr}"
+if [[ ! -x "$recognizer" ]]; then
+    printf 'Rust OCR executable not found: %s\nSet PDF_REDOX_OCR_BIN to a compiled executable.\n' "$recognizer" >&2
+    exit 2
 fi
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-# The Rust optimizer/importer is a sibling checkout. Override for other hosts.
-BASE="${PDF_REDOX_RELEASE_BIN_DIR:-$(dirname -- "$SCRIPT_DIR")/pdf-redox/target/release}"
-ADAPTER="$SCRIPT_DIR/raster_hybrid.py"
-SCRATCH=$(mktemp -d -p "${PDF_REDOX_WORK_DIR:-${TMPDIR:-/tmp}}" pdf-redox-ocr-XXXXXXXX)
-trap 'rm -rf -- "$SCRATCH"' EXIT
-INPUT_PDF="$SCRATCH/optimized.pdf"
-if [[ "$OCR_ONLY" == 1 ]]; then
-  INPUT_PDF="$SOURCE"
+if (( ! ocr_only )) && [[ ! -x "$optimizer" ]]; then
+    printf 'PDF optimizer executable not found: %s\nSet PDF_REDOX_RELEASE_BIN_DIR.\n' "$optimizer" >&2
+    exit 2
+fi
+
+scratch=$(mktemp -d -p "${PDF_REDOX_WORK_DIR:-${TMPDIR:-/tmp}}" pdf-redox-ocr-XXXXXXXX)
+trap 'rm -rf -- "$scratch"' EXIT
+input_pdf="$source_pdf"
+if (( ! ocr_only )); then
+    input_pdf="$scratch/optimized.pdf"
+    "$optimizer" "$source_pdf" --optimize-for processing -o "$input_pdf"
+fi
+if [[ -z "$draft" ]]; then
+    draft="$scratch/draft.json"
 else
-  "$BASE/pdf-redox" "$SOURCE" --optimize-for processing -o "$INPUT_PDF"
+    mkdir -p -- "$(dirname -- "$draft")"
 fi
-set -- --pdf "$INPUT_PDF" \
-  --output "$SCRATCH/draft.json" --max-side "$SIDE" --work-dir "$SCRATCH" --raster-mode "$RASTER_MODE"
-if [[ -n "$PAGES" ]]; then set -- "$@" --pages "$PAGES"; fi
-if [[ -n "$THREADS" ]]; then set -- "$@" --ocr-threads "$THREADS"; fi
-if [[ "$KEEP_NATIVE" == 1 ]]; then set -- "$@" --keep-native-text; fi
-uv run --python 3.12 "$ADAPTER" "$@"
-mkdir -p -- "$(dirname -- "$OUTPUT")"
-"$BASE/pdf-redox-ocr-overlay" "$INPUT_PDF" \
-  --ocr "$SCRATCH/draft.json" \
-  --apply-unreviewed --min-confidence "$CONFIDENCE" -o "$OUTPUT"
+mkdir -p -- "$(dirname -- "$output_pdf")"
+if [[ -n "$report" ]]; then
+    mkdir -p -- "$(dirname -- "$report")"
+    args+=(--report "$report")
+fi
+"$recognizer" --pdf "$input_pdf" --output "$draft" --output-pdf "$output_pdf" "${args[@]}"

@@ -1,6 +1,6 @@
 //! PDF-structure-aware Rust OCR with original vector page preservation.
 
-use std::{error::Error, path::PathBuf};
+use std::{error::Error, num::NonZeroUsize, path::PathBuf};
 
 use clap::Parser;
 use pdf_redox::{OcrDocument, OcrLine as PdfOcrLine, OcrOverlayOptions, OcrPage};
@@ -10,7 +10,7 @@ use pdf_redox_ocr::{
     inference::OcrInference,
     mosaic::MosaicBudget,
     native_images::NativeImageBudget,
-    pipeline::{PipelinePolicy, PipelineResult, PreparedOcr},
+    pipeline::{PipelinePolicy, PipelineResult, PreparedOcr, RasterMode},
     rasterize::{DEFAULT_PAGE_MAX_SIDE, RenderPolicy},
     recognition::RecognitionCacheBudget,
 };
@@ -55,6 +55,12 @@ struct Args {
     /// Diagnostic: disable job-local exact RGB recognition reuse.
     #[arg(long)]
     no_recognition_cache: bool,
+    /// Automatic, exhaustive bounded, or disabled native-raster recognition.
+    #[arg(long, value_enum, default_value = "auto")]
+    raster_mode: RasterMode,
+    /// ONNX intra-operation CPU thread count (default: backend policy).
+    #[arg(long)]
+    ocr_threads: Option<NonZeroUsize>,
     /// Maximum pixels allowed in a single decoded native-image OCR source.
     #[arg(long, default_value_t = 8_000_000)]
     max_native_source_pixels: u64,
@@ -83,6 +89,7 @@ struct Args {
 
 fn configured_policy(args: &Args) -> PipelinePolicy {
     PipelinePolicy {
+        raster_mode: args.raster_mode,
         source_budget: NativeImageBudget {
             max_source_pixels: args.max_native_source_pixels,
             max_total_pixels: args.max_native_total_pixels,
@@ -201,7 +208,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     }
     check_paths(&args.pdf, &paths)?;
     let job = PreparedOcr::open(&args.pdf, args.pages.as_deref(), configured_policy(args))?;
-    let engine = OcrInference::pp_ocrv6_small();
+    let engine = OcrInference::pp_ocrv6_small(args.ocr_threads);
     let result = job.recognize(&engine, |message| eprintln!("{message}"))?;
     write_outputs(args, job.original_bytes(), &result)
 }

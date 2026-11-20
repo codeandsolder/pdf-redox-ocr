@@ -373,3 +373,22 @@ ordinary page OCR without aborting the document.
 
 The complete parity gate is tracked in the Notion worklog:
 https://app.notion.com/p/41bf74be902081209382e49903e8f0ff
+
+
+## End-to-end runner
+
+The repository-root `run-auto.sh` invokes the compiled native OCR CLI and
+optionally the separate PDF optimizer. `--ocr-only` skips optimization.
+The runner accepts the native CLI's confidence, render and budget options and
+optional `--report` / `--draft` destinations. It does not build binaries
+implicitly. For a custom installation set `PDF_REDOX_OCR_BIN` and (when
+optimizing) `PDF_REDOX_RELEASE_BIN_DIR`.
+
+`--raster-mode auto` selects image-only and high-detail sources.
+`--raster-mode all` considers all independently safe source images subject
+to the same resource budgets and visibility/merge gates; fragment
+reconstruction remains enabled. `--raster-mode off` disables native-source
+and fragment inference, but preserves the native-text-only certificate.
+`--ocr-threads N` sets ONNX intra-operation threads and inter-operation
+threads to one (omitting it retains the backend's default policy).
+The explicit thread count appears in model provenance.

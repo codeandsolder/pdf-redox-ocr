@@ -12,7 +12,7 @@ use pdf_redox_ocr::{
     native_images::NativeImageBudget,
     paint_scan::enumerate_image_paints,
     pdf_metadata::PdfMetadata,
-    pipeline::{PipelinePolicy, PreparedOcr},
+    pipeline::{PipelinePolicy, PreparedOcr, RasterMode},
     rasterize::RenderPolicy,
     rasterize::render_rgb_page,
     recognition::{PixelLine, RecognitionBackend, RecognitionCacheBudget},
@@ -711,5 +711,102 @@ fn repeated_mosaics_reuse_inference_without_reusing_occurrence_geometry()
     assert_eq!(repeated.recognition.inference_calls, 2);
     assert_eq!(repeated.recognition.cache_hits, 2);
     assert_eq!(recognizer.calls.borrow().len(), 4);
+    Ok(())
+}
+
+#[test]
+fn explicit_raster_modes_preserve_visibility_and_route_contracts()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let pdf = dir.path().join("mixed.pdf");
+    fs::write(
+        &pdf,
+        include_bytes!("fixtures/repeated-nested-paint-occlusion.pdf"),
+    )?;
+    for mode in [RasterMode::Off, RasterMode::Auto, RasterMode::All] {
+        let recognizer = Recognizer::default();
+        let result = PreparedOcr::open(
+            &pdf,
+            Some("1"),
+            PipelinePolicy {
+                raster_mode: mode,
+                ..policy()
+            },
+        )?
+        .recognize(&recognizer, |_| {})?;
+        assert_eq!(result.stats.page_fallback_pages, 1);
+        if mode == RasterMode::Off {
+            assert_eq!(result.recognition.inference_calls, 1);
+            assert_eq!(result.stats.nonoverlapping_image_lines_added, 0);
+            assert_eq!(result.source_observations.len(), 0);
+            assert_eq!(result.visibility.proofs.len(), 0);
+        } else {
+            assert_eq!(result.recognition.inference_calls, 2);
+            assert_eq!(result.stats.nonoverlapping_image_lines_added, 1);
+            assert_eq!(result.visibility.proofs.len(), 1);
+        }
+    }
+    fs::write(&pdf, translated_mosaics_fixture())?;
+    let recognizer = Recognizer {
+        recognize_fallback: true,
+        ..Recognizer::default()
+    };
+    let result = PreparedOcr::open(
+        &pdf,
+        Some("1"),
+        PipelinePolicy {
+            raster_mode: RasterMode::Off,
+            ..policy()
+        },
+    )?
+    .recognize(&recognizer, |_| {})?;
+    assert_eq!(result.stats.image_source_only_pages, 0);
+    assert_eq!(result.stats.page_fallback_pages, 1);
+    assert_eq!(result.recognition.inference_calls, 1);
+    assert_eq!(recognizer.calls.borrow().as_slice(), &[(1600, 800)]);
+    Ok(())
+}
+
+#[test]
+fn all_mode_considers_low_gain_sources_and_off_retains_native_only_bypass()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let pdf = dir.path().join("low-gain.pdf");
+    let mut pixels = vec![255; 128 * 64];
+    for row in pixels.as_chunks_mut::<128>().0.iter_mut().skip(20).take(24) {
+        row[16..112].fill(0);
+    }
+    fs::write(&pdf,support::pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 256 200] /Resources << /XObject << /Im 5 0 R >> /Font << /F 6 0 R >> >> >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Contents 8 0 R >>".to_vec(),
+        support::stream("/Type /XObject /Subtype /Image /Width 128 /Height 64 /BitsPerComponent 8 /ColorSpace /DeviceGray",&pixels),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        support::stream("",b"q 128 0 0 64 32 64 cm /Im Do Q 0 g 20 20 30 10 re f"),
+        support::stream("",b"BT /F 12 Tf 20 150 Td (Native words) Tj ET"),
+    ]))?;
+    for mode in [RasterMode::Off, RasterMode::Auto, RasterMode::All] {
+        let recognizer = Recognizer::default();
+        let result = PreparedOcr::open(
+            &pdf,
+            None,
+            PipelinePolicy {
+                raster_mode: mode,
+                render: RenderPolicy {
+                    max_side: 256,
+                    dpi: 72,
+                },
+                ..policy()
+            },
+        )?
+        .recognize(&recognizer, |_| {})?;
+        assert_eq!(result.stats.native_only_pages, 1);
+        assert_eq!(result.stats.page_fallback_pages, 1);
+        assert_eq!(result.draft.pages[1].native_text_regions.len(), 2);
+        let expected = usize::from(mode == RasterMode::All);
+        assert_eq!(result.source_observations.len(), expected);
+        assert_eq!(result.recognition.inference_calls, 1 + expected);
+    }
     Ok(())
 }
