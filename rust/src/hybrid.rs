@@ -158,6 +158,10 @@ pub struct MergeStats {
     pub raster_candidates_kept_in_audit_only: usize,
 }
 
+/// Index by exact page, source object, paint invocation, and Unicode text.
+/// Geometry remains a second-stage match to preserve fractional-pixel proofs.
+type ProofIndex<'a> = BTreeMap<(u32, &'a str, u32, &'a str), Vec<&'a VisibilityProof>>;
+
 fn proof_geometry_matches(first: &Quad, second: &Quad) -> bool {
     first.iter().zip(second).all(|(a, b)| {
         ((a.0 * 10_000.0).round_ties_even() - (b.0 * 10_000.0).round_ties_even()).abs() < 1e-9
@@ -174,6 +178,52 @@ fn proof_matches(image: &ImageObservation, proof: &VisibilityProof) -> bool {
         && proof.paint_index == image.paint_index
         && proof.text == image.line.text
         && proof_geometry_matches(&proof.quad, &image.line.quad)
+}
+
+/// Original candidate order is preserved within each page.
+type ObservationIndex<'a> = BTreeMap<PageNumber, Vec<&'a ImageObservation>>;
+
+/// Validate admission evidence once and construct narrow lookups for merging.
+fn index_merge_evidence<'a>(
+    observations: &'a [ImageObservation],
+    visibility_proofs: &'a [VisibilityProof],
+    selected_pages: &BTreeSet<PageNumber>,
+) -> Result<(ObservationIndex<'a>, ProofIndex<'a>), Error> {
+    let mut observations_by_page = ObservationIndex::new();
+    for image in observations {
+        let page = PageNumber::new(image.page)?;
+        if !selected_pages.contains(&page) {
+            return Err(Error::Invalid(
+                "image observation for unselected page".into(),
+            ));
+        }
+        if image.source_id.is_empty() {
+            return Err(Error::Invalid(
+                "image observation missing source identity".into(),
+            ));
+        }
+        observations_by_page.entry(page).or_default().push(image);
+    }
+    let mut proofs = ProofIndex::new();
+    for proof in visibility_proofs {
+        if !selected_pages.contains(&PageNumber::new(proof.page)?) || proof.source_id.is_empty() {
+            return Err(Error::Invalid(
+                "visibility proof has invalid page or source identity".into(),
+            ));
+        }
+        if proof.visible {
+            proofs
+                .entry((
+                    proof.page,
+                    proof.source_id.as_str(),
+                    proof.paint_index,
+                    proof.text.as_str(),
+                ))
+                .or_default()
+                .push(proof);
+        }
+    }
+    Ok((observations_by_page, proofs))
 }
 
 /// Exact inputs and source-specific provenance for one hybrid OCR merge.
@@ -253,25 +303,8 @@ pub fn merge_ocr(
             "raster/page fallback coverage incomplete".into(),
         ));
     }
-    for image in image_observations {
-        if !selected_pages.contains(&PageNumber::new(image.page)?) {
-            return Err(Error::Invalid(
-                "image observation for unselected page".into(),
-            ));
-        }
-        if image.source_id.is_empty() {
-            return Err(Error::Invalid(
-                "image observation missing source identity".into(),
-            ));
-        }
-    }
-    for proof in input.visibility_proofs {
-        if !selected_pages.contains(&PageNumber::new(proof.page)?) || proof.source_id.is_empty() {
-            return Err(Error::Invalid(
-                "visibility proof has invalid page or source identity".into(),
-            ));
-        }
-    }
+    let (observations_by_page, proofs) =
+        index_merge_evidence(image_observations, input.visibility_proofs, &selected_pages)?;
     let mut merged_pages = Vec::with_capacity(selected.len());
     let mut stats = MergeStats::default();
     let mut proposals = Vec::new();
@@ -293,8 +326,13 @@ pub fn merge_ocr(
                 "inconsistent source native text coordinates".into(),
             ));
         }
-        let (output_page, page_stats, page_proposals) =
-            merge_fallback_page(&input, *page, baseline_page);
+        let (output_page, page_stats, page_proposals) = merge_fallback_page(
+            &input,
+            *page,
+            baseline_page,
+            observations_by_page.get(page).map_or(&[], Vec::as_slice),
+            &proofs,
+        );
         stats.page_fallback_pages += 1;
         stats.original_page_lines += page_stats.original_page_lines;
         stats.nonoverlapping_image_lines_added += page_stats.nonoverlapping_image_lines_added;
@@ -318,6 +356,8 @@ fn merge_fallback_page(
     input: &MergeInput<'_>,
     page: PageNumber,
     baseline_page: &DraftPage,
+    observations: &[&ImageObservation],
+    proofs: &ProofIndex<'_>,
 ) -> (DraftPage, MergeStats, Vec<MergeProposal>) {
     let mut output_page = (*baseline_page).clone();
     let mut stats = MergeStats {
@@ -325,11 +365,7 @@ fn merge_fallback_page(
         ..MergeStats::default()
     };
     let mut proposals = Vec::new();
-    for image in input
-        .image_observations
-        .iter()
-        .filter(|image| image.page == page.get())
-    {
+    for &image in observations {
         // Include lines already admitted from other native-image paints:
         // two individually visible sources can still overlap at page level.
         let page_overlap = output_page
@@ -343,10 +379,16 @@ fn merge_fallback_page(
             .map(|quad| overlap_fraction(&image.line.quad, quad))
             .fold(0.0_f64, f64::max);
         let visible = input.proven_pages.contains(&page)
-            && input
-                .visibility_proofs
-                .iter()
-                .any(|proof| proof_matches(image, proof));
+            && proofs
+                .get(&(
+                    image.page,
+                    image.source_id.as_str(),
+                    image.paint_index,
+                    image.line.text.as_str(),
+                ))
+                .is_some_and(|candidates| {
+                    candidates.iter().any(|proof| proof_matches(image, proof))
+                });
         let eligible = visible
             && page_overlap < 0.30
             && native_overlap < 0.20
@@ -648,6 +690,20 @@ mod tests {
         assert_eq!(unchanged.pages[1].lines.len(), 1);
         assert_eq!(stats.nonoverlapping_image_lines_added, 0);
         assert!(!audit[0].verified_visible_source);
+
+        let mut wrong_geometry = proof.clone();
+        wrong_geometry.quad[0].0 += 0.001;
+        let mut wrong_text = proof.clone();
+        wrong_text.text.push('!');
+        let mut invisible = proof.clone();
+        invisible.visible = false;
+        for rejected_proof in [wrong_geometry, wrong_text, invisible] {
+            let (rejected, stats, audit) =
+                check(std::slice::from_ref(&original), &[rejected_proof])?;
+            assert_eq!(rejected.pages[1].lines.len(), 1);
+            assert_eq!(stats.nonoverlapping_image_lines_added, 0);
+            assert!(!audit[0].verified_visible_source);
+        }
 
         let (accepted, stats, audit) = check(&[original], &[proof])?;
         assert_eq!(accepted.pages[1].lines.len(), 2);
