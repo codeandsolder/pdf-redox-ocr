@@ -518,61 +518,52 @@ mod tests {
     }
 
     #[test]
-    fn vertical_crop_uses_same_reading_direction_and_restores_detector_corners() {
+    fn rotated_crop_preserves_reading_direction_and_detector_corners() {
         let (image, line) = sample();
-        let rotated = image::imageops::rotate90(&image);
-        let mut original = line;
-        original.quad = original
-            .quad
-            .map(|Point(x, y)| Point(f64::from(image.height()) - y, x));
-        original.quad.rotate_left(1);
-        let mut lines = vec![original.clone()];
-        let report = repair_crops(&rotated, &mut lines, &BTreeSet::new(), LEADERS, |quads| {
-            assert_eq!(quads.len(), 1);
-            assert!(quads[0].quad[0].1 > 74.0 && quads[0].quad[0].1 < 88.0);
-            assert_eq!(quads[0].quad[2], original.quad[2]);
-            assert_eq!(quads[0].quad[3], original.quad[3]);
-            Ok(vec![BodyPrediction {
-                text: "A.B".into(),
-                confidence: 0.99,
-            }])
-        });
-        assert_eq!(report.repairs.len(), 1);
-        assert!(report.repairs[0].outcome.accepted());
-        assert_eq!(lines[0].text, "A.B");
-    }
-
-    #[test]
-    fn half_turn_preserves_reading_edge_and_detector_corners() {
-        let (image, line) = sample();
-        let rotated = image::imageops::rotate180(&image);
-        let mut original = line;
-        original.quad = original
-            .quad
-            .map(|Point(x, y)| Point(f64::from(image.width()) - x, f64::from(image.height()) - y));
-        original.quad.rotate_left(2);
-        let mut lines = vec![original.clone()];
-        let report = repair_crops(
-            &rotated,
-            &mut lines,
-            &BTreeSet::from([0]),
-            LEADERS,
-            |crops| {
+        for half_turn in [false, true] {
+            let mut original = line.clone();
+            let (rotated, turns, axis, interval, unchanged) = if half_turn {
+                original.quad = original.quad.map(|Point(x, y)| {
+                    Point(f64::from(image.width()) - x, f64::from(image.height()) - y)
+                });
+                (
+                    image::imageops::rotate180(&image),
+                    2,
+                    0,
+                    152.0..166.0,
+                    [1, 2],
+                )
+            } else {
+                original.quad = original
+                    .quad
+                    .map(|Point(x, y)| Point(f64::from(image.height()) - y, x));
+                (image::imageops::rotate90(&image), 1, 1, 74.0..88.0, [2, 3])
+            };
+            original.quad.rotate_left(turns);
+            let mut lines = vec![original.clone()];
+            let half_turns = if half_turn {
+                BTreeSet::from([0])
+            } else {
+                BTreeSet::new()
+            };
+            let report = repair_crops(&rotated, &mut lines, &half_turns, LEADERS, |crops| {
                 assert_eq!(crops.len(), 1);
-                assert!(crops[0].rotate180);
-                assert!(crops[0].quad[0].0 > 152. && crops[0].quad[0].0 < 166.);
-                assert_eq!(crops[0].quad[1], original.quad[1]);
-                assert_eq!(crops[0].quad[2], original.quad[2]);
+                assert_eq!(crops[0].rotate180, half_turn);
+                let Point(x, y) = crops[0].quad[0];
+                assert!(interval.contains(&[x, y][axis]));
+                for corner in unchanged {
+                    assert_eq!(crops[0].quad[corner], original.quad[corner]);
+                }
                 Ok(vec![BodyPrediction {
                     text: "A.B".into(),
                     confidence: 0.99,
                 }])
-            },
-        );
-        assert_eq!(report.repairs.len(), 1);
-        assert!(report.repairs[0].outcome.accepted());
-        assert!(report.repairs[0].rotate180);
-        assert_eq!(lines[0].text, "A.B");
+            });
+            assert_eq!(report.repairs.len(), 1);
+            assert!(report.repairs[0].outcome.accepted());
+            assert_eq!(report.repairs[0].rotate180, half_turn);
+            assert_eq!(lines[0].text, "A.B");
+        }
     }
 
     #[test]
