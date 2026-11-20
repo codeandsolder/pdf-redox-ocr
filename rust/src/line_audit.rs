@@ -16,6 +16,7 @@ use crate::{
     geometry::{DisplayMapper, PageBox, Point, Quad},
     glyph_isolation::{InkBand, InkGroup, InkIsolation, InkRun, isolate_ink},
     ink_polarity::{Polarity, PolarityEvidence, estimate},
+    layout_leaders::{LeaderEvidence, detect_leaders},
     pdf_metadata::PdfMetadata,
     pixel_regions::{InkBounds, PixelRegion},
     rasterize::{render_rgb_region, sample_whitened},
@@ -297,6 +298,14 @@ pub struct MappedInkBand {
     pub column_runs: Vec<MappedSupportedRun>,
 }
 
+/// Geometry-only layout evidence; the source observations remain unchanged.
+#[derive(Debug, Serialize)]
+pub struct MappedLeader {
+    #[serde(flatten)]
+    pub evidence: LeaderEvidence,
+    pub body_quad: Quad,
+}
+
 /// Audit an original OCR observation without assigning text to individual ink groups.
 #[derive(Debug, Serialize)]
 pub struct AuditedLine {
@@ -317,6 +326,7 @@ pub struct AuditedLine {
     pub components: Vec<MappedComponent>,
     pub supported_runs: Vec<MappedSupportedRun>,
     pub supported_bands: Vec<MappedInkBand>,
+    pub leaders: Vec<MappedLeader>,
 }
 
 /// Provenance-bound geometric evidence, not an OCR replacement draft.
@@ -399,6 +409,13 @@ fn audit_line(
             group,
         })
         .collect();
+    let leaders = detect_leaders(&components, observation)
+        .into_iter()
+        .map(|evidence| MappedLeader {
+            body_quad: window.quad(frame, evidence.body),
+            evidence,
+        })
+        .collect();
     let components = components
         .into_iter()
         .map(|component| MappedComponent {
@@ -435,6 +452,7 @@ fn audit_line(
         components,
         supported_runs,
         supported_bands,
+        leaders,
     })
 }
 
@@ -494,7 +512,7 @@ pub fn audit_lines(
         ));
     }
     Ok(LineAuditReport {
-        schema_version: 4,
+        schema_version: 5,
         pdf_sha256: draft.pdf_sha256.clone(),
         draft_model: draft.model.clone(),
         dpi: policy.dpi,

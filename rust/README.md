@@ -408,3 +408,17 @@ separately, with original line indices, text, confidence and geometry.
 Native exclusion counts and ordered coordinate differences are recorded.
 Threshold-qualified counts include reviewed lines, but do not claim final
 overlay admission. This is a disagreement report, not ground-truth accuracy.
+
+
+### Dotted layout leader evidence
+
+Line audit schema 5 includes a `leaders` array for each original source
+observation. The detector operates on actual native-resolution connected
+components in the rectified padded line frame. It requires at least five
+near-square, similarly sized, regularly spaced dots with at least two full
+dots beyond the observation edge and genuine larger body ink inside it.
+The proposed body crop preserves every other supported component; the
+original observation, text, confidence and source PDF are never changed.
+Use sufficient padding (e.g. 120–160 pixels at 600 DPI) so the actual leader
+continuation is visible. This is diagnostic geometry, not automatic text
+normalization or importer authorization.
