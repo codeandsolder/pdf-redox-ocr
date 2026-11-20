@@ -421,7 +421,13 @@ mod support;
 /// searchable text. The source is recognized once across both pages.
 fn selective_fixture() -> Vec<u8> {
     let mut samples = vec![255; 600 * 200];
-    for row in samples.chunks_exact_mut(600).skip(80).take(40) {
+    for row in samples
+        .as_chunks_mut::<600>()
+        .0
+        .iter_mut()
+        .skip(80)
+        .take(40)
+    {
         row[70..230].fill(0);
         row[370..530].fill(0);
     }
@@ -443,7 +449,7 @@ struct SelectiveRecognizer {
 }
 
 impl RecognitionBackend for SelectiveRecognizer {
-    fn model_profile(&self) -> &str {
+    fn model_profile(&self) -> &'static str {
         "selective fixture"
     }
 
