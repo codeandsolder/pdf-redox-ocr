@@ -570,3 +570,13 @@ Audit pixel work is bounded to 16M sampled crop pixels per raster; skipped
 or invalid observations are counted. Cache hits reuse the same original
 raster audit, and enabling the diagnostic requires an explicit audit output.
 Existing geometry-supported crop repairs remain independent.
+
+
+Manual-reference files remain separate by selection: the original Walsin
+p5 technical/graph sample has ten entries; the new
+`tests/fixtures/quality/walsin-taping-groundtruth.json` has three
+visually verified p3 taping-specification entries. The latter exposes six
+diameter-symbol errors on the current draft (five Ø/0, one Ø/∅). It is a
+purposefully selected diagnostic, not a population error estimate. The
+slashed-circle glyph is transcribed as Ø according to the established
+reference convention; rendered shape alone cannot prove original Unicode.

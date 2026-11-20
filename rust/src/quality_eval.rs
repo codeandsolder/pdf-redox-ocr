@@ -553,6 +553,17 @@ mod tests {
         ))?;
         assert_eq!(defond.samples.len(), 86);
         assert_eq!(walsin.samples.len(), 10);
+        let taping: GroundTruth = serde_json::from_str(include_str!(
+            "../tests/fixtures/quality/walsin-taping-groundtruth.json"
+        ))?;
+        assert_eq!(taping.samples.len(), 3);
+        assert_eq!(taping.source_pdf_sha256, walsin.source_pdf_sha256);
+        assert!(
+            taping
+                .samples
+                .iter()
+                .all(|sample| sample.page == 3 && sample.text.matches('Ø').count() == 2)
+        );
         assert_ne!(defond.source_pdf_sha256, walsin.source_pdf_sha256);
         assert_eq!(defond.coordinate_system, "PDF user space");
         assert_eq!(walsin.coordinate_system, "PDF user space");

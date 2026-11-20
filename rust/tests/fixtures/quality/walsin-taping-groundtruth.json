@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "source_pdf_sha256": "321bf036eb8ec137b7f695489edcd8f7ded0bf29f94ff80e9d56f0f149186bee",
+  "provenance": "Manual transcription of three Walsin p3 taping-specification entries inspected as 600 DPI source crops on 2026-11-20. Slashed-circle diameter glyph transcribed as Ø, consistently with the DEFOND reference. OCR geometry used only for locating the visually verified lines. This is a targeted sample, not a representative corpus.",
+  "coordinate_system": "PDF user space",
+  "samples": [
+    {
+      "page": 3,
+      "center": [
+        133.82,
+        389.42
+      ],
+      "text": "Taping Specifications - 5Ø and 7Ø",
+      "kind": "technical_diameter"
+    },
+    {
+      "page": 3,
+      "center": [
+        139.87,
+        361.53
+      ],
+      "text": "Taping Specifications - 10Ø and 14Ø",
+      "kind": "technical_diameter"
+    },
+    {
+      "page": 3,
+      "center": [
+        140.0,
+        333.77
+      ],
+      "text": "Taping Specifications - 18Ø and 20Ø",
+      "kind": "technical_diameter"
+    }
+  ]
+}
