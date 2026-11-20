@@ -46,6 +46,9 @@ struct Args {
     /// Optional SHA-bound JSON audit of source recognition, paint proofs and routing.
     #[arg(long)]
     report: Option<PathBuf>,
+    /// Include actual CTC positions and independent source ink group evidence.
+    #[arg(long, requires = "report")]
+    character_audit: bool,
     /// Explicit new directory for lossless ordinary/treated residual raster captures.
     #[arg(long)]
     capture_residual_dir: Option<PathBuf>,
@@ -328,6 +331,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
             boundaries: args.recognition.boundary_repair,
             minimum_confidence: args.confidence.max(0.97),
         },
+        args.character_audit,
     );
     let result = job.recognize(
         &engine,

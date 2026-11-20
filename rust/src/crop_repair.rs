@@ -544,7 +544,11 @@ mod tests {
                         confidence: 0.99,
                     }])
                 });
-                Ok(RasterRecognition { lines, crop_repair })
+                Ok(RasterRecognition {
+                    lines,
+                    crop_repair,
+                    ..RasterRecognition::default()
+                })
             }
         }
         let (image, original) = sample();

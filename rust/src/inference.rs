@@ -25,7 +25,7 @@ use oar_ocr::{
             TextDetectionAdapter, TextDetectionAdapterBuilder, TextRecognitionAdapter,
             TextRecognitionAdapterBuilder,
         },
-        tasks::{TextDetectionConfig, TextRecognitionConfig},
+        tasks::{TextDetectionConfig, TextRecognitionConfig, TextRecognitionOutput},
     },
     download::resolve_path,
     oarocr::{EdgeProcessor, TextCroppingProcessor},
@@ -35,6 +35,7 @@ use oar_ocr::{
 
 use crate::{
     Error,
+    character_alignment::{BatchGeometry, CharacterAuditReport, INPUT_SHAPE, MAX_INPUT_WIDTH},
     crop_repair::{BodyPrediction, RepairPolicy, RepairReport, repair_crops},
     geometry::{Point, Quad},
     recognition::{PixelLine, RasterRecognition, RecognitionBackend},
@@ -50,6 +51,7 @@ pub struct OcrInference {
     backend: OnceLock<Result<OcrModels, String>>,
     threads: Option<NonZeroUsize>,
     repair: RepairPolicy,
+    character_audit: bool,
     profile: String,
 }
 
@@ -102,7 +104,7 @@ impl PrimaryCrop {
 }
 
 impl OcrModels {
-    fn load(threads: Option<NonZeroUsize>) -> Result<Self, Error> {
+    fn load(threads: Option<NonZeroUsize>, character_audit: bool) -> Result<Self, Error> {
         let dictionary = std::fs::read_to_string(
             resolve_path(DICTIONARY).map_err(|error| inference_error(&error))?,
         )?;
@@ -110,6 +112,9 @@ impl OcrModels {
         let rec_path = resolve_path(RECOGNITION_MODEL).map_err(|error| inference_error(&error))?;
         let mut detection = TextDetectionAdapterBuilder::new().with_config(small_detector_config());
         let mut recognition = TextRecognitionAdapterBuilder::new()
+            .model_input_shape(INPUT_SHAPE)
+            .max_img_w(MAX_INPUT_WIDTH)
+            .return_word_box(character_audit)
             .character_dict(dictionary.lines().map(str::to_owned).collect());
         if let Some(threads) = threads {
             let config = OrtSessionConfig::new()
@@ -133,7 +138,7 @@ impl OcrModels {
         &self,
         images: Vec<Arc<RgbImage>>,
         config: Option<&TextRecognitionConfig>,
-    ) -> Result<Vec<BodyPrediction>, Error> {
+    ) -> Result<TextRecognitionOutput, Error> {
         let count = images.len();
         let prediction = self
             .recognition
@@ -144,15 +149,7 @@ impl OcrModels {
                 "recognizer returned inconsistent batch dimensions".into(),
             ));
         }
-        Ok(prediction
-            .texts
-            .into_iter()
-            .zip(prediction.scores)
-            .map(|(text, confidence)| BodyPrediction {
-                text,
-                confidence: f64::from(confidence),
-            })
-            .collect())
+        Ok(prediction)
     }
 
     fn primary_crops(&self, image: &Arc<RgbImage>) -> Result<(usize, Vec<PrimaryCrop>), Error> {
@@ -192,10 +189,15 @@ impl OcrModels {
         Ok((count, crops))
     }
 
-    fn recognize_primary(&self, image: &Arc<RgbImage>) -> Result<Vec<PixelLine>, Error> {
+    fn recognize_primary(
+        &self,
+        image: &Arc<RgbImage>,
+        character_audit: bool,
+    ) -> Result<(Vec<PixelLine>, CharacterAuditReport), Error> {
         let (width, height) = (f64::from(image.width()), f64::from(image.height()));
         let (count, crops) = self.primary_crops(image)?;
         let mut ordered = vec![None; count];
+        let mut audit = CharacterAuditReport::default();
         let mut crops = crops.into_iter();
         loop {
             let (descriptors, images): (Vec<_>, Vec<_>) = crops
@@ -206,19 +208,55 @@ impl OcrModels {
             if descriptors.is_empty() {
                 break;
             }
+            let geometry = if character_audit {
+                Some(BatchGeometry::new(
+                    images
+                        .iter()
+                        .map(|image: &Arc<RgbImage>| image.dimensions()),
+                )?)
+            } else {
+                None
+            };
+            let retained = if character_audit {
+                images.clone()
+            } else {
+                Vec::new()
+            };
             let predictions = self.predict_crops(images, None)?;
-            for ((index, bbox), prediction) in descriptors.into_iter().zip(predictions) {
-                if !prediction.text.trim().is_empty() {
+            // The adapter preserves batch positions including empty/filtered
+            // observations. Keep original detection indices until the scatter.
+            for (batch_index, ((index, bbox), (text, confidence))) in descriptors
+                .into_iter()
+                .zip(predictions.texts.into_iter().zip(predictions.scores))
+                .enumerate()
+            {
+                if !text.trim().is_empty() {
                     let quad = image_polygon_to_quad(&bbox.points, width, height)?;
-                    ordered[index] = Some(PixelLine {
-                        text: prediction.text,
-                        confidence: prediction.confidence,
+                    let line = PixelLine {
+                        text,
+                        confidence: f64::from(confidence),
                         quad,
-                    });
+                    };
+                    if let Some(batch) = geometry {
+                        let columns = predictions
+                            .char_col_indices
+                            .get(batch_index)
+                            .map_or(&[][..], Vec::as_slice);
+                        let length = predictions
+                            .sequence_lengths
+                            .get(batch_index)
+                            .copied()
+                            .unwrap_or_default();
+                        audit.observe(index, &line, &retained[batch_index], batch, columns, length);
+                    }
+                    ordered[index] = Some(line);
                 }
             }
         }
-        Ok(ordered.into_iter().flatten().collect())
+        audit
+            .lines
+            .sort_unstable_by_key(|entry| entry.detection_index);
+        Ok((ordered.into_iter().flatten().collect(), audit))
     }
 
     fn recognize_bodies(
@@ -244,12 +282,21 @@ impl OcrModels {
             ));
         }
         // Keep all real hypotheses in the audit, including low scores.
-        self.predict_crops(
+        let output = self.predict_crops(
             crops,
             Some(&TextRecognitionConfig {
                 score_threshold: 0.0,
             }),
-        )
+        )?;
+        Ok(output
+            .texts
+            .into_iter()
+            .zip(output.scores)
+            .map(|(text, confidence)| BodyPrediction {
+                text,
+                confidence: f64::from(confidence),
+            })
+            .collect())
     }
 }
 
@@ -261,7 +308,11 @@ impl OcrInference {
     /// Resolve and load models only on the first recognition. A native-only
     /// document needs no model or ONNX session.
     #[must_use]
-    pub fn pp_ocrv6_small(threads: Option<NonZeroUsize>, repair: RepairPolicy) -> Self {
+    pub fn pp_ocrv6_small(
+        threads: Option<NonZeroUsize>,
+        repair: RepairPolicy,
+        character_audit: bool,
+    ) -> Self {
         let profile = threads.map_or_else(
             || Self::MODEL_PROFILE.to_owned(),
             |count| format!("{} CPU threads={count}", Self::MODEL_PROFILE),
@@ -274,13 +325,17 @@ impl OcrInference {
             backend: OnceLock::new(),
             threads,
             repair,
+            character_audit,
             profile,
         }
     }
 
     fn backend(&self) -> Result<&OcrModels, Error> {
         self.backend
-            .get_or_init(|| OcrModels::load(self.threads).map_err(|error| error.to_string()))
+            .get_or_init(|| {
+                OcrModels::load(self.threads, self.character_audit)
+                    .map_err(|error| error.to_string())
+            })
             .as_ref()
             .map_err(|error| Error::Inference(error.clone()))
     }
@@ -298,7 +353,7 @@ impl RecognitionBackend for OcrInference {
     fn recognize_pixels(&self, rgb: RgbImage) -> Result<RasterRecognition, Error> {
         let rgb = Arc::new(rgb);
         let backend = self.backend()?;
-        let mut lines = backend.recognize_primary(&rgb)?;
+        let (mut lines, character_audit) = backend.recognize_primary(&rgb, self.character_audit)?;
         let crop_repair = if self.repair.leaders || self.repair.boundaries {
             repair_crops(&rgb, &mut lines, self.repair, |quads| {
                 backend.recognize_bodies(&rgb, quads)
@@ -306,7 +361,11 @@ impl RecognitionBackend for OcrInference {
         } else {
             RepairReport::default()
         };
-        Ok(RasterRecognition { lines, crop_repair })
+        Ok(RasterRecognition {
+            lines,
+            crop_repair,
+            character_audit,
+        })
     }
 }
 

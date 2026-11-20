@@ -5,6 +5,7 @@
 
 pub mod artifacts;
 pub mod boundary_ink;
+pub mod character_alignment;
 pub mod crop_repair;
 mod disjoint_set;
 pub mod draft;

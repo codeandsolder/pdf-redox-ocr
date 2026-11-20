@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Error,
+    character_alignment::CharacterAuditReport,
     crop_repair::{CropReason, CropRepair, RepairReport},
     draft::OcrLine,
     geometry::{DisplayMapper, Point, Quad},
@@ -41,6 +42,7 @@ impl PixelLine {
 pub struct RasterRecognition {
     pub lines: Vec<PixelLine>,
     pub crop_repair: RepairReport,
+    pub character_audit: CharacterAuditReport,
 }
 
 impl From<Vec<PixelLine>> for RasterRecognition {
@@ -48,6 +50,7 @@ impl From<Vec<PixelLine>> for RasterRecognition {
         Self {
             lines,
             crop_repair: RepairReport::default(),
+            character_audit: CharacterAuditReport::default(),
         }
     }
 }
@@ -60,6 +63,15 @@ pub struct RasterRepairAudit {
     pub rgb_sha256: String,
     pub batches: usize,
     pub repairs: Vec<CropRepair>,
+}
+
+/// Position evidence from the actual primary crops of one unique RGB raster.
+/// The original detector index may differ from the final draft line index.
+#[derive(Debug, serde::Serialize)]
+pub struct RasterCharacterAudit {
+    pub dimensions: (u32, u32),
+    pub rgb_sha256: String,
+    pub report: CharacterAuditReport,
 }
 
 /// A reusable recognizer whose result depends only on the input RGB raster.
@@ -154,6 +166,7 @@ pub struct RecognitionSession<'a, B> {
     entries: VecDeque<CacheEntry>,
     stats: RecognitionStats,
     repair_audits: Vec<RasterRepairAudit>,
+    character_audits: Vec<RasterCharacterAudit>,
 }
 
 impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
@@ -164,6 +177,7 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
             budget,
             entries: VecDeque::new(),
             repair_audits: Vec::new(),
+            character_audits: Vec::new(),
             stats: RecognitionStats {
                 inference_calls: 0,
                 cache_hits: 0,
@@ -187,6 +201,20 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
     /// Finish collecting evidence without retaining input raster buffers.
     pub fn take_repair_audits(&mut self) -> Vec<RasterRepairAudit> {
         std::mem::take(&mut self.repair_audits)
+    }
+
+    pub fn take_character_audits(&mut self) -> Vec<RasterCharacterAudit> {
+        std::mem::take(&mut self.character_audits)
+    }
+
+    fn record_characters(&mut self, key: RasterKey, report: CharacterAuditReport) {
+        if !report.lines.is_empty() || report.skipped_budget > 0 || report.invalid_metadata > 0 {
+            self.character_audits.push(RasterCharacterAudit {
+                dimensions: key.dimensions,
+                rgb_sha256: hex::encode(key.digest),
+                report,
+            });
+        }
     }
 
     fn record_repairs(&mut self, key: RasterKey, report: RepairReport) -> bool {
@@ -262,7 +290,12 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
             return Ok(result);
         }
         self.stats.inference_calls += 1;
-        let RasterRecognition { lines, crop_repair } = self.backend.recognize_pixels(rgb)?;
+        let RasterRecognition {
+            lines,
+            crop_repair,
+            character_audit,
+        } = self.backend.recognize_pixels(rgb)?;
+        self.record_characters(key, character_audit);
         let complete = self.record_repairs(key, crop_repair);
         if self.budget.enabled() && complete {
             self.remember(key, &lines);

@@ -139,7 +139,7 @@ raster dimensions. The default LRU budget retains at most 256 entries and
 inferences are never cached. `--no-recognition-cache` disables lookup and
 retention for diagnostic comparison, and `PipelineResult.recognition`
 reports full-raster calls, cache hits, evictions, retained payload and additional crop batches, with separate leader and boundary candidate outcomes.
-The optional `--report audit.json` writes a separate schema-6 diagnostic
+The optional `--report audit.json` writes a separate schema-7 diagnostic
 report bound to the original PDF digest and model provenance. It includes
 the validated policy, raw native-image observations in source-pixel
 coordinates, original paint paths and native-only blockers, the per-page
@@ -401,7 +401,7 @@ At least one draft, searchable PDF or audit must be requested.
 Retaining a draft with processing requires `--optimized-pdf`, because
 its SHA and user-space geometry bind to the exact prepared PDF, not the
 original source. The optimizer report and actual configuration are recorded
-under `preparation` in schema-6 CLI audits, alongside both input hashes;
+under `preparation` in schema-7 CLI audits, alongside both input hashes;
 the existing `pdf_sha256` refers to the OCR input. Reverify the original
 and prepared source hashes before applying or publishing results.
 Processing is intentionally not lossless in every case (microstroke
@@ -489,7 +489,7 @@ retained, not invented. Failed or conflicting crops leave original
 observations unchanged. Failed repair attempts prevent caching the incomplete
 raster result; successful exact RGB reuse includes the confirmed repairs.
 
-Pipeline audit schema 6 records original pixel-space observations, sample
+Pipeline audit schema 7 records original pixel-space observations, sample
 frame, component bounds, typed crop reason, proposed quad and each actual
 prediction/decision by exact RGB SHA-256 and dimensions. Full-raster inference
 calls remain separate from recognition-only batch counters. Disable the stage
@@ -519,7 +519,7 @@ substitutions are encoded. Accepted crop geometry and model confidence
 replace the original; failures prevent exact-RGB result caching. The
 experimental flag is off by default until broader representative validation.
 All repair kinds share a 2M-pixel per-window and 16M-pixel per-raster sampling
-budget, prioritizing terminal-leader candidates, and schema-6 `crop_repairs` records the original prediction,
+budget, prioritizing terminal-leader candidates, and schema-7 `crop_repairs` records the original prediction,
 actual geometry, type-specific evidence and independent prediction/outcome.
 `recognition.crop_batches` counts actual recognition-only batches (leader and boundary batches are separate to preserve existing leader inference ordering);
 leader/boundary candidate/accepted counters are independent.
@@ -529,3 +529,44 @@ final 度 starts the next line, which OCR had already recognized correctly.
 The real p8 errors were the missing asterisk before "Optional mark :" and
 period after "(See Table A)". Both can be recovered by source-supported
 crop extension rather than dictionary corrections.
+
+
+### Character-position and source-ink audit
+
+Add `--character-audit --report audit.json` to collect the recognizer's
+actual CTC emission columns on its original rectified crops. This is
+diagnostic only and never replaces text, geometry or confidence. The OAR
+adapter exposes these positions when word-box reporting is enabled;
+no second model, additional recognition pass, or PDF rendering is needed.
+The decoder normalizes against the **batch tensor width**, which includes
+right padding. Recover per-crop pixel positions with the pinned adapter's
+base-width minimum, height-48 ceil-resizing, batch-width truncation and
+3200-pixel width cap. A timestep is represented by its column center,
+not an exact glyph center; emissions in padding remain unclamped and
+receive no candidate glyphs.
+
+The same crop pixels are independently segmented into connected ink and
+column projections, with light/dark polarity estimation and enclosed-hole
+topology at three thresholds. Neighboring nonspace CTC peaks define
+approximate reading-axis cells; each anchor records all intersecting ink
+runs. Multiple characters may share a connected run, a character may span
+several runs, and a blank or padding emission may have none. This is
+evidence for further alignment, not a forced one-to-one assignment.
+Competing anchors are partitioned by shared source runs. Within each
+component, greedy earliest and latest strictly increasing injective
+assignments identify pointwise unique correspondences, ambiguous ranges,
+or impossible assignments when glyphs are joined. One unsolvable cluster
+does not discard independent matches elsewhere on the line. Unmatched,
+whitespace and padding emissions have explicit statuses.
+
+Schema-7 `character_audits` groups data by exact parent RGB SHA-256 and
+dimensions. Each primary detector entry includes the original line/quad,
+sorted detector index (not final draft index), exact rectified RGB crop
+hash/dimensions, padding geometry, raw CTC column indices, projected ink
+and alignment candidates. Component indices address the entry's component
+array. Positions and ink bounds are in the **rectified recognition-crop
+frame**, not PDF user space; perspective/rotation mapping is not inferred.
+Audit pixel work is bounded to 16M sampled crop pixels per raster; skipped
+or invalid observations are counted. Cache hits reuse the same original
+raster audit, and enabling the diagnostic requires an explicit audit output.
+Existing geometry-supported crop repairs remain independent.

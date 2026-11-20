@@ -31,8 +31,8 @@ use crate::{
     pdf_metadata::PdfMetadata,
     rasterize::{RenderPolicy, render_rgb_page},
     recognition::{
-        RasterRepairAudit, RecognitionBackend, RecognitionCacheBudget, RecognitionSession,
-        RecognitionStats,
+        RasterCharacterAudit, RasterRepairAudit, RecognitionBackend, RecognitionCacheBudget,
+        RecognitionSession, RecognitionStats,
     },
     source_ocr::{
         SourceObservation, SourceOnlyResult, source_image_mapper, source_only_candidates,
@@ -117,6 +117,7 @@ pub struct PipelineResult {
     /// Model calls and reuse across all raster recognition paths.
     pub recognition: RecognitionStats,
     pub crop_repairs: Vec<RasterRepairAudit>,
+    pub character_audits: Vec<RasterCharacterAudit>,
     /// Validated policy used for this complete recognition job.
     pub policy: PipelinePolicy,
     /// Actual source image paint closure and native-only blockers.
@@ -307,6 +308,7 @@ pub struct PipelineAudit<'a> {
     policy: PipelinePolicy,
     recognition: RecognitionStats,
     crop_repairs: &'a [RasterRepairAudit],
+    character_audits: &'a [RasterCharacterAudit],
     routes: &'a BTreeMap<PageNumber, PageRoute>,
     residual_pages: &'a BTreeSet<PageNumber>,
     residual_attempts: &'a [ResidualAttempt],
@@ -336,13 +338,14 @@ impl PipelineResult {
     #[must_use]
     pub const fn audit(&self) -> PipelineAudit<'_> {
         PipelineAudit {
-            schema_version: 6,
+            schema_version: 7,
             preparation: None,
             pdf_sha256: self.draft.pdf_sha256.as_str(),
             model: self.draft.model.as_str(),
             policy: self.policy,
             recognition: self.recognition,
             crop_repairs: self.crop_repairs.as_slice(),
+            character_audits: self.character_audits.as_slice(),
             routes: &self.routes,
             residual_pages: &self.residual_pages,
             residual_attempts: self.residual_attempts.as_slice(),
@@ -563,6 +566,7 @@ impl PreparedOcr {
             residual_attempts,
             recognition,
             crop_repairs: session.take_repair_audits(),
+            character_audits: session.take_character_audits(),
             policy: self.policy,
             paints: prepared.scanned,
             source_observations: prepared.recognized,
