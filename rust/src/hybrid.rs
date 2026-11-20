@@ -370,8 +370,8 @@ pub fn merge_ocr(
             ));
         }
         let (output_page, page_stats, page_proposals) = merge_fallback_page(
-            &input,
-            *page,
+            input.threshold,
+            input.proven_pages.contains(page),
             baseline_page,
             observations_by_page.get(page).map_or(&[], Vec::as_slice),
             &proofs,
@@ -397,8 +397,8 @@ pub fn merge_ocr(
 }
 
 fn merge_fallback_page(
-    input: &MergeInput<'_>,
-    page: PageNumber,
+    threshold: f64,
+    page_verified: bool,
     baseline_page: &DraftPage,
     observations: &[&ImageObservation],
     proofs: &ProofIndex<'_>,
@@ -422,7 +422,7 @@ fn merge_fallback_page(
             .iter()
             .map(|quad| overlap_fraction(&image.line.quad, quad))
             .fold(0.0_f64, f64::max);
-        let visible = input.proven_pages.contains(&page)
+        let visible = page_verified
             && proofs
                 .get(&(
                     image.page,
@@ -436,10 +436,10 @@ fn merge_fallback_page(
         let eligible = visible
             && page_overlap < 0.30
             && native_overlap < 0.20
-            && image.line.confidence >= input.threshold
+            && image.line.confidence >= threshold
             && image.line.text.trim().chars().count() >= 2;
         proposals.push(MergeProposal {
-            page: page.get(),
+            page: baseline_page.page,
             raster_text: image.line.text.clone(),
             source_id: image.source_id.clone(),
             paint_index: image.paint_index,
@@ -457,6 +457,35 @@ fn merge_fallback_page(
         }
     }
     (output_page, stats, proposals)
+}
+
+/// Test the same final admission logic before committing to a masked raster.
+/// Every observation from a suppressed paint must survive the actual merge,
+/// including conflicts with residual OCR, other source labels and native words.
+#[cfg(feature = "pdf-integration")]
+pub(crate) fn preserves_masked_sources(
+    baseline: &DraftPage,
+    observations: &[ImageObservation],
+    proofs: &[VisibilityProof],
+    required_paints: &BTreeSet<u32>,
+    threshold: f64,
+) -> Result<bool, Error> {
+    let page = PageNumber::new(baseline.page)?;
+    let (indexed, proofs) = index_merge_evidence(observations, proofs, &BTreeSet::from([page]))?;
+    let (_, _, proposals) = merge_fallback_page(
+        threshold,
+        true,
+        baseline,
+        indexed.get(&page).map_or(&[], Vec::as_slice),
+        &proofs,
+    );
+    Ok(required_paints.iter().all(|paint| {
+        let mut matching = proposals
+            .iter()
+            .filter(|proposal| proposal.paint_index == *paint);
+        matching.next().is_some_and(|first| first.included_as_extra)
+            && matching.all(|proposal| proposal.included_as_extra)
+    }))
 }
 
 fn pages_by_number(pages: &[DraftPage]) -> Result<BTreeMap<PageNumber, &DraftPage>, Error> {

@@ -17,11 +17,13 @@ use tempfile::NamedTempFile;
 
 use crate::{
     Error, PageNumber,
+    draft::OcrLine,
     geometry::{DisplayMapper, Point, Quad},
     hybrid::{ImageObservation, VisibilityProof},
     paint_isolation::{PaintReplacement, isolate_source_paints},
     paint_scan::{ImagePaint, PaintReport, PdfMatrix},
     pdf_metadata::PdfMetadata,
+    polygon::overlap_fraction,
     rasterize::{RenderPolicy, render_rgb_page},
     source_mask::{MaskedSourceObject, mask_source_object},
     source_ocr::{SourceObservation, map_observations_to_paint},
@@ -55,6 +57,15 @@ pub struct MixedVisibility {
     pub audited: Vec<SourceVisibilityAudit>,
 }
 
+impl MixedVisibility {
+    pub(crate) fn extend(&mut self, other: Self) {
+        self.observations.extend(other.observations);
+        self.proofs.extend(other.proofs);
+        self.proven_pages.extend(other.proven_pages);
+        self.audited.extend(other.audited);
+    }
+}
+
 /// Build real differential source proofs for candidate mixed pages.
 ///
 /// Unsupported encodings remain on page OCR fallback. Every treatment changes
@@ -72,40 +83,129 @@ pub fn prove_mixed_source_text(
     policy: RenderPolicy,
     minimum_confidence: f64,
 ) -> Result<MixedVisibility, Error> {
-    if !minimum_confidence.is_finite() || !(0.0..=1.0).contains(&minimum_confidence) {
-        return Err(Error::Invalid(
-            "invalid visibility confidence threshold".into(),
-        ));
-    }
+    let mut verifier = MixedVerifier::new(
+        original_pdf,
+        document,
+        painted,
+        recognized,
+        policy,
+        minimum_confidence,
+    )?;
     let mut result = MixedVisibility::default();
-    // A source can occur on many pages and through arbitrarily reused Forms.
-    // Decode and mask its native raster once, then alias the cached replacement
-    // independently into each counterfactual document.
-    let mut masked_cache = BTreeMap::<String, Option<MaskedSourceObject>>::new();
-    let approved = selected.iter().copied().collect::<BTreeSet<_>>();
-    for &page in &approved {
-        let relevant = painted
-            .placements
-            .iter()
-            .filter(|paint| {
-                paint.page == page.get()
-                    && paint.unsafe_reasons.is_empty()
-                    && recognized.contains_key(&paint.source_id)
-            })
-            .collect::<Vec<_>>();
-        if relevant.is_empty() {
-            continue;
+    let mut ordered = selected.to_vec();
+    ordered.sort_unstable();
+    ordered.dedup();
+    for page in ordered {
+        result.extend(verifier.verify_page(page, None)?.evidence);
+    }
+    Ok(result)
+}
+
+/// A single-page residual alternative. Its suppression set is bound to the
+/// same per-paint proof and admission evidence used by the final merge.
+pub(crate) struct ResidualRaster {
+    pub(crate) image: RgbImage,
+    pub(crate) paints: BTreeSet<u32>,
+}
+
+impl ResidualRaster {
+    /// Transfer only the proved pixel changes onto the native-font-hidden
+    /// control. If a font changed any of those pixels, discard the residual.
+    pub(crate) fn transfer(mut self, original: &RgbImage, baseline: &RgbImage) -> Option<Self> {
+        if original.dimensions() != baseline.dimensions()
+            || self.image.dimensions() != baseline.dimensions()
+        {
+            return None;
         }
-        let control = render_rgb_page(original_pdf, page, policy)?;
-        let probe = PageProbe {
+        for ((masked, old), base) in self
+            .image
+            .pixels_mut()
+            .zip(original.pixels())
+            .zip(baseline.pixels())
+        {
+            if *masked == *old {
+                *masked = *base;
+            } else if base != old {
+                return None;
+            }
+        }
+        Some(self)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct PageVerification {
+    pub(crate) evidence: MixedVisibility,
+    pub(crate) control: Option<RgbImage>,
+    pub(crate) residual: Option<ResidualRaster>,
+}
+
+/// Page-local raster lifetime with job-wide source-sample mask reuse.
+pub(crate) struct MixedVerifier<'a> {
+    original_pdf: &'a Path,
+    document: &'a PdfMetadata,
+    relevant: BTreeMap<PageNumber, Vec<&'a ImagePaint>>,
+    recognized: &'a BTreeMap<String, SourceObservation>,
+    policy: RenderPolicy,
+    minimum_confidence: f64,
+    masked_cache: BTreeMap<String, Option<MaskedSourceObject>>,
+}
+
+impl<'a> MixedVerifier<'a> {
+    pub(crate) fn new(
+        original_pdf: &'a Path,
+        document: &'a PdfMetadata,
+        painted: &'a PaintReport,
+        recognized: &'a BTreeMap<String, SourceObservation>,
+        policy: RenderPolicy,
+        minimum_confidence: f64,
+    ) -> Result<Self, Error> {
+        if !minimum_confidence.is_finite() || !(0.0..=1.0).contains(&minimum_confidence) {
+            return Err(Error::Invalid(
+                "invalid visibility confidence threshold".into(),
+            ));
+        }
+        let mut relevant = BTreeMap::<PageNumber, Vec<&ImagePaint>>::new();
+        for paint in &painted.placements {
+            if paint.unsafe_reasons.is_empty() && recognized.contains_key(&paint.source_id) {
+                relevant
+                    .entry(PageNumber::new(paint.page)?)
+                    .or_default()
+                    .push(paint);
+            }
+        }
+        Ok(Self {
+            original_pdf,
             document,
+            relevant,
+            recognized,
             policy,
-            page,
             minimum_confidence,
+            masked_cache: BTreeMap::new(),
+        })
+    }
+
+    pub(crate) fn verify_page(
+        &mut self,
+        page: PageNumber,
+        native: Option<&[Quad]>,
+    ) -> Result<PageVerification, Error> {
+        let Some(relevant) = self.relevant.get(&page) else {
+            return Ok(PageVerification::default());
+        };
+        let control = render_rgb_page(self.original_pdf, page, self.policy)?;
+        let probe = PageProbe {
+            document: self.document,
+            policy: self.policy,
+            page,
+            minimum_confidence: self.minimum_confidence,
             control: &control,
         };
-        for paint in relevant {
-            let source = recognized
+        let mut evidence = MixedVisibility::default();
+        let mut residual = ResidualBuilder::default();
+        for &paint in relevant {
+            let source = self
+                .recognized
                 .get(&paint.source_id)
                 .ok_or_else(|| Error::Invalid("source recognition vanished during proof".into()))?;
             if source.width == 0
@@ -115,42 +215,153 @@ pub fn prove_mixed_source_text(
             {
                 continue;
             }
-            if !masked_cache.contains_key(&paint.source_id) {
-                let source_object = ObjectId::new(paint.object_number, i32::from(paint.generation));
+            if !self.masked_cache.contains_key(&paint.source_id) {
+                let id = ObjectId::new(paint.object_number, i32::from(paint.generation));
                 let masked = match mask_source_object(
-                    document.source(),
-                    source_object,
+                    self.document.source(),
+                    id,
                     &source.lines,
-                    minimum_confidence,
+                    self.minimum_confidence,
                 ) {
                     Ok(masked) => masked,
-                    // Unusable native OCR coordinates are not a reason to
-                    // abandon otherwise valid full-page OCR.
                     Err(Error::Invalid(_)) => None,
                     Err(error) => return Err(error),
                 };
-                masked_cache.insert(paint.source_id.clone(), masked);
+                self.masked_cache.insert(paint.source_id.clone(), masked);
             }
-            let Some(masked) = masked_cache.get(&paint.source_id).and_then(Option::as_ref) else {
+            let Some(masked) = self
+                .masked_cache
+                .get(&paint.source_id)
+                .and_then(Option::as_ref)
+            else {
                 continue;
             };
             if let Some(proven) = probe.examine(paint, source, masked)? {
                 if !proven.proofs.is_empty() {
-                    result.proven_pages.insert(page);
+                    evidence.proven_pages.insert(page);
                 }
-                result.observations.extend(proven.observations);
-                result.proofs.extend(proven.proofs);
-                result.audited.push(proven.audit);
+                if let Some(native) = native {
+                    residual.consider(paint, native, &control, &proven);
+                }
+                evidence.observations.extend(proven.observations);
+                evidence.proofs.extend(proven.proofs);
+                evidence.audited.push(proven.audit);
             }
         }
+        // Multi-paint treatments are accepted only when the actual grouped PDF
+        // render exactly matches the disjoint independently verified changes.
+        let residual = residual.finish(&probe, &self.masked_cache).unwrap_or(None);
+        Ok(PageVerification {
+            evidence,
+            control: Some(control),
+            residual,
+        })
     }
-    Ok(result)
+}
+
+#[derive(Default)]
+struct ResidualBuilder<'a> {
+    image: Option<RgbImage>,
+    paints: Vec<&'a ImagePaint>,
+}
+
+impl<'a> ResidualBuilder<'a> {
+    fn consider(
+        &mut self,
+        paint: &'a ImagePaint,
+        native: &[Quad],
+        control: &RgbImage,
+        proven: &ProbedSource,
+    ) {
+        // A source mask may cover several labels. Never suppress a paint if
+        // even one suppressed label lacks proof or conflicts with native words.
+        if proven.proofs.is_empty()
+            || proven.proofs.len() != proven.audit.candidate_lines
+            || proven.observations.iter().any(|observation| {
+                native
+                    .iter()
+                    .any(|word| overlap_fraction(&observation.line.quad, word) >= 0.20)
+            })
+        {
+            return;
+        }
+        if let Some(image) = &mut self.image {
+            if !combine_disjoint_changes(control, image, &proven.treatment) {
+                return;
+            }
+        } else {
+            self.image = Some(proven.treatment.clone());
+        }
+        self.paints.push(paint);
+    }
+
+    fn finish(
+        self,
+        probe: &PageProbe<'_>,
+        cache: &BTreeMap<String, Option<MaskedSourceObject>>,
+    ) -> Result<Option<ResidualRaster>, Error> {
+        let Some(image) = self.image else {
+            return Ok(None);
+        };
+        if self.paints.len() > 1 {
+            let mut groups = BTreeMap::<&str, Vec<&ImagePaint>>::new();
+            for &paint in &self.paints {
+                groups.entry(&paint.source_id).or_default().push(paint);
+            }
+            let replacements = groups
+                .into_iter()
+                .map(|(id, paints)| {
+                    let masked = cache
+                        .get(id)
+                        .and_then(Option::as_ref)
+                        .ok_or_else(|| Error::Invalid("missing verified replacement".into()))?;
+                    Ok(PaintReplacement {
+                        image: masked.object.clone(),
+                        paints,
+                    })
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            let combined = probe.render_treatment(replacements)?;
+            if combined != image {
+                return Ok(None);
+            }
+        }
+        Ok(Some(ResidualRaster {
+            image,
+            paints: self.paints.iter().map(|paint| paint.paint_index).collect(),
+        }))
+    }
+}
+
+/// Apply a second independent change atomically, rejecting overlapping writes.
+fn combine_disjoint_changes(control: &RgbImage, combined: &mut RgbImage, next: &RgbImage) -> bool {
+    if control.dimensions() != combined.dimensions()
+        || control.dimensions() != next.dimensions()
+        || control
+            .pixels()
+            .zip(combined.pixels())
+            .zip(next.pixels())
+            .any(|((old, a), b)| a != old && b != old)
+    {
+        return false;
+    }
+    for ((old, current), next) in control
+        .pixels()
+        .zip(combined.pixels_mut())
+        .zip(next.pixels())
+    {
+        if next != old {
+            *current = *next;
+        }
+    }
+    true
 }
 
 struct ProbedSource {
     observations: Vec<ImageObservation>,
     proofs: Vec<VisibilityProof>,
     audit: SourceVisibilityAudit,
+    treatment: RgbImage,
 }
 
 struct PageProbe<'a> {
@@ -182,6 +393,18 @@ impl PageProbe<'_> {
             + 3.0)
     }
 
+    fn render_treatment<'a>(
+        &self,
+        replacements: impl IntoIterator<Item = PaintReplacement<'a>>,
+    ) -> Result<RgbImage, Error> {
+        let temp = NamedTempFile::new()?;
+        fs::write(
+            temp.path(),
+            isolate_source_paints(self.document, replacements)?,
+        )?;
+        render_rgb_page(temp.path(), self.page, self.policy)
+    }
+
     fn examine(
         &self,
         paint: &ImagePaint,
@@ -202,18 +425,10 @@ impl PageProbe<'_> {
         if lines.is_empty() {
             return Ok(None);
         }
-        let temp = NamedTempFile::new()?;
-        fs::write(
-            temp.path(),
-            isolate_source_paints(
-                self.document,
-                [PaintReplacement {
-                    image: masked.object.clone(),
-                    paints: vec![paint],
-                }],
-            )?,
-        )?;
-        let treatment = render_rgb_page(temp.path(), self.page, self.policy)?;
+        let treatment = self.render_treatment([PaintReplacement {
+            image: masked.object.clone(),
+            paints: vec![paint],
+        }])?;
         if treatment.dimensions() != self.control.dimensions() {
             return Err(Error::Invalid(
                 "counterfactual changed page raster size".into(),
@@ -286,6 +501,7 @@ impl PageProbe<'_> {
             observations,
             proofs,
             audit,
+            treatment,
         }))
     }
 }
@@ -295,7 +511,7 @@ impl PageProbe<'_> {
 fn unchanged_outside_source_masks(
     before: &RgbImage,
     after: &RgbImage,
-    regions: &[crate::draft::OcrLine],
+    regions: &[OcrLine],
     mapper: DisplayMapper,
     padding: f64,
 ) -> bool {
@@ -427,11 +643,128 @@ fn inside_convex(polygon: &Quad, point: Point) -> bool {
 mod tests {
     use image::{Rgb, RgbImage};
 
-    use super::{changed_raster_pixels, unchanged_outside_source_masks};
+    use super::{
+        MixedVerifier, ResidualRaster, changed_raster_pixels, combine_disjoint_changes,
+        unchanged_outside_source_masks,
+    };
+    use crate::{
+        PageNumber, paint_scan::enumerate_image_paints, pdf_metadata::PdfMetadata,
+        rasterize::RenderPolicy, source_ocr::SourceObservation,
+    };
     use crate::{
         draft::OcrLine,
         geometry::{DisplayMapper, PageBox, Point, Rotation},
     };
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+    };
+
+    #[test]
+    fn pixel_composition_is_atomic_and_rejects_overlapping_changes() {
+        let control = RgbImage::from_pixel(3, 1, Rgb([0; 3]));
+        let mut first = control.clone();
+        first.put_pixel(0, 0, Rgb([128; 3]));
+        let mut second = control.clone();
+        second.put_pixel(1, 0, Rgb([255; 3]));
+        assert!(combine_disjoint_changes(&control, &mut first, &second));
+        assert_eq!(first.as_raw(), &[128, 128, 128, 255, 255, 255, 0, 0, 0]);
+        let before = first.clone();
+        second.put_pixel(2, 0, Rgb([64; 3]));
+        assert!(!combine_disjoint_changes(&control, &mut first, &second));
+        assert_eq!(first, before);
+    }
+
+    #[test]
+    fn native_font_transfer_only_applies_to_unchanged_control_pixels() -> Result<(), crate::Error> {
+        let original = RgbImage::from_pixel(3, 1, Rgb([0; 3]));
+        let mut treatment = original.clone();
+        treatment.put_pixel(1, 0, Rgb([255; 3]));
+        let residual = || ResidualRaster {
+            image: treatment.clone(),
+            paints: BTreeSet::from([4]),
+        };
+        let mut baseline = original.clone();
+        baseline.put_pixel(0, 0, Rgb([128; 3]));
+        let result = residual()
+            .transfer(&original, &baseline)
+            .ok_or_else(|| crate::Error::Invalid("disjoint native change lost residual".into()))?;
+        assert_eq!(
+            result.image.as_raw(),
+            &[128, 128, 128, 255, 255, 255, 0, 0, 0]
+        );
+        assert_eq!(result.paints, BTreeSet::from([4]));
+        baseline.put_pixel(1, 0, Rgb([128; 3]));
+        assert!(residual().transfer(&original, &baseline).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn grouped_residual_reuses_disjoint_visible_paints_through_forms()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("visible.pdf");
+        fs::write(
+            &path,
+            include_bytes!("../tests/fixtures/repeated-nested-paint-both-visible.pdf"),
+        )?;
+        let doc = PdfMetadata::open(&path)?;
+        let pages = [
+            PageNumber::new(1)?,
+            PageNumber::new(2)?,
+            PageNumber::new(3)?,
+        ];
+        let scan = enumerate_image_paints(&doc, &pages)?;
+        let source = SourceObservation {
+            width: 1200,
+            height: 300,
+            lines: vec![OcrLine {
+                text: "CAPACITOR 47uF 16V".into(),
+                confidence: 0.99,
+                quad: [
+                    Point(75.0, 120.0),
+                    Point(1060.0, 120.0),
+                    Point(1060.0, 200.0),
+                    Point(75.0, 200.0),
+                ],
+                reviewed: false,
+            }],
+        };
+        let recognized = BTreeMap::from([(scan.placements[0].source_id.clone(), source)]);
+        let mut verifier = MixedVerifier::new(
+            &path,
+            &doc,
+            &scan,
+            &recognized,
+            RenderPolicy {
+                max_side: 1600,
+                dpi: 72,
+            },
+            0.97,
+        )?;
+        for page in pages {
+            let result = verifier.verify_page(page, Some(&[]))?;
+            assert_eq!(
+                result.evidence.proofs.len(),
+                2,
+                "{:#?}",
+                result.evidence.audited
+            );
+            let residual = result.residual.ok_or("grouped treatment rejected")?;
+            let control = result.control.ok_or("missing proof control")?;
+            assert_eq!(residual.paints, BTreeSet::from([0, 1]));
+            let mut changed = [0, 0];
+            for (i, (a, b)) in control.pixels().zip(residual.image.pixels()).enumerate() {
+                if a != b {
+                    let right = i % usize::try_from(control.width())?
+                        >= usize::try_from(control.width())? / 2;
+                    changed[usize::from(right)] += 1;
+                }
+            }
+            assert!(changed.iter().all(|&n| n > 100), "{changed:?}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn counterfactual_rejects_any_untargeted_page_change() -> Result<(), crate::Error> {

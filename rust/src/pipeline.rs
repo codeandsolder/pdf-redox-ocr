@@ -11,10 +11,12 @@ use tempfile::NamedTempFile;
 
 use crate::{
     Error, PageNumber,
-    draft::{DraftPage, OcrDraft, sha256_file},
+    draft::{DraftPage, OcrDraft, OcrLine, sha256_file},
     geometry::Quad,
-    hybrid::{MergeInput, MergeProposal, MergeStats, PageRoute, merge_ocr},
-    mixed_visibility::{MixedVisibility, prove_mixed_source_text},
+    hybrid::{
+        MergeInput, MergeProposal, MergeStats, PageRoute, merge_ocr, preserves_masked_sources,
+    },
+    mixed_visibility::{MixedVerifier, MixedVisibility, PageVerification},
     mosaic::{
         MosaicBudget, MosaicPlan, contains_native_fragments, mosaic_page_eligible,
         plan_raster_mosaics,
@@ -44,6 +46,8 @@ pub struct PipelinePolicy {
     pub minimum_confidence: f64,
     pub native_chunk: usize,
     pub keep_native_text: bool,
+    /// Reuse verified source-masked rasters instead of ordinary full-page input.
+    pub residual_ocr: bool,
 }
 
 impl Default for PipelinePolicy {
@@ -55,6 +59,7 @@ impl Default for PipelinePolicy {
             minimum_confidence: 0.97,
             native_chunk: 24,
             keep_native_text: false,
+            residual_ocr: true,
         }
     }
 }
@@ -81,6 +86,8 @@ pub struct PipelineResult {
     pub proposals: Vec<MergeProposal>,
     /// Original per-paint differential evidence, including occluded paints.
     pub visibility: MixedVisibility,
+    /// Fallback pages recognized from verified residual rasters.
+    pub residual_pages: BTreeSet<PageNumber>,
 }
 
 /// Immutable source metadata and native word exclusion for a validated OCR request.
@@ -98,9 +105,18 @@ pub struct PreparedOcr {
 
 struct NativePreparation {
     source_only: SourceOnlyResult,
-    mixed: MixedVisibility,
+    scanned: PaintReport,
+    recognized: BTreeMap<String, SourceObservation>,
     routes: BTreeMap<PageNumber, PageRoute>,
     fallback_pages: Vec<PageNumber>,
+}
+
+#[derive(Default)]
+struct RecognizedPages {
+    raster: Vec<DraftPage>,
+    fallback: Vec<DraftPage>,
+    visibility: MixedVisibility,
+    residual_pages: BTreeSet<PageNumber>,
 }
 
 type FragmentPlans = (BTreeSet<PageNumber>, BTreeMap<PageNumber, MosaicPlan>);
@@ -193,9 +209,84 @@ impl PreparedOcr {
         let raster_pdf = temporary_mask
             .as_ref()
             .map_or(self.pdf.as_path(), NamedTempFile::path);
+        let RecognizedPages {
+            raster,
+            fallback,
+            visibility,
+            residual_pages,
+        } = self.recognize_pages(engine, &prepared, raster_pdf, &mut progress)?;
         let policy = self.policy.render;
-        let mut raster_pages = Vec::with_capacity(self.selected.len());
-        let mut fallback_pages = Vec::new();
+        let raster_draft = OcrDraft::new(
+            self.digest.clone(),
+            model_provenance(engine.model_profile(), "native-source", policy),
+            raster,
+        );
+        let fallback_draft = OcrDraft::new(
+            self.digest.clone(),
+            model_provenance(
+                engine.model_profile(),
+                if residual_pages.is_empty() {
+                    "page-fallback"
+                } else {
+                    "page-fallback-with-verified-residuals"
+                },
+                policy,
+            ),
+            fallback,
+        );
+        let (draft, stats, proposals) = merge_ocr(MergeInput {
+            pdf: &self.pdf,
+            selected: &self.selected,
+            raster: &raster_draft,
+            image_observations: &visibility.observations,
+            baseline: &fallback_draft,
+            routes: &prepared.routes,
+            proven_pages: &visibility.proven_pages,
+            visibility_proofs: &visibility.proofs,
+            threshold: self.policy.minimum_confidence,
+        })?;
+        progress(format!(
+            "OCR merge: {} native-only pages, {} source-only pages, {} fallback pages, {} verified native labels added",
+            stats.native_only_pages,
+            stats.image_source_only_pages,
+            stats.page_fallback_pages,
+            stats.nonoverlapping_image_lines_added,
+        ));
+        progress(format!(
+            "verified residual rasters used on {} pages",
+            residual_pages.len()
+        ));
+        self.verify_source()?;
+        Ok(PipelineResult {
+            draft,
+            stats,
+            routes: prepared.routes,
+            proposals,
+            visibility,
+            residual_pages,
+        })
+    }
+
+    fn recognize_pages(
+        &self,
+        engine: &impl RecognitionBackend,
+        prepared: &NativePreparation,
+        raster_pdf: &Path,
+        progress: &mut dyn FnMut(String),
+    ) -> Result<RecognizedPages, Error> {
+        let policy = self.policy.render;
+        let mut result = RecognizedPages {
+            raster: Vec::with_capacity(self.selected.len()),
+            ..RecognizedPages::default()
+        };
+        let mut inspector = MixedVerifier::new(
+            &self.pdf,
+            &self.doc,
+            &prepared.scanned,
+            &prepared.recognized,
+            policy,
+            self.policy.minimum_confidence,
+        )?;
         for &page in &self.selected {
             let native_text_regions = self.natives.get(&page).cloned().ok_or_else(|| {
                 Error::Invalid("Poppler native text omitted selected page".into())
@@ -206,64 +297,120 @@ impl PreparedOcr {
                 .get(&page)
                 .cloned()
                 .unwrap_or_default();
-            raster_pages.push(DraftPage {
+            result.raster.push(DraftPage {
                 page: page.get(),
                 lines: native_lines,
                 native_text_regions: native_text_regions.clone(),
             });
             if prepared.routes[&page] == PageRoute::PageFallback {
-                let image = render_rgb_page(raster_pdf, page, policy)?;
-                let mapper = self.doc.mapper(page)?;
-                let lines = engine.recognize_page(image, mapper)?;
+                let page_evidence = match inspector.verify_page(
+                    page,
+                    self.policy
+                        .residual_ocr
+                        .then_some(native_text_regions.as_slice()),
+                ) {
+                    Ok(evidence) => evidence,
+                    Err(error) => {
+                        progress(format!(
+                            "page {} verification unavailable: {error}; using page OCR",
+                            page.get()
+                        ));
+                        PageVerification::default()
+                    }
+                };
+                let (lines, residual, evidence) = self.recognize_fallback(
+                    engine,
+                    raster_pdf,
+                    page,
+                    &native_text_regions,
+                    page_evidence,
+                    progress,
+                )?;
+                if residual {
+                    result.residual_pages.insert(page);
+                }
+                result.visibility.extend(evidence);
                 progress(format!(
                     "page {} (fallback): {} OCR lines, {} native words",
                     page.get(),
                     lines.len(),
                     native_text_regions.len()
                 ));
-                fallback_pages.push(DraftPage {
+                result.fallback.push(DraftPage {
                     page: page.get(),
                     lines,
                     native_text_regions,
                 });
             }
         }
-        let raster_draft = OcrDraft::new(
-            self.digest.clone(),
-            model_provenance(engine.model_profile(), "native-source", policy),
-            raster_pages,
-        );
-        let fallback_draft = OcrDraft::new(
-            self.digest.clone(),
-            model_provenance(engine.model_profile(), "page-fallback", policy),
-            fallback_pages,
-        );
-        let (draft, stats, proposals) = merge_ocr(MergeInput {
-            pdf: &self.pdf,
-            selected: &self.selected,
-            raster: &raster_draft,
-            image_observations: &prepared.mixed.observations,
-            baseline: &fallback_draft,
-            routes: &prepared.routes,
-            proven_pages: &prepared.mixed.proven_pages,
-            visibility_proofs: &prepared.mixed.proofs,
-            threshold: self.policy.minimum_confidence,
-        })?;
-        progress(format!(
-            "OCR merge: {} native-only pages, {} source-only pages, {} fallback pages, {} verified native labels added",
-            stats.native_only_pages,
-            stats.image_source_only_pages,
-            stats.page_fallback_pages,
-            stats.nonoverlapping_image_lines_added,
-        ));
-        self.verify_source()?;
-        Ok(PipelineResult {
-            draft,
-            stats,
-            routes: prepared.routes,
-            proposals,
-            visibility: prepared.mixed,
-        })
+        Ok(result)
+    }
+
+    fn recognize_fallback(
+        &self,
+        engine: &impl RecognitionBackend,
+        raster_pdf: &Path,
+        page: PageNumber,
+        native: &[Quad],
+        verified: PageVerification,
+        progress: &mut dyn FnMut(String),
+    ) -> Result<(Vec<OcrLine>, bool, MixedVisibility), Error> {
+        let PageVerification {
+            evidence,
+            control,
+            residual,
+        } = verified;
+        let (ordinary, alternative) = match control {
+            Some(control) if raster_pdf == self.pdf => (control, residual),
+            Some(control) => {
+                let baseline = render_rgb_page(raster_pdf, page, self.policy.render)?;
+                let alternative = residual.and_then(|r| r.transfer(&control, &baseline));
+                (baseline, alternative)
+            }
+            None => (render_rgb_page(raster_pdf, page, self.policy.render)?, None),
+        };
+        let mapper = self.doc.mapper(page)?;
+        if let Some(alternative) = alternative {
+            let crate::mixed_visibility::ResidualRaster { image, paints } = alternative;
+            let mut candidate = DraftPage {
+                page: page.get(),
+                lines: Vec::new(),
+                native_text_regions: native.to_vec(),
+            };
+            let preserves = |draft: &DraftPage| {
+                preserves_masked_sources(
+                    draft,
+                    &evidence.observations,
+                    &evidence.proofs,
+                    &paints,
+                    self.policy.minimum_confidence,
+                )
+            };
+            // First check the source/native exclusions without spending inference.
+            if preserves(&candidate)? {
+                match engine.recognize_page(image, mapper) {
+                    Ok(lines) => {
+                        candidate.lines = lines;
+                        if preserves(&candidate)? {
+                            progress(format!(
+                                "page {}: verified residual OCR accepted",
+                                page.get()
+                            ));
+                            return Ok((candidate.lines, true, evidence));
+                        }
+                    }
+                    Err(error) => progress(format!(
+                        "page {} residual recognition failed: {error}",
+                        page.get()
+                    )),
+                }
+            }
+            progress(format!(
+                "page {}: residual merge conflict; recognizing ordinary page",
+                page.get()
+            ));
+        }
+        Ok((engine.recognize_page(ordinary, mapper)?, false, evidence))
     }
 
     fn plan_native_fragment_pages(&self, scanned: &PaintReport) -> Result<FragmentPlans, Error> {
@@ -520,31 +667,10 @@ impl PreparedOcr {
                 .count(),
             self.selected.len()
         ));
-        let mixed = match prove_mixed_source_text(
-            &self.pdf,
-            &self.doc,
-            &scanned,
-            &recognized,
-            &fallback_selected,
-            self.policy.render,
-            self.policy.minimum_confidence,
-        ) {
-            Ok(mixed) => mixed,
-            Err(error) => {
-                progress(format!(
-                    "Differential proof unavailable: {error}; using page OCR"
-                ));
-                MixedVisibility::default()
-            }
-        };
-        progress(format!(
-            "mixed source visibility: {} proven labels across {} source paint audits",
-            mixed.proofs.len(),
-            mixed.audited.len()
-        ));
         Ok(NativePreparation {
             source_only,
-            mixed,
+            scanned,
+            recognized,
             routes,
             fallback_pages: fallback_selected,
         })

@@ -83,6 +83,7 @@ impl InvocationPlan {
 }
 
 /// Replace exact expanded image invocations in one copy-on-write document.
+///
 /// A shared replacement image is allocated once, and common Form invocation
 /// prefixes are cloned only once. Empty input returns the original source.
 /// # Errors

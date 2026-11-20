@@ -58,7 +58,7 @@ replacements across pages: one replacement image can be reused, and common
 invocation-path prefixes clone their Form once. Original resource bindings
 and names used by the original content are reserved; duplicate, conflicting
 or invalid invocation paths cannot produce an edited PDF. This allows
-future verified combined residual renders without mutating sibling calls. Counterfactual image masks work on the original packed sample values
+verified combined residual renders without mutating sibling calls. Counterfactual image masks work on the original packed sample values
 (1/2/4/8/16 bits per component), including Gray, RGB, CMYK, Indexed and
 ICC-based color spaces, without changing the original ColorSpace or Decode
 mapping. Unresolved color aliases, alpha, unsupported sample codecs and
@@ -145,8 +145,23 @@ pages known to paint selected image objects, retaining repeated appearances
 for a later decode if an earlier occurrence exceeds its resource budget. The
 `--keep-native-text` diagnostic disables native-only bypass.
 
+Mixed-page verification now runs page-locally, retaining the original proof
+control for fallback and using the independently proved treatment raster
+directly when all its suppressed source labels remain eligible for merge.
+Several treatments can be combined when their changed RGB pixels are
+disjoint and the actual grouped copy-on-write PDF renders exactly to the
+same pixels. Native-font masking may be combined with those changes only
+where the two controls agree. The full fallback merger is reused before and
+after residual recognition: if any suppressed label would be lost through
+native-word exclusions, overlapping observations or confidence policy, or
+if residual inference fails, the ordinary raster is recognized instead.
+No treatment changes the source PDF or its semantic overlay. The
+`--no-residual-ocr` diagnostic retains all visibility proofs and disables
+only masked recognition, for controlled A/B comparison.
+
 The returned `PipelineResult` includes the v3 importer draft, merge statistics,
-admission proposals and original per-paint visibility audits. Progress goes to
+admission proposals, original per-paint visibility audits, and the exact set
+of accepted residual pages. Progress goes to
 the caller's callback, not global standard error. The source hash is checked
 during preparation and before/after inference. The CLI alone chooses output
 paths and publishes the draft or optional annotated PDF.
