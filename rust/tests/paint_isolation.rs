@@ -108,7 +108,8 @@ fn isolated_paint_does_not_modify_other_visible_uses_or_reserved_aliases()
 -> Result<(), Box<dyn std::error::Error>> {
     use pdf_redox::ObjectId;
     use pdf_redox_ocr::{
-        paint_isolation::isolate_source_paint, rasterize::render_rgb_page,
+        paint_isolation::{PaintReplacement, isolate_source_paints},
+        rasterize::render_rgb_page,
         source_mask::mask_source_object,
     };
 
@@ -151,8 +152,23 @@ fn isolated_paint_does_not_modify_other_visible_uses_or_reserved_aliases()
         .ok_or("source image could not be masked")?;
         let mut invalid = first.clone();
         invalid.paint_path = vec![50];
-        assert!(isolate_source_paint(&metadata, &invalid, masked.object.clone()).is_err());
-        let isolated = isolate_source_paint(&metadata, first, masked.object)?;
+        assert!(
+            isolate_source_paints(
+                &metadata,
+                [PaintReplacement {
+                    image: masked.object.clone(),
+                    paints: vec![&invalid]
+                }]
+            )
+            .is_err()
+        );
+        let isolated = isolate_source_paints(
+            &metadata,
+            [PaintReplacement {
+                image: masked.object,
+                paints: vec![first],
+            }],
+        )?;
         fs::write(&after_path, isolated)?;
         let policy = RenderPolicy {
             max_side: 1600,
@@ -185,5 +201,143 @@ fn isolated_paint_does_not_modify_other_visible_uses_or_reserved_aliases()
             page.get()
         );
     }
+    Ok(())
+}
+
+mod support;
+
+fn shared_form_fixture() -> Vec<u8> {
+    use support::stream;
+    support::pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 200 100] /Resources << /XObject << /Fm 5 0 R /OcrIsolatedPaint0 5 0 R >> >> >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R >>".to_vec(),
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 50 20] /Resources << /XObject << /Im 6 0 R /OcrIsolatedPaint0 6 0 R >> >>",
+            b"q 20 0 0 20 0 0 cm /Im Do Q q 20 0 0 20 25 0 cm /OcrIsolatedPaint0 Do Q",
+        ),
+        stream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray", &[0]),
+        stream("", b"q 1 0 0 1 10 20 cm /Fm Do Q q 1 0 0 1 100 20 cm /OcrIsolatedPaint0 Do Q"),
+    ])
+}
+
+fn gray_image(value: u8) -> pdf_redox::OwnedObject {
+    use pdf_redox::{OwnedObject, StreamData};
+    let dictionary = [
+        (b"Type".to_vec(), OwnedObject::Name(b"XObject".to_vec())),
+        (b"Subtype".to_vec(), OwnedObject::Name(b"Image".to_vec())),
+        (b"Width".to_vec(), OwnedObject::Integer(1)),
+        (b"Height".to_vec(), OwnedObject::Integer(1)),
+        (b"BitsPerComponent".to_vec(), OwnedObject::Integer(8)),
+        (
+            b"ColorSpace".to_vec(),
+            OwnedObject::Name(b"DeviceGray".to_vec()),
+        ),
+        (b"Length".to_vec(), OwnedObject::Integer(1)),
+    ]
+    .into_iter()
+    .collect();
+    OwnedObject::Stream {
+        dictionary,
+        data: StreamData::Owned(vec![value]),
+    }
+}
+
+#[test]
+fn combined_isolation_shares_form_prefixes_and_replacement_images()
+-> Result<(), Box<dyn std::error::Error>> {
+    use pdf_redox_ocr::{
+        paint_isolation::{PaintReplacement, isolate_source_paints},
+        rasterize::render_rgb_page,
+    };
+    let original = shared_form_fixture();
+    let doc = PdfMetadata::from_bytes(original)?;
+    let pages = [PageNumber::new(1)?, PageNumber::new(2)?];
+    let scan = enumerate_image_paints(&doc, &pages)?;
+    let p = &scan.placements;
+    assert_eq!(p.len(), 8);
+    assert_eq!(p[0].paint_path, [0, 0]);
+    assert_eq!(p[1].paint_path, [0, 1]);
+    assert_eq!(p[6].paint_path, [1, 0]);
+    let result = isolate_source_paints(
+        &doc,
+        [
+            PaintReplacement {
+                image: gray_image(255),
+                paints: vec![&p[0], &p[6]],
+            },
+            PaintReplacement {
+                image: gray_image(128),
+                paints: vec![&p[1]],
+            },
+        ],
+    )?;
+    let rewritten = PdfMetadata::from_bytes(result.clone())?;
+    let after = enumerate_image_paints(&rewritten, &pages)?;
+    let a = &after.placements;
+    assert_eq!(a.len(), p.len());
+    assert_eq!(a[0].source_id, a[6].source_id);
+    assert_ne!(a[0].source_id, a[1].source_id);
+    for index in [2, 3, 4, 5, 7] {
+        assert_eq!(a[index].source_id, a[2].source_id);
+        assert_ne!(a[index].source_id, a[0].source_id);
+        assert_ne!(a[index].source_id, a[1].source_id);
+    }
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("combined.pdf");
+    fs::write(&path, result)?;
+    let policy = RenderPolicy {
+        max_side: 200,
+        dpi: 72,
+    };
+    let first = render_rgb_page(&path, pages[0], policy)?;
+    let second = render_rgb_page(&path, pages[1], policy)?;
+    assert_eq!(first.dimensions(), (200, 100));
+    assert_eq!(second.dimensions(), (200, 100));
+    assert_eq!(first.get_pixel(20, 70).0, [255; 3]);
+    assert_eq!(first.get_pixel(45, 70).0, [128; 3]);
+    for x in [110, 135] {
+        assert_eq!(first.get_pixel(x, 70).0, [0; 3]);
+    }
+    for x in [20, 45, 135] {
+        assert_eq!(second.get_pixel(x, 70).0, [0; 3]);
+    }
+    assert_eq!(second.get_pixel(110, 70).0, [255; 3]);
+    Ok(())
+}
+
+#[test]
+fn combined_isolation_rejects_conflicting_or_invalid_paths()
+-> Result<(), Box<dyn std::error::Error>> {
+    use pdf_redox_ocr::paint_isolation::{PaintReplacement, isolate_source_paints};
+    let original = shared_form_fixture();
+    let doc = PdfMetadata::from_bytes(original.clone())?;
+    let scan = enumerate_image_paints(&doc, &[PageNumber::new(1)?])?;
+    let first = &scan.placements[0];
+    let replace = |paints| {
+        isolate_source_paints(
+            &doc,
+            [PaintReplacement {
+                image: gray_image(255),
+                paints,
+            }],
+        )
+    };
+    assert!(replace(vec![first, first]).is_err());
+    let mut prefix = first.clone();
+    prefix.paint_path.pop();
+    assert!(replace(vec![first, &prefix]).is_err());
+    assert!(replace(vec![&prefix, first]).is_err());
+    let mut bad = first.clone();
+    bad.object_number += 1;
+    assert!(replace(vec![&bad]).is_err());
+    let mut bad = first.clone();
+    bad.page = 0;
+    assert!(replace(vec![&bad]).is_err());
+    let mut bad = first.clone();
+    bad.paint_path = vec![0, 99];
+    assert!(replace(vec![&bad]).is_err());
+    assert_eq!(isolate_source_paints(&doc, [])?, original);
     Ok(())
 }

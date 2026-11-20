@@ -53,7 +53,12 @@ source pixels, and a differential final-page render proves the change survives
 the full painting stack. The result carries source, expanded paint identity
 and full invocation path through a provenance-gated merge with page OCR.
 Repeated source and Form invocations on the same page are independently
-audited. Counterfactual image masks work on the original packed sample values
+audited. The copy-on-write isolation API accepts grouped exact paint
+replacements across pages: one replacement image can be reused, and common
+invocation-path prefixes clone their Form once. Original resource bindings
+and names used by the original content are reserved; duplicate, conflicting
+or invalid invocation paths cannot produce an edited PDF. This allows
+future verified combined residual renders without mutating sibling calls. Counterfactual image masks work on the original packed sample values
 (1/2/4/8/16 bits per component), including Gray, RGB, CMYK, Indexed and
 ICC-based color spaces, without changing the original ColorSpace or Decode
 mapping. Unresolved color aliases, alpha, unsupported sample codecs and

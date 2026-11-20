@@ -17,7 +17,7 @@ use crate::{
     polygon::area,
 };
 
-const MAX_FORM_DEPTH: usize = 32;
+pub(crate) const MAX_FORM_DEPTH: usize = 32;
 const MAX_CONTENT_STREAM_NEST: usize = 64;
 
 /// A linear affine PDF transformation (a,b,c,d,e,f).
@@ -524,7 +524,10 @@ fn image_dimensions(source: &SourcePdf, dict: &OwnedDictionary) -> Result<(u32, 
     Ok((dim(b"Width")?, dim(b"Height")?))
 }
 
-fn subtype(source: &SourcePdf, dict: &OwnedDictionary) -> Result<Option<Vec<u8>>, Error> {
+pub(crate) fn subtype(
+    source: &SourcePdf,
+    dict: &OwnedDictionary,
+) -> Result<Option<Vec<u8>>, Error> {
     let Some(value) = dict.get(b"Subtype".as_slice()) else {
         return Ok(None);
     };

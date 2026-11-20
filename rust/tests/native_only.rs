@@ -18,14 +18,8 @@ use pdf_redox_ocr::{
     recognition::RecognitionBackend,
 };
 
-fn stream(dictionary: &str, bytes: &[u8]) -> Vec<u8> {
-    [
-        format!("<< {dictionary} /Length {} >>\nstream\n", bytes.len()).as_bytes(),
-        bytes,
-        b"\nendstream",
-    ]
-    .concat()
-}
+mod support;
+use support::stream;
 
 /// A page per distinct paint-closure condition, all sharing actual resources.
 fn fixture() -> Vec<u8> {
@@ -95,24 +89,7 @@ fn fixture() -> Vec<u8> {
         "<< /Type /Pages /Kids [{kids}] /Count {} /MediaBox [0 0 200 200] /Resources << /Font << /F 3 0 R /T3 8 0 R >> /XObject << /Outer 4 0 R /Inner 5 0 R /Im 11 0 R >> /ColorSpace << /RGB /DeviceRGB /PatCS /Pattern >> /ExtGState << /GS 6 0 R >> /Pattern << /P 7 0 R >> >> >>",
         CONTENTS.len()
     ).into_bytes();
-    let mut bytes = b"%PDF-1.4\n".to_vec();
-    let mut offsets = Vec::with_capacity(objects.len());
-    for (index, object) in objects.iter().enumerate() {
-        offsets.push(bytes.len());
-        bytes.extend(format!("{} 0 obj\n", index + 1).as_bytes());
-        bytes.extend(object);
-        bytes.extend(b"\nendobj\n");
-    }
-    let xref = bytes.len();
-    let size = objects.len() + 1;
-    bytes.extend(format!("xref\n0 {size}\n0000000000 65535 f \n").as_bytes());
-    for offset in offsets {
-        bytes.extend(format!("{offset:010} 00000 n \n").as_bytes());
-    }
-    bytes.extend(
-        format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
-    );
-    bytes
+    support::pdf(&objects)
 }
 
 #[derive(Default)]

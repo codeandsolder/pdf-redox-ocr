@@ -19,7 +19,7 @@ use crate::{
     Error, PageNumber,
     geometry::{DisplayMapper, Point, Quad},
     hybrid::{ImageObservation, VisibilityProof},
-    paint_isolation::isolate_source_paint,
+    paint_isolation::{PaintReplacement, isolate_source_paints},
     paint_scan::{ImagePaint, PaintReport, PdfMatrix},
     pdf_metadata::PdfMetadata,
     rasterize::{RenderPolicy, render_rgb_page},
@@ -205,7 +205,13 @@ impl PageProbe<'_> {
         let temp = NamedTempFile::new()?;
         fs::write(
             temp.path(),
-            isolate_source_paint(self.document, paint, masked.object.clone())?,
+            isolate_source_paints(
+                self.document,
+                [PaintReplacement {
+                    image: masked.object.clone(),
+                    paints: vec![paint],
+                }],
+            )?,
         )?;
         let treatment = render_rgb_page(temp.path(), self.page, self.policy)?;
         if treatment.dimensions() != self.control.dimensions() {
