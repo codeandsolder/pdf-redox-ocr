@@ -18,10 +18,15 @@ num-traits = "0.2"
 unicode-normalization = "0.1"
 clap = { version = "4.5", features = ["derive"], optional = true }
 image = { version = "0.25.10", default-features = false, features = ["pnm", "png"] }
-pdf-redox = { git = "https://github.com/codeandsolder/pdf-redox", rev = "d504020beab8ca1b01df2e2defd14297c7330c81", package = "pdf-redox", optional = true }
+pdf-redox = { git = "https://github.com/codeandsolder/pdf-redox", rev = "1817a31db4fec46a9c81d6524f3e3a57b11cad13", package = "pdf-redox", optional = true }
 oar-ocr = { version = "=0.10.2", features = ["auto-download"], optional = true }
 tempfile = "3.27"
-hayro-syntax = { git = "https://github.com/codeandsolder/hayro", branch = "pdf-redox/zero-flpdf-base", default-features = false, features = ["std", "images"], optional = true }
+hayro-syntax = { git = "https://github.com/LaurenzV/hayro", rev = "e7ada1354dff4041cdeed3d8ba56fe01b6186132", default-features = false, features = ["std", "images"], optional = true }
+
+# Cargo does not propagate dependency workspace patches. Reuse the exact
+# generated standalone syntax snapshot in the pinned pdf-redox repository.
+[patch."https://github.com/LaurenzV/hayro"]
+hayro-syntax = { git = "https://github.com/codeandsolder/pdf-redox", rev = "1817a31db4fec46a9c81d6524f3e3a57b11cad13" }
 
 [features]
 default = ["native-inference", "pdf-integration", "cli"]

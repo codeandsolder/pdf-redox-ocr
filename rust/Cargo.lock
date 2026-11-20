@@ -967,30 +967,31 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "hayro-ccitt"
-version = "0.4.0"
-source = "git+https://github.com/codeandsolder/hayro?branch=pdf-redox%2Fzero-flpdf-base#eed95c5a4b2e28b1ee60de8b2d816fa6cdc0691b"
+version = "0.5.0"
+source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56fe01b6186132#e7ada1354dff4041cdeed3d8ba56fe01b6186132"
 
 [[package]]
 name = "hayro-jbig2"
-version = "0.3.1"
-source = "git+https://github.com/codeandsolder/hayro?branch=pdf-redox%2Fzero-flpdf-base#eed95c5a4b2e28b1ee60de8b2d816fa6cdc0691b"
+version = "0.4.0"
+source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56fe01b6186132#e7ada1354dff4041cdeed3d8ba56fe01b6186132"
 dependencies = [
  "hayro-ccitt",
 ]
 
 [[package]]
 name = "hayro-jpeg2000"
-version = "0.4.1"
-source = "git+https://github.com/codeandsolder/hayro?branch=pdf-redox%2Fzero-flpdf-base#eed95c5a4b2e28b1ee60de8b2d816fa6cdc0691b"
+version = "0.5.0"
+source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56fe01b6186132#e7ada1354dff4041cdeed3d8ba56fe01b6186132"
 
 [[package]]
 name = "hayro-syntax"
-version = "0.8.0"
-source = "git+https://github.com/codeandsolder/hayro?branch=pdf-redox%2Fzero-flpdf-base#eed95c5a4b2e28b1ee60de8b2d816fa6cdc0691b"
+version = "0.9.0"
+source = "git+https://github.com/codeandsolder/pdf-redox?rev=1817a31db4fec46a9c81d6524f3e3a57b11cad13#1817a31db4fec46a9c81d6524f3e3a57b11cad13"
 dependencies = [
  "hayro-ccitt",
  "hayro-jbig2",
  "hayro-jpeg2000",
+ "miniz_oxide 0.8.9",
  "rustc-hash",
  "smallvec",
  "zune-jpeg",
@@ -1845,7 +1846,7 @@ checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 [[package]]
 name = "pdf-redox"
 version = "0.1.0"
-source = "git+https://github.com/codeandsolder/pdf-redox?rev=d504020beab8ca1b01df2e2defd14297c7330c81#d504020beab8ca1b01df2e2defd14297c7330c81"
+source = "git+https://github.com/codeandsolder/pdf-redox?rev=1817a31db4fec46a9c81d6524f3e3a57b11cad13#1817a31db4fec46a9c81d6524f3e3a57b11cad13"
 dependencies = [
  "color_quant 2.0.0",
  "fast_image_resize",
