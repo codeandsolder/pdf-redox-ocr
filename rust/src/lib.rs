@@ -14,6 +14,8 @@ pub mod hybrid;
 #[cfg(feature = "native-inference")]
 pub mod inference;
 pub mod ink_polarity;
+#[cfg(feature = "pdf-integration")]
+pub mod input_preparation;
 pub mod layout_leaders;
 pub mod leader_repair;
 #[cfg(feature = "pdf-integration")]

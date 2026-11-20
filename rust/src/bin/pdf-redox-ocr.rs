@@ -14,6 +14,7 @@ use pdf_redox_ocr::{
     artifacts::{check_output_paths as check_paths, write_atomic},
     draft::OcrDraft,
     inference::OcrInference,
+    input_preparation::PreparedInput,
     mosaic::MosaicBudget,
     native_images::NativeImageBudget,
     pipeline::{
@@ -30,9 +31,19 @@ struct Args {
     /// Exact source PDF, which is never overwritten.
     #[arg(long)]
     pdf: PathBuf,
-    /// Write schema-version 3 OCR geometry as JSON.
+    /// Retain the exact schema-version 3 importer draft. With optimization,
+    /// also retain its corresponding PDF using --optimized-pdf.
     #[arg(long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
+    /// Optimize using pdf-redox's standard processing objective before OCR.
+    #[arg(long)]
+    optimize: bool,
+    /// Retain the exact optimized PDF to which the OCR draft is bound.
+    #[arg(long, requires = "optimize")]
+    optimized_pdf: Option<PathBuf>,
+    /// Directory for the scoped intermediate optimized PDF.
+    #[arg(long, requires = "optimize")]
+    work_dir: Option<PathBuf>,
     /// Write an optional PDF annotated through the Rust pdf-redox importer.
     #[arg(long)]
     output_pdf: Option<PathBuf>,
@@ -166,17 +177,19 @@ fn importer_document(draft: &OcrDraft) -> Result<OcrDocument, Box<dyn Error>> {
 /// Bind OCR observations to their original PDF and atomically publish outputs.
 fn write_outputs(
     args: &Args,
-    original_bytes: &[u8],
+    input: &PreparedInput,
+    prepared_bytes: &[u8],
     result: &PipelineResult,
 ) -> Result<(), Box<dyn Error>> {
     let draft = &result.draft;
-    // Catch a source replacement or mutation while page images were rendered.
-    draft.verify_pdf(&args.pdf)?;
-
-    let serialized = json_bytes(draft)?;
+    let serialized = args
+        .output
+        .as_ref()
+        .map(|_| json_bytes(draft))
+        .transpose()?;
     let annotated = if args.output_pdf.is_some() {
         let (pdf, report) = pdf_redox::apply_ocr_overlay(
-            original_bytes,
+            prepared_bytes,
             &importer_document(draft)?,
             OcrOverlayOptions {
                 apply_unreviewed: true,
@@ -194,9 +207,20 @@ fn write_outputs(
     let audit = args
         .report
         .as_ref()
-        .map(|_| json_bytes(&result.audit()))
+        .map(|_| -> Result<Vec<u8>, Box<dyn Error>> {
+            Ok(json_bytes(
+                &result.audit().with_preparation(input.audit())?,
+            )?)
+        })
         .transpose()?;
-    write_atomic(&args.output, &serialized)?;
+    // Catch a change to either source immediately before publishing.
+    input.verify_recognized(draft)?;
+    if let Some(path) = &args.optimized_pdf {
+        write_atomic(path, prepared_bytes)?;
+    }
+    if let (Some(path), Some(bytes)) = (&args.output, serialized) {
+        write_atomic(path, &bytes)?;
+    }
     if let (Some(output_path), Some(bytes)) = (args.output_pdf.as_ref(), annotated) {
         write_atomic(output_path, &bytes)?;
     }
@@ -246,21 +270,34 @@ impl PipelineObserver for CliObserver {
 }
 
 fn run(args: &Args) -> Result<(), Box<dyn Error>> {
-    let mut paths = vec![args.output.as_path()];
-    if let Some(pdf) = &args.output_pdf {
-        paths.push(pdf);
+    if args.output.is_none() && args.output_pdf.is_none() && args.report.is_none() {
+        return Err("request at least one draft, searchable PDF or audit output".into());
     }
-    if let Some(report) = &args.report {
-        paths.push(report);
+    if args.optimize && args.output.is_some() && args.optimized_pdf.is_none() {
+        return Err("retaining an optimized-input draft requires --optimized-pdf".into());
     }
-    if let Some(directory) = &args.capture_residual_dir {
-        paths.push(directory);
-    }
+    let paths = [
+        args.output.as_deref(),
+        args.output_pdf.as_deref(),
+        args.report.as_deref(),
+        args.optimized_pdf.as_deref(),
+        args.capture_residual_dir.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
     check_paths(&args.pdf, &paths)?;
+    let input = PreparedInput::open(&args.pdf, args.optimize, args.work_dir.as_deref())?;
+    if let Some(evidence) = &input.audit().processing {
+        eprintln!(
+            "PDF processing optimization: {} -> {} bytes",
+            evidence.report.before.input_bytes, evidence.report.after_bytes
+        );
+    }
+    let job = PreparedOcr::open(input.path(), args.pages.as_deref(), configured_policy(args))?;
     if let Some(directory) = &args.capture_residual_dir {
         fs::create_dir(directory)?;
     }
-    let job = PreparedOcr::open(&args.pdf, args.pages.as_deref(), configured_policy(args))?;
     let engine = OcrInference::pp_ocrv6_small(
         args.ocr_threads,
         (!args.no_leader_repair).then_some(args.confidence.max(0.97)),
@@ -271,7 +308,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
             capture: args.capture_residual_dir.clone(),
         },
     )?;
-    write_outputs(args, job.original_bytes(), &result)
+    write_outputs(args, &input, job.original_bytes(), &result)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {

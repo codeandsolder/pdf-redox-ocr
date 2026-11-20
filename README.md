@@ -1,14 +1,18 @@
 # pdf-redox independent OCR workflow
 
-Native Rust inference companion to [pdf-redox](https://github.com/codeandsolder/pdf-redox), using PP-OCRv6 Small through oar-ocr and ONNX Runtime. The automatic launcher runs the Rust optimizer, if requested, and then the Rust OCR executable, which applies semantic text directly. No Python interpreter is needed for this path; the Python adapters remain research/reference implementations.
+Native Rust inference companion to [pdf-redox](https://github.com/codeandsolder/pdf-redox), using PP-OCRv6 Small through oar-ocr and ONNX Runtime. The native Rust OCR executable optionally runs processing optimization in-process, recognizes text, and applies semantic text directly. No Python interpreter is needed for this path; the Python adapters remain research/reference implementations.
 
-Build the native executable in the `rust/` crate (see [native architecture and build requirements](rust/README.md)). Keep the optimizer beside this checkout or set `PDF_REDOX_RELEASE_BIN_DIR` to the directory containing its compiled `pdf-redox` binary. Set `PDF_REDOX_OCR_BIN` to override the default `rust/target/release/pdf-redox-ocr` executable.
+Build the native executable in the `rust/` crate (see [native architecture and build requirements](rust/README.md)). The optimizer is linked as a Rust library; no separate executable or sibling checkout is required. Set `PDF_REDOX_OCR_BIN` to override the default `rust/target/release/pdf-redox-ocr` executable.
 
 ```sh
 ./run-auto.sh input.pdf searchable.pdf --ocr-only --report audit.json
 ```
 
-Omit `--ocr-only` to first optimize for processing. The default native render limit is 1920 pixels, and the model's detector limit is 2048 pixels. `--draft` optionally retains the exact SHA-bound importer JSON; when optimization is enabled it binds to the optimized input, not the unoptimized source. `--report` retains a separate audit. `--confidence` controls both source admission and overlay application. `--ocr-threads` supplies an explicit ONNX intra-operation thread count. All intermediate files use a scoped temporary directory, removed on exit.
+Omit `--ocr-only` to first optimize for processing. The launcher takes the two positional PDF paths, followed by an optional `--ocr-only` and native OCR options. Output directories must already exist. The default native render limit is 1920 pixels, and the model's detector limit is 2048 pixels. Use `--output draft.json` to retain the SHA-bound importer JSON. When optimization is enabled, also supply `--optimized-pdf prepared.pdf` to retain the exact input required to use that draft. `--report` retains a separate audit with both original and prepared input digests and the actual optimization configuration/report. `--confidence` controls both source admission and overlay application. `--ocr-threads` supplies an explicit ONNX intra-operation thread count. The native executable owns the scoped intermediate optimized PDF and removes it on exit. Set `PDF_REDOX_WORK_DIR` in the launcher or pass native `--work-dir` to choose its directory.
+
+```sh
+./run-auto.sh input.pdf searchable.pdf --output draft.json --optimized-pdf prepared.pdf --report audit.json
+```
 
 The remainder of this document records the earlier Python-based workflow and research experiments; current native implementation details are in [rust/README.md](rust/README.md).
 

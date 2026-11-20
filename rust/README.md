@@ -139,7 +139,7 @@ raster dimensions. The default LRU budget retains at most 256 entries and
 inferences are never cached. `--no-recognition-cache` disables lookup and
 retention for diagnostic comparison, and `PipelineResult.recognition`
 reports full-raster calls, cache hits, evictions, retained payload and additional leader crop batches/candidate outcomes.
-The optional `--report audit.json` writes a separate schema-4 diagnostic
+The optional `--report audit.json` writes a separate schema-5 diagnostic
 report bound to the original PDF digest and model provenance. It includes
 the validated policy, raw native-image observations in source-pixel
 coordinates, original paint paths and native-only blockers, the per-page
@@ -378,12 +378,39 @@ https://app.notion.com/p/41bf74be902081209382e49903e8f0ff
 
 ## End-to-end runner
 
-The repository-root `run-auto.sh` invokes the compiled native OCR CLI and
-optionally the separate PDF optimizer. `--ocr-only` skips optimization.
-The runner accepts the native CLI's confidence, render and budget options and
-optional `--report` / `--draft` destinations. It does not build binaries
-implicitly. For a custom installation set `PDF_REDOX_OCR_BIN` and (when
-optimizing) `PDF_REDOX_RELEASE_BIN_DIR`.
+The repository-root `run-auto.sh SOURCE.pdf SEARCHABLE.pdf [--ocr-only]`
+executes a single native OCR binary. Its default selects the linked
+pdf-redox library's `Config::optimize_only().for_processing()` preset;
+`--ocr-only` as the first optional argument skips optimization. All other
+arguments are passed to the native executable. No second executable,
+shell staging directories, temporary draft JSON or Python is needed.
+Set `PDF_REDOX_OCR_BIN` for a custom installation. Output parents must
+already exist.
+
+Direct CLI usage:
+
+```sh
+pdf-redox-ocr --pdf source.pdf --optimize --output-pdf searchable.pdf \
+  --report audit.json
+pdf-redox-ocr --pdf source.pdf --optimize --output-pdf searchable.pdf \
+  --output draft.json --optimized-pdf prepared.pdf --report audit.json
+```
+
+Without `--optimize`, the direct CLI recognizes the original bytes.
+At least one draft, searchable PDF or audit must be requested.
+Retaining a draft with processing requires `--optimized-pdf`, because
+its SHA and user-space geometry bind to the exact prepared PDF, not the
+original source. The optimizer report and actual configuration are recorded
+under `preparation` in schema-5 CLI audits, alongside both input hashes;
+the existing `pdf_sha256` refers to the OCR input. Reverify the original
+and prepared source hashes before applying or publishing results.
+Processing is intentionally not lossless in every case (microstroke
+rasterization, ICC fallback and reconstructed raster antialiasing are part
+of the established processing policy). Overlay raster comparisons therefore
+use the exact prepared input as their baseline. Poppler requires one scoped
+temporary prepared PDF; the Rust owner removes it on exit. Use `--work-dir`
+or the launcher's `PDF_REDOX_WORK_DIR` to choose a directory.
+
 
 `--raster-mode auto` selects image-only and high-detail sources.
 `--raster-mode all` considers all independently safe source images subject
@@ -429,7 +456,7 @@ a new directory whose parent already exists. The observer writes the exact
 ordinary and transferred treated RGB inputs as lossless PNG immediately
 before attempted residual inference. This is opt-in, uses borrowed images
 without changing model inputs, and performs no additional rendering.
-Schema-4 pipeline audits identify the required per-page source observations
+Schema-5 pipeline audits identify the required per-page source observations
 and retain rejected residual text/quads for correlation with the captures.
 
 Source candidates are vetoed by overlap only with page observations that
@@ -462,7 +489,7 @@ retained, not invented. Failed or conflicting crops leave original
 observations unchanged. Failed repair attempts prevent caching the incomplete
 raster result; successful exact RGB reuse includes the confirmed repairs.
 
-Pipeline audit schema 4 records original pixel-space observations, sample
+Pipeline audit schema 5 records original pixel-space observations, sample
 frame, component bounds, leader evidence, body crop quad and each actual
 prediction/decision by exact RGB SHA-256 and dimensions. Full-raster inference
 calls remain separate from recognition-only batch counters. Disable the stage

@@ -16,6 +16,7 @@ use crate::{
     hybrid::{
         MergeInput, MergeProposal, MergeStats, PageRoute, masked_source_conflicts, merge_ocr,
     },
+    input_preparation::PreparationAudit,
     mixed_visibility::{MixedVerifier, MixedVisibility, PageVerification},
     mosaic::{
         MosaicBudget, MosaicPlan, contains_native_fragments, mosaic_page_eligible,
@@ -299,6 +300,8 @@ impl ResidualAttempt {
 #[derive(serde::Serialize)]
 pub struct PipelineAudit<'a> {
     schema_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preparation: Option<&'a PreparationAudit>,
     pdf_sha256: &'a str,
     model: &'a str,
     policy: PipelinePolicy,
@@ -314,12 +317,27 @@ pub struct PipelineAudit<'a> {
     proposals: &'a [MergeProposal],
 }
 
+impl<'a> PipelineAudit<'a> {
+    /// Attach verified upstream input preparation provenance.
+    ///
+    /// # Errors
+    /// Rejects a preparation with a different OCR-input digest.
+    pub fn with_preparation(mut self, preparation: &'a PreparationAudit) -> Result<Self, Error> {
+        if preparation.ocr_input_sha256 != self.pdf_sha256 {
+            return Err(Error::Invalid("audit preparation digest mismatch".into()));
+        }
+        self.preparation = Some(preparation);
+        Ok(self)
+    }
+}
+
 impl PipelineResult {
     /// Borrow the complete source-bound diagnostic report without copying evidence.
     #[must_use]
     pub const fn audit(&self) -> PipelineAudit<'_> {
         PipelineAudit {
-            schema_version: 4,
+            schema_version: 5,
+            preparation: None,
             pdf_sha256: self.draft.pdf_sha256.as_str(),
             model: self.draft.model.as_str(),
             policy: self.policy,
