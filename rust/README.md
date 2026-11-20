@@ -392,3 +392,18 @@ and fragment inference, but preserves the native-text-only certificate.
 `--ocr-threads N` sets ONNX intra-operation threads and inter-operation
 threads to one (omitting it retains the backend's default policy).
 The explicit thread count appears in model provenance.
+
+## Comparing recognition drafts
+
+```sh
+pdf-redox-ocr-compare --pdf original.pdf --baseline python.json --candidate rust.json --report comparison.json
+```
+
+Both drafts must have the same source SHA-256 and page set. The model-free
+report connects overlapping polygons into bipartite components instead of
+matching line indices. Exact/normalized-text agreements, one-to-one text
+differences, split/merge components and unassociated lines are listed
+separately, with original line indices, text, confidence and geometry.
+Native exclusion counts and ordered coordinate differences are recorded.
+Threshold-qualified counts include reviewed lines, but do not claim final
+overlay admission. This is a disagreement report, not ground-truth accuracy.

@@ -76,3 +76,8 @@ required-features = ["cli"]
 name = "pdf-redox-ocr-line-audit"
 path = "src/bin/pdf-redox-ocr-line-audit.rs"
 required-features = ["pdf-integration", "cli"]
+
+[[bin]]
+name = "pdf-redox-ocr-compare"
+path = "src/bin/pdf-redox-ocr-compare.rs"
+required-features = ["cli"]

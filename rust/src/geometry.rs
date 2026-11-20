@@ -10,6 +10,41 @@ pub struct Point(pub f64, pub f64);
 /// Four vertices in PDF user-space coordinates.
 pub type Quad = [Point; 4];
 
+/// Axis-aligned extent of a fixed-size polygon. Unlike `PageBox`, this may
+/// be degenerate; neither coordinate axis assumes a particular orientation.
+#[derive(Clone, Copy)]
+pub(crate) struct QuadBounds {
+    pub(crate) min_x: f64,
+    pub(crate) min_y: f64,
+    pub(crate) max_x: f64,
+    pub(crate) max_y: f64,
+}
+
+impl QuadBounds {
+    pub(crate) fn new(quad: &Quad) -> Self {
+        let mut result = Self {
+            min_x: f64::INFINITY,
+            min_y: f64::INFINITY,
+            max_x: f64::NEG_INFINITY,
+            max_y: f64::NEG_INFINITY,
+        };
+        for &Point(x, y) in quad {
+            result.min_x = result.min_x.min(x);
+            result.min_y = result.min_y.min(y);
+            result.max_x = result.max_x.max(x);
+            result.max_y = result.max_y.max(y);
+        }
+        result
+    }
+
+    pub(crate) const fn intersects(self, other: Self) -> bool {
+        self.min_x < other.max_x
+            && other.min_x < self.max_x
+            && self.min_y < other.max_y
+            && other.min_y < self.max_y
+    }
+}
+
 /// Validated PDF page box with potentially nonzero origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PageBox {

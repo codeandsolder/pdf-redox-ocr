@@ -4,7 +4,9 @@
 //! components are independent of the inference backend.
 
 pub mod artifacts;
+mod disjoint_set;
 pub mod draft;
+pub mod draft_compare;
 pub mod geometry;
 pub mod glyph_isolation;
 pub mod glyph_topology;

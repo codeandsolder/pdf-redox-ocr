@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::{
     Error, PageNumber,
+    disjoint_set::DisjointSet,
     geometry::{DisplayMapper, PageBox, Point},
     paint_scan::{ImagePaint, PagePaintSummary, PdfMatrix},
 };
@@ -280,24 +281,8 @@ fn bucket_cells(box_: PageBox, page: PageBox, cell: f64) -> Option<Vec<(i64, i64
     )
 }
 
-const fn root(parents: &mut [usize], mut index: usize) -> usize {
-    while parents[index] != index {
-        parents[index] = parents[parents[index]];
-        index = parents[index];
-    }
-    index
-}
-
-fn connect(parents: &mut [usize], left: usize, right: usize) {
-    let a = root(parents, left);
-    let b = root(parents, right);
-    if a != b {
-        parents[a.max(b)] = a.min(b);
-    }
-}
-
 fn connected_components(items: &[Item], page: PageBox) -> BTreeMap<usize, Vec<Item>> {
-    let mut parents = (0..items.len()).collect::<Vec<_>>();
+    let mut components = DisjointSet::new(items.len());
     let cell = (page.width() * page.height()
         / num_traits::ToPrimitive::to_f64(&items.len().max(1)).unwrap_or(f64::MAX))
     .sqrt();
@@ -318,7 +303,7 @@ fn connected_components(items: &[Item], page: PageBox) -> BTreeMap<usize, Vec<It
         }
         for j in candidate_indices {
             if compatible(item, items[j]) {
-                connect(&mut parents, i, j);
+                components.connect(i, j);
             }
         }
         // A compatible future source can be up to 1/(1-tolerance)
@@ -341,7 +326,7 @@ fn connected_components(items: &[Item], page: PageBox) -> BTreeMap<usize, Vec<It
     }
     let mut groups = BTreeMap::<usize, Vec<Item>>::new();
     for (i, &item) in items.iter().enumerate() {
-        groups.entry(root(&mut parents, i)).or_default().push(item);
+        groups.entry(components.root(i)).or_default().push(item);
     }
     groups
 }
@@ -590,11 +575,11 @@ mod tests {
         let mut components = if indexed {
             super::connected_components(items, page)
         } else {
-            let mut parents = (0..items.len()).collect::<Vec<_>>();
+            let mut components = DisjointSet::new(items.len());
             for (i, &item) in items.iter().enumerate() {
                 for (j, &other) in items.iter().enumerate().skip(i + 1) {
                     if super::compatible(item, other) {
-                        super::connect(&mut parents, i, j);
+                        super::components.connect(i, j);
                     }
                 }
             }

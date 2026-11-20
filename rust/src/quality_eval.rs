@@ -154,7 +154,7 @@ impl Counters {
     }
 }
 
-fn normalized(s: &str) -> String {
+pub(crate) fn normalized(s: &str) -> String {
     s.nfkc().filter(|c| !c.is_whitespace()).collect()
 }
 

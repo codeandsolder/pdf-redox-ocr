@@ -11,7 +11,7 @@ use image::{Rgb, RgbImage};
 use crate::{
     Error,
     draft::OcrLine,
-    geometry::{DisplayMapper, Point, Quad},
+    geometry::{DisplayMapper, Point, Quad, QuadBounds},
     mosaic::{MosaicAxes, MosaicBudget, MosaicPlan},
     paint_scan::ImagePaint,
     rasterize::{CropPixelMapper, render_rgb_region, sample_whitened},
@@ -39,20 +39,6 @@ fn inside_convex(point: Point, polygon: &Quad) -> bool {
     true
 }
 
-fn intersects(a: &Quad, b: &Quad) -> bool {
-    let rect = |quad: &Quad| {
-        [
-            quad.iter().map(|p| p.0).fold(f64::INFINITY, f64::min),
-            quad.iter().map(|p| p.1).fold(f64::INFINITY, f64::min),
-            quad.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max),
-            quad.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max),
-        ]
-    };
-    let a = rect(a);
-    let b = rect(b);
-    a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
-}
-
 fn disjoint_groups(plan: &MosaicPlan, paints: &[ImagePaint]) -> bool {
     let memberships = plan
         .groups
@@ -68,7 +54,7 @@ fn disjoint_groups(plan: &MosaicPlan, paints: &[ImagePaint]) -> bool {
     for (i, first) in paints.iter().enumerate() {
         for next in &paints[i + 1..] {
             if memberships.get(&first.paint_index) != memberships.get(&next.paint_index)
-                && intersects(&first.page_quad, &next.page_quad)
+                && QuadBounds::new(&first.page_quad).intersects(QuadBounds::new(&next.page_quad))
             {
                 return false;
             }
@@ -90,10 +76,12 @@ fn paint_clip_mask(
     let mut painted = vec![false; len];
     for paint in paints {
         let quad = paint.page_quad.map(|point| mapper.to_raster(point));
-        let mut left = quad.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
-        let mut top = quad.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
-        let mut right = quad.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
-        let mut bottom = quad.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+        let QuadBounds {
+            min_x: mut left,
+            min_y: mut top,
+            max_x: mut right,
+            max_y: mut bottom,
+        } = QuadBounds::new(&quad);
         // Pixel-center masks may be a fraction of a pixel smaller than a
         // final painted image. One pixel guard preserves antialiased borders.
         left = (left.floor() - 1.0).max(0.0);
