@@ -161,8 +161,17 @@ pub struct CharacterConfirmation {
     pub outcome: ConfirmationOutcome,
 }
 
+/// Actual classifier observation, before recognition or crop repair.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct LineOrientationObservation {
+    pub detection_index: usize,
+    pub half_turn_score: f32,
+    pub applied: bool,
+}
+
 #[derive(Debug, Default, Serialize)]
 pub struct CharacterAuditReport {
+    pub orientation: Vec<LineOrientationObservation>,
     pub lines: Vec<CharacterLineAudit>,
     pub skipped_budget: usize,
     pub invalid_metadata: usize,

@@ -163,6 +163,8 @@ pub struct RecognitionStats {
     pub boundary_candidates: usize,
     pub boundary_accepted: usize,
     pub crop_failures: usize,
+    pub orientation_classified: usize,
+    pub orientation_half_turns: usize,
     pub confirmation_batches: usize,
     pub confirmation_attempts: usize,
     pub confirmation_accepted: usize,
@@ -226,6 +228,8 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
                 boundary_candidates: 0,
                 boundary_accepted: 0,
                 crop_failures: 0,
+                orientation_classified: 0,
+                orientation_half_turns: 0,
                 confirmation_batches: 0,
                 confirmation_attempts: 0,
                 confirmation_accepted: 0,
@@ -291,6 +295,9 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
     }
 
     fn record_characters(&mut self, key: RasterKey, report: CharacterAuditReport) -> bool {
+        self.stats.orientation_classified += report.orientation.len();
+        self.stats.orientation_half_turns +=
+            report.orientation.iter().filter(|e| e.applied).count();
         self.stats.confirmation_batches += report.confirmation_batches;
         self.stats.confirmation_attempts += report.confirmations.len();
         self.stats.confirmation_accepted += report
@@ -304,7 +311,11 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
             .filter(|c| c.outcome.failed())
             .count();
         self.stats.confirmation_failures += failures;
-        if !report.lines.is_empty() || report.skipped_budget > 0 || report.invalid_metadata > 0 {
+        if !report.orientation.is_empty()
+            || !report.lines.is_empty()
+            || report.skipped_budget > 0
+            || report.invalid_metadata > 0
+        {
             self.character_audits.push(RasterCharacterAudit {
                 dimensions: key.dimensions,
                 rgb_sha256: hex::encode(key.digest),

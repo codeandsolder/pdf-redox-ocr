@@ -4,6 +4,7 @@
 //! Original raster geometry is retained; there is no document rectification.
 
 use std::{
+    collections::BTreeSet,
     num::NonZeroUsize,
     sync::{Arc, OnceLock},
 };
@@ -22,7 +23,8 @@ use oar_ocr::{
     },
     domain::{
         adapters::{
-            TextDetectionAdapter, TextDetectionAdapterBuilder, TextRecognitionAdapter,
+            TextDetectionAdapter, TextDetectionAdapterBuilder, TextLineOrientationAdapter,
+            TextLineOrientationAdapterBuilder, TextRecognitionAdapter,
             TextRecognitionAdapterBuilder,
         },
         tasks::{TextDetectionConfig, TextRecognitionConfig, TextRecognitionOutput},
@@ -37,10 +39,10 @@ use crate::{
     Error,
     character_alignment::{
         BatchGeometry, CharacterAuditReport, CharacterConfirmation, ConfirmationOutcome,
-        INPUT_SHAPE, MAX_INPUT_WIDTH,
+        INPUT_SHAPE, LineOrientationObservation, MAX_INPUT_WIDTH,
     },
     crop_geometry::CropGeometry,
-    crop_repair::{BodyPrediction, RepairPolicy, RepairReport, repair_crops},
+    crop_repair::{BodyPrediction, RepairCrop, RepairPolicy, RepairReport, repair_crops},
     geometry::{Point, Quad},
     glyph_confirmation::ConfirmationPolicy,
     recognition::{PixelLine, RasterRecognition, RecognitionBackend},
@@ -69,8 +71,20 @@ impl RecognitionModel {
         }
     }
 }
+/// Optional classification of the rectified text-line reading direction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+pub enum LineOrientationMode {
+    #[default]
+    Disabled,
+    PpLcnet,
+}
+
 const DICTIONARY: &str = "ppocrv6_dict.txt";
 const REGION_BATCH_SIZE: usize = 4;
+const ORIENTATION_MODEL: &str = "pp-lcnet_x0_25_textline_ori.onnx";
+const ORIENTATION_BATCH_SIZE: usize = 32;
+const HALF_TURN_THRESHOLD: f32 = 0.9;
 
 /// One lazily initialized CPU OCR pipeline reused across multiple rasters.
 pub struct OcrInference {
@@ -80,6 +94,7 @@ pub struct OcrInference {
     character_audit: bool,
     model: RecognitionModel,
     alternative: Option<AlternativeRecognizer>,
+    line_orientation: LineOrientationMode,
     alternative_backend: OnceLock<Result<TextRecognitionAdapter, String>>,
     profile: String,
 }
@@ -93,6 +108,7 @@ pub struct AlternativeRecognizer {
 struct OcrModels {
     detection: TextDetectionAdapter,
     recognition: TextRecognitionAdapter,
+    orientation: Option<TextLineOrientationAdapter>,
 }
 
 /// Retain actual page/native-source detail up to a bounded detector size.
@@ -122,6 +138,7 @@ struct PrimaryCrop {
     bbox: BoundingBox,
     pixels: Arc<RgbImage>,
     ratio: f32,
+    rotate180: bool,
 }
 
 impl PrimaryCrop {
@@ -134,6 +151,7 @@ impl PrimaryCrop {
             bbox,
             pixels,
             ratio,
+            rotate180: false,
         }
     }
 }
@@ -192,8 +210,45 @@ struct ConfirmationCrop {
 
 struct PrimaryRecognition {
     lines: Vec<PixelLine>,
+    half_turns: BTreeSet<usize>,
     audit: CharacterAuditReport,
     candidates: Vec<ConfirmationCrop>,
+}
+
+impl PrimaryRecognition {
+    fn scatter(
+        ordered: Vec<Option<(PixelLine, bool)>>,
+        mut audit: CharacterAuditReport,
+        mut candidate_crops: std::collections::BTreeMap<usize, Arc<RgbImage>>,
+    ) -> Self {
+        audit
+            .lines
+            .sort_unstable_by_key(|entry| entry.detection_index);
+        let mut lines = Vec::new();
+        let mut candidates = Vec::new();
+        let mut half_turns = BTreeSet::new();
+        for (index, line) in ordered.into_iter().enumerate() {
+            if let Some((line, rotate180)) = line {
+                if rotate180 {
+                    half_turns.insert(lines.len());
+                }
+                if let Some(pixels) = candidate_crops.remove(&index) {
+                    candidates.push(ConfirmationCrop {
+                        detection_index: index,
+                        line_index: lines.len(),
+                        pixels,
+                    });
+                }
+                lines.push(line);
+            }
+        }
+        Self {
+            lines,
+            half_turns,
+            audit,
+            candidates,
+        }
+    }
 }
 
 impl OcrModels {
@@ -201,13 +256,29 @@ impl OcrModels {
         threads: Option<NonZeroUsize>,
         character_audit: bool,
         model: RecognitionModel,
+        line_orientation: LineOrientationMode,
     ) -> Result<Self, Error> {
         let det_path = resolve_path(DETECTION_MODEL).map_err(|error| inference_error(&error))?;
         let mut detection = TextDetectionAdapterBuilder::new().with_config(small_detector_config());
         if let Some(threads) = threads {
             detection = detection.with_ort_config(ort_config(threads));
         }
+        let orientation = if line_orientation == LineOrientationMode::PpLcnet {
+            let path = resolve_path(ORIENTATION_MODEL).map_err(|error| inference_error(&error))?;
+            let mut builder = TextLineOrientationAdapterBuilder::new();
+            if let Some(threads) = threads {
+                builder = builder.with_ort_config(ort_config(threads));
+            }
+            Some(
+                builder
+                    .build(path)
+                    .map_err(|error| inference_error(&error))?,
+            )
+        } else {
+            None
+        };
         Ok(Self {
+            orientation,
             detection: detection
                 .build(det_path)
                 .map_err(|error| inference_error(&error))?,
@@ -252,6 +323,48 @@ impl OcrModels {
         Ok((count, crops))
     }
 
+    fn orient_crops(
+        &self,
+        crops: &mut [PrimaryCrop],
+    ) -> Result<Vec<LineOrientationObservation>, Error> {
+        let Some(classifier) = &self.orientation else {
+            return Ok(Vec::new());
+        };
+        let mut evidence = Vec::with_capacity(crops.len());
+        for batch in crops.chunks_mut(ORIENTATION_BATCH_SIZE) {
+            let images = batch.iter().map(|crop| Arc::clone(&crop.pixels)).collect();
+            let result = classifier
+                .execute(ImageTaskInput::from_arc_images(images), None)
+                .map_err(|error| inference_error(&error))?;
+            if result.classifications.len() != batch.len() {
+                return Err(Error::Inference(
+                    "orientation classifier returned wrong batch size".into(),
+                ));
+            }
+            for (crop, classes) in batch.iter_mut().zip(result.classifications) {
+                let score = classes
+                    .iter()
+                    .find(|class| class.class_id == 1)
+                    .map(|class| class.score)
+                    .filter(|score| (0.0..=1.0).contains(score))
+                    .ok_or_else(|| {
+                        Error::Inference("missing valid half-turn classification".into())
+                    })?;
+                crop.rotate180 = score >= HALF_TURN_THRESHOLD;
+                if crop.rotate180 {
+                    crop.pixels = Arc::new(image::imageops::rotate180(&*crop.pixels));
+                }
+                evidence.push(LineOrientationObservation {
+                    detection_index: crop.index,
+                    half_turn_score: score,
+                    applied: crop.rotate180,
+                });
+            }
+        }
+        evidence.sort_unstable_by_key(|entry| entry.detection_index);
+        Ok(evidence)
+    }
+
     fn recognize_primary(
         &self,
         image: &Arc<RgbImage>,
@@ -259,9 +372,12 @@ impl OcrModels {
         confirmation_threshold: Option<f64>,
     ) -> Result<PrimaryRecognition, Error> {
         let (width, height) = (f64::from(image.width()), f64::from(image.height()));
-        let (count, crops) = self.primary_crops(image)?;
+        let (count, mut crops) = self.primary_crops(image)?;
         let mut ordered = vec![None; count];
-        let mut audit = CharacterAuditReport::default();
+        let mut audit = CharacterAuditReport {
+            orientation: self.orient_crops(&mut crops)?,
+            ..Default::default()
+        };
         let mut candidate_crops = std::collections::BTreeMap::new();
         let mut crops = crops.into_iter();
         let positions = character_audit || confirmation_threshold.is_some();
@@ -269,7 +385,7 @@ impl OcrModels {
             let (descriptors, images): (Vec<_>, Vec<_>) = crops
                 .by_ref()
                 .take(REGION_BATCH_SIZE)
-                .map(|crop| ((crop.index, crop.bbox), crop.pixels))
+                .map(|crop| ((crop.index, crop.bbox, crop.rotate180), crop.pixels))
                 .unzip();
             if descriptors.is_empty() {
                 break;
@@ -291,7 +407,7 @@ impl OcrModels {
             let predictions = predict_crops(&self.recognition, images, None)?;
             // The adapter preserves batch positions including empty/filtered
             // observations. Keep original detection indices until the scatter.
-            for (batch_index, ((index, bbox), (text, confidence))) in descriptors
+            for (batch_index, ((index, bbox, rotate180), (text, confidence))) in descriptors
                 .into_iter()
                 .zip(predictions.texts.into_iter().zip(predictions.scores))
                 .enumerate()
@@ -326,49 +442,30 @@ impl OcrModels {
                                     line.quad,
                                     image.dimensions(),
                                     crop.dimensions(),
-                                );
+                                )
+                                .map(|geometry| geometry.with_half_turn(rotate180));
                             }
                             if unqualified {
                                 candidate_crops.insert(index, Arc::clone(crop));
                             }
                         }
                     }
-                    ordered[index] = Some(line);
+                    ordered[index] = Some((line, rotate180));
                 }
             }
         }
-        audit
-            .lines
-            .sort_unstable_by_key(|entry| entry.detection_index);
-        let mut lines = Vec::new();
-        let mut candidates = Vec::new();
-        for (index, line) in ordered.into_iter().enumerate() {
-            if let Some(line) = line {
-                if let Some(pixels) = candidate_crops.remove(&index) {
-                    candidates.push(ConfirmationCrop {
-                        detection_index: index,
-                        line_index: lines.len(),
-                        pixels,
-                    });
-                }
-                lines.push(line);
-            }
-        }
-        Ok(PrimaryRecognition {
-            lines,
-            audit,
-            candidates,
-        })
+        Ok(PrimaryRecognition::scatter(ordered, audit, candidate_crops))
     }
 
     fn recognize_bodies(
         &self,
         image: &RgbImage,
-        quads: &[Quad],
+        quads: &[RepairCrop],
     ) -> Result<Vec<BodyPrediction>, Error> {
         let mut crops = Vec::with_capacity(quads.len());
         for quad in quads {
             let points = quad
+                .quad
                 .iter()
                 .map(|&Point(x, y)| {
                     Ok(oar_ocr::processors::Point::new(
@@ -379,9 +476,13 @@ impl OcrModels {
                     ))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
-            crops.push(Arc::new(
-                get_rotate_crop_image(image, &points).map_err(|error| inference_error(&error))?,
-            ));
+            let crop =
+                get_rotate_crop_image(image, &points).map_err(|error| inference_error(&error))?;
+            crops.push(Arc::new(if quad.rotate180 {
+                image::imageops::rotate180(&crop)
+            } else {
+                crop
+            }));
         }
         // Keep all real hypotheses in the audit, including low scores.
         let output = predict_crops(
@@ -494,6 +595,7 @@ impl OcrInference {
         character_audit: bool,
         model: RecognitionModel,
         alternative: Option<AlternativeRecognizer>,
+        line_orientation: LineOrientationMode,
     ) -> Self {
         let profile = threads.map_or_else(
             || model.profile().to_owned(),
@@ -507,7 +609,15 @@ impl OcrInference {
             || profile.clone(),
             |alt| format!("{profile}; alternative={}", alt.model.filename()),
         );
+        let profile = if line_orientation == LineOrientationMode::PpLcnet {
+            format!(
+                "{profile}; line orientation={ORIENTATION_MODEL} threshold={HALF_TURN_THRESHOLD}"
+            )
+        } else {
+            profile
+        };
         Self {
+            line_orientation,
             backend: OnceLock::new(),
             threads,
             repair,
@@ -573,6 +683,7 @@ impl OcrInference {
                     self.threads,
                     self.character_audit || self.alternative.is_some(),
                     self.model,
+                    self.line_orientation,
                 )
                 .map_err(|error| error.to_string())
             })
@@ -599,9 +710,13 @@ impl RecognitionBackend for OcrInference {
             self.alternative.map(|alt| alt.policy.protected_score),
         )?;
         let crop_repair = if self.repair.leaders || self.repair.boundaries {
-            repair_crops(&rgb, &mut primary.lines, self.repair, |quads| {
-                backend.recognize_bodies(&rgb, quads)
-            })
+            repair_crops(
+                &rgb,
+                &mut primary.lines,
+                &primary.half_turns,
+                self.repair,
+                |quads| backend.recognize_bodies(&rgb, quads),
+            )
         } else {
             RepairReport::default()
         };

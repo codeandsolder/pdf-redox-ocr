@@ -139,7 +139,13 @@ raster dimensions. The default LRU budget retains at most 256 entries and
 inferences are never cached. `--no-recognition-cache` disables lookup and
 retention for diagnostic comparison, and `PipelineResult.recognition`
 reports full-raster calls, cache hits, evictions, retained payload and additional crop batches, with separate leader and boundary candidate outcomes.
-The optional `--report audit.json` writes a separate schema-11 diagnostic
+The experimental `--line-orientation pp-lcnet` option applies PP-LCNet half-turn classification
+to the actual rectified crops before either recognizer. Only a half-turn score
+of at least 0.9 triggers rotation. Revised crops and character projection retain
+the selected reading direction; the audit includes classifier evidence. Native-only
+documents still need no model session.
+
+The optional `--report audit.json` writes a separate schema-12 diagnostic
 report bound to the original PDF digest and model provenance. It includes
 the validated policy, raw native-image observations in source-pixel
 coordinates, original paint paths and native-only blockers, the per-page
@@ -401,7 +407,7 @@ At least one draft, searchable PDF or audit must be requested.
 Retaining a draft with processing requires `--optimized-pdf`, because
 its SHA and user-space geometry bind to the exact prepared PDF, not the
 original source. The optimizer report and actual configuration are recorded
-under `preparation` in schema-11 CLI audits, alongside both input hashes;
+under `preparation` in schema-12 CLI audits, alongside both input hashes;
 the existing `pdf_sha256` refers to the OCR input. Reverify the original
 and prepared source hashes before applying or publishing results.
 Processing is intentionally not lossless in every case (microstroke
@@ -489,7 +495,7 @@ retained, not invented. Failed or conflicting crops leave original
 observations unchanged. Failed repair attempts prevent caching the incomplete
 raster result; successful exact RGB reuse includes the confirmed repairs.
 
-Pipeline audit schema 11 records original pixel-space observations, sample
+Pipeline audit schema 12 records original pixel-space observations, sample
 frame, component bounds, typed crop reason, proposed quad and each actual
 prediction/decision by exact RGB SHA-256 and dimensions. Full-raster inference
 calls remain separate from recognition-only batch counters. Disable the stage
@@ -519,7 +525,7 @@ substitutions are encoded. Accepted crop geometry and model confidence
 replace the original; failures prevent exact-RGB result caching. The
 experimental flag is off by default until broader representative validation.
 All repair kinds share a 2M-pixel per-window and 16M-pixel per-raster sampling
-budget, prioritizing terminal-leader candidates, and schema-11 `crop_repairs` records the original prediction,
+budget, prioritizing terminal-leader candidates, and schema-12 `crop_repairs` records the original prediction,
 actual geometry, type-specific evidence and independent prediction/outcome.
 `recognition.crop_batches` counts actual recognition-only batches (leader and boundary batches are separate to preserve existing leader inference ordering);
 leader/boundary candidate/accepted counters are independent.
@@ -565,7 +571,7 @@ sorted detector index (not final draft index), exact rectified RGB crop
 hash/dimensions, padding geometry, raw CTC column indices, projected ink
 and alignment candidates. Component indices address the entry's component
 array. Positions and ink bounds are in the **rectified recognition-crop
-frame**. schema 11 additionally records a reconstructible projective crop
+frame**. schema 12 additionally records a reconstructible projective crop
 mapping for actual detector quadrilaterals, verified against returned crop
 dimensions and the OAR rotation contract. Full-page raster occurrences have
 explicit SHA-bound page transforms. This permits vector association without

@@ -17,6 +17,7 @@ pub struct CropGeometry {
     pub parent_corners: Quad, // TL, TR, BR, BL before optional rotation
     pub unrotated_dimensions: (u32, u32),
     pub rotate270: bool,
+    pub rotate180: bool,
     pub integer_crop: bool,
 }
 
@@ -89,8 +90,16 @@ impl CropGeometry {
             parent_corners: points,
             unrotated_dimensions: dimensions,
             rotate270,
+            rotate180: false,
             integer_crop,
         })
+    }
+
+    /// Account for a classifier-selected half-turn after rectification.
+    #[must_use]
+    pub const fn with_half_turn(mut self, rotate180: bool) -> Self {
+        self.rotate180 = rotate180;
+        self
     }
 
     /// Return a mapped ink bounding rectangle in parent RGB pixel corners.
@@ -112,6 +121,16 @@ impl CropGeometry {
     fn map(self, point: Point) -> Option<Point> {
         let (width, height) = self.unrotated_dimensions;
         let (width, height) = (f64::from(width), f64::from(height));
+        let point = if self.rotate180 {
+            let (w, h) = if self.rotate270 {
+                (height, width)
+            } else {
+                (width, height)
+            };
+            Point(w - point.0, h - point.1)
+        } else {
+            point
+        };
         let unrotated = if self.rotate270 {
             Point(width - point.1, point.0)
         } else {
@@ -166,6 +185,10 @@ mod tests {
             assert!(geometry.integer_crop);
             assert_eq!(geometry.rotate270, rotation);
             assert_eq!(geometry.map(Point(3., 4.)), Some(mapped));
+            assert_eq!(
+                geometry.with_half_turn(true).map(Point(37., 6.)),
+                Some(mapped)
+            );
         }
         Ok(())
     }

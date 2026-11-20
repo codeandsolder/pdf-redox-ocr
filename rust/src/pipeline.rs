@@ -360,7 +360,7 @@ impl PipelineResult {
     #[must_use]
     pub const fn audit(&self) -> PipelineAudit<'_> {
         PipelineAudit {
-            schema_version: 11,
+            schema_version: 12,
             preparation: None,
             pdf_sha256: self.draft.pdf_sha256.as_str(),
             model: self.draft.model.as_str(),
@@ -462,6 +462,12 @@ fn report_recognition(recognition: RecognitionStats, observer: &mut impl Pipelin
             recognition.boundary_candidates,
             recognition.crop_batches,
             recognition.crop_failures
+        ));
+    }
+    if recognition.orientation_classified > 0 {
+        observer.message(format!(
+            "line orientation: {}/{} half-turns",
+            recognition.orientation_half_turns, recognition.orientation_classified
         ));
     }
     if recognition.confirmation_attempts > 0 {

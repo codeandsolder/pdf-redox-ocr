@@ -14,7 +14,7 @@ use pdf_redox_ocr::{
     artifacts::{check_output_paths as check_paths, write_atomic},
     crop_repair::RepairPolicy,
     draft::OcrDraft,
-    inference::{OcrInference, RecognitionModel},
+    inference::{LineOrientationMode, OcrInference, RecognitionModel},
     input_preparation::{PreparationMode, PreparedInput},
     mosaic::MosaicBudget,
     native_images::NativeImageBudget,
@@ -143,6 +143,9 @@ struct RecognitionArgs {
     /// ONNX intra-operation CPU thread count (default: backend policy).
     #[arg(long)]
     ocr_threads: Option<NonZeroUsize>,
+    /// Experimental: classify the line reading direction before recognition.
+    #[arg(long, value_enum, default_value = "disabled")]
+    line_orientation: LineOrientationMode,
     /// Select the PP-OCRv6 recognition model, retaining the same detector.
     #[arg(long, value_enum, default_value = "small")]
     recognizer: RecognitionModel,
@@ -428,6 +431,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
                 ),
             }
         }),
+        args.recognition.line_orientation,
     );
     let mut result = job.recognize(
         &engine,

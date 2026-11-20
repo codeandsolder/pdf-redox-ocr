@@ -3,6 +3,8 @@
 //! Layout-leader removal and boundary extension share sampling, inference,
 //! admission, batching and provenance. No unsupported interior edits.
 
+use std::collections::BTreeSet;
+
 use image::RgbImage;
 use serde::Serialize;
 
@@ -34,6 +36,7 @@ pub struct CropRepair {
     pub line_index: usize,
     pub original: PixelLine,
     pub proposed_quad: Quad,
+    pub rotate180: bool,
     pub sample_quad: Quad,
     pub sample_dimensions: (u32, u32),
     pub observation: InkBounds,
@@ -110,8 +113,15 @@ fn leader_candidate(line: &PixelLine, policy: RepairPolicy) -> bool {
             .any(|edge| has_leader_text(&line.text, edge))
 }
 
+/// A revised crop with the parent's classified reading direction.
+#[derive(Clone, Copy, Debug)]
+pub struct RepairCrop {
+    pub quad: Quad,
+    pub rotate180: bool,
+}
+
 struct CropEvidence {
-    quad: Quad,
+    crop: RepairCrop,
     sample_quad: Quad,
     dimensions: (u32, u32),
     observation: InkBounds,
@@ -148,6 +158,7 @@ fn crop_evidence(
     image: &RgbImage,
     lines: &[PixelLine],
     index: usize,
+    rotate180: bool,
     policy: RepairPolicy,
     budget: &mut u64,
 ) -> Option<CropEvidence> {
@@ -159,7 +170,7 @@ fn crop_evidence(
     // OAR rotates tall crops counterclockwise, so their reading axis grows
     // along the original downward image axis. The diagnostic frame alone
     // has no reading-direction contract.
-    if frame.axis_swapped {
+    if frame.axis_swapped != rotate180 {
         frame.corners.rotate_left(2);
     }
     let inside = |Point(x, y): Point| {
@@ -225,11 +236,14 @@ fn crop_evidence(
     // predictor still has to confirm the exact body on the proved edge.
     // Restore original detector corner identity when mapping back.
     let mut quad = window.quad(frame, body);
+    if rotate180 {
+        quad.rotate_left(2);
+    }
     if frame.axis_swapped {
         quad.rotate_left(1);
     }
     Some(CropEvidence {
-        quad,
+        crop: RepairCrop { quad, rotate180 },
         sample_quad: window.quad(
             frame,
             InkBounds {
@@ -293,13 +307,13 @@ fn repair_batch(
     batch: Vec<(usize, CropEvidence)>,
     lines: &mut [PixelLine],
     threshold: f64,
-    recognize: &mut impl FnMut(&[Quad]) -> Result<Vec<BodyPrediction>, Error>,
+    recognize: &mut impl FnMut(&[RepairCrop]) -> Result<Vec<BodyPrediction>, Error>,
     report: &mut RepairReport,
 ) {
     if batch.is_empty() {
         return;
     }
-    let quads = batch.iter().map(|(_, crop)| crop.quad).collect::<Vec<_>>();
+    let quads = batch.iter().map(|(_, crop)| crop.crop).collect::<Vec<_>>();
     report.batches += 1;
     let predictions = match recognize(&quads) {
         Ok(predictions) if predictions.len() == batch.len() => Ok(predictions),
@@ -337,12 +351,13 @@ fn repair_batch(
         if let RepairOutcome::Accepted { prediction } = &outcome {
             prediction.text.trim().clone_into(&mut line.text);
             line.confidence = prediction.confidence;
-            line.quad = crop.quad;
+            line.quad = crop.crop.quad;
         }
         report.repairs.push(CropRepair {
             line_index: index,
             original,
-            proposed_quad: crop.quad,
+            proposed_quad: crop.crop.quad,
+            rotate180: crop.crop.rotate180,
             sample_quad: crop.sample_quad,
             sample_dimensions: crop.dimensions,
             observation: crop.observation,
@@ -358,8 +373,9 @@ fn repair_batch(
 pub fn repair_crops(
     image: &RgbImage,
     lines: &mut [PixelLine],
+    half_turns: &BTreeSet<usize>,
     policy: RepairPolicy,
-    mut recognize: impl FnMut(&[Quad]) -> Result<Vec<BodyPrediction>, Error>,
+    mut recognize: impl FnMut(&[RepairCrop]) -> Result<Vec<BodyPrediction>, Error>,
 ) -> RepairReport {
     let mut budget = MAX_INPUT_SAMPLE_PIXELS;
     // Preserve the existing leader scan priority and inference batch shape,
@@ -371,7 +387,15 @@ pub fn repair_crops(
         .into_iter()
         .chain(remaining)
         .filter_map(|index| {
-            crop_evidence(image, lines, index, policy, &mut budget).map(|crop| (index, crop))
+            crop_evidence(
+                image,
+                lines,
+                index,
+                half_turns.contains(&index),
+                policy,
+                &mut budget,
+            )
+            .map(|crop| (index, crop))
         })
         .collect::<Vec<_>>();
     let mut conflicts = vec![false; candidates.len()];
@@ -422,6 +446,7 @@ pub fn repair_crops(
 #[cfg(test)]
 mod tests {
     use super::{BodyPrediction, RepairPolicy, repair_crops};
+    use std::collections::BTreeSet;
     const LEADERS: RepairPolicy = RepairPolicy {
         leaders: true,
         boundaries: false,
@@ -472,9 +497,9 @@ mod tests {
             ("A.B ..", 0.999, false),
         ] {
             let mut lines = vec![original.clone()];
-            let report = repair_crops(&image, &mut lines, LEADERS, |quads| {
+            let report = repair_crops(&image, &mut lines, &BTreeSet::new(), LEADERS, |quads| {
                 assert_eq!(quads.len(), 1);
-                assert!(quads[0][1].0 < 88.0 && quads[0][1].0 > 74.0);
+                assert!(quads[0].quad[1].0 < 88.0 && quads[0].quad[1].0 > 74.0);
                 Ok(vec![BodyPrediction {
                     text: text.into(),
                     confidence,
@@ -502,11 +527,11 @@ mod tests {
             .map(|Point(x, y)| Point(f64::from(image.height()) - y, x));
         original.quad.rotate_left(1);
         let mut lines = vec![original.clone()];
-        let report = repair_crops(&rotated, &mut lines, LEADERS, |quads| {
+        let report = repair_crops(&rotated, &mut lines, &BTreeSet::new(), LEADERS, |quads| {
             assert_eq!(quads.len(), 1);
-            assert!(quads[0][0].1 > 74.0 && quads[0][0].1 < 88.0);
-            assert_eq!(quads[0][2], original.quad[2]);
-            assert_eq!(quads[0][3], original.quad[3]);
+            assert!(quads[0].quad[0].1 > 74.0 && quads[0].quad[0].1 < 88.0);
+            assert_eq!(quads[0].quad[2], original.quad[2]);
+            assert_eq!(quads[0].quad[3], original.quad[3]);
             Ok(vec![BodyPrediction {
                 text: "A.B".into(),
                 confidence: 0.99,
@@ -514,6 +539,39 @@ mod tests {
         });
         assert_eq!(report.repairs.len(), 1);
         assert!(report.repairs[0].outcome.accepted());
+        assert_eq!(lines[0].text, "A.B");
+    }
+
+    #[test]
+    fn half_turn_preserves_reading_edge_and_detector_corners() {
+        let (image, line) = sample();
+        let rotated = image::imageops::rotate180(&image);
+        let mut original = line;
+        original.quad = original
+            .quad
+            .map(|Point(x, y)| Point(f64::from(image.width()) - x, f64::from(image.height()) - y));
+        original.quad.rotate_left(2);
+        let mut lines = vec![original.clone()];
+        let report = repair_crops(
+            &rotated,
+            &mut lines,
+            &BTreeSet::from([0]),
+            LEADERS,
+            |crops| {
+                assert_eq!(crops.len(), 1);
+                assert!(crops[0].rotate180);
+                assert!(crops[0].quad[0].0 > 152. && crops[0].quad[0].0 < 166.);
+                assert_eq!(crops[0].quad[1], original.quad[1]);
+                assert_eq!(crops[0].quad[2], original.quad[2]);
+                Ok(vec![BodyPrediction {
+                    text: "A.B".into(),
+                    confidence: 0.99,
+                }])
+            },
+        );
+        assert_eq!(report.repairs.len(), 1);
+        assert!(report.repairs[0].outcome.accepted());
+        assert!(report.repairs[0].rotate180);
         assert_eq!(lines[0].text, "A.B");
     }
 
@@ -535,7 +593,7 @@ mod tests {
                 let call = self.calls.get();
                 self.calls.set(call + 1);
                 let mut lines = vec![self.original.clone()];
-                let crop_repair = repair_crops(&rgb, &mut lines, LEADERS, |_| {
+                let crop_repair = repair_crops(&rgb, &mut lines, &BTreeSet::new(), LEADERS, |_| {
                     if call == 0 {
                         return Err(Error::Inference("transient body inference".into()));
                     }
@@ -616,9 +674,9 @@ mod tests {
             ("* ABC", 0.96, false),
         ] {
             let mut lines = vec![original.clone()];
-            let report = repair_crops(&image, &mut lines, policy, |quads| {
+            let report = repair_crops(&image, &mut lines, &BTreeSet::new(), policy, |quads| {
                 assert_eq!(quads.len(), 1);
-                assert!(quads[0][0].0 < 20.);
+                assert!(quads[0].quad[0].0 < 20.);
                 Ok(vec![BodyPrediction {
                     text: text.into(),
                     confidence: score,
@@ -639,7 +697,7 @@ mod tests {
             ],
         };
         let mut lines = vec![original.clone(), peer.clone()];
-        let report = repair_crops(&image, &mut lines, policy, |_| {
+        let report = repair_crops(&image, &mut lines, &BTreeSet::new(), policy, |_| {
             Err(Error::Inference("should not recognize owned ink".into()))
         });
         assert!(report.repairs.is_empty());
@@ -660,9 +718,9 @@ mod tests {
             ..LEADERS
         };
         let mut batches = vec![];
-        let report = repair_crops(&image, &mut lines, policy, |quads| {
+        let report = repair_crops(&image, &mut lines, &BTreeSet::new(), policy, |quads| {
             assert_eq!(quads.len(), 1);
-            let is_leader = quads[0][0].1 < 100.;
+            let is_leader = quads[0].quad[0].1 < 100.;
             batches.push(is_leader);
             Ok(vec![BodyPrediction {
                 text: if is_leader { "A.B" } else { "* ABC" }.into(),
@@ -681,13 +739,13 @@ mod tests {
         let mut unpunctuated = original.clone();
         unpunctuated.text = "A.B".into();
         let mut lines = vec![unpunctuated.clone()];
-        let report = repair_crops(&image, &mut lines, LEADERS, |_| {
+        let report = repair_crops(&image, &mut lines, &BTreeSet::new(), LEADERS, |_| {
             Err(Error::Inference("unexpected".into()))
         });
         assert_eq!(report.batches, 0);
         assert_eq!(lines[0], unpunctuated);
         let mut lines = vec![original.clone(); 9];
-        let report = repair_crops(&image, &mut lines, LEADERS, |_| {
+        let report = repair_crops(&image, &mut lines, &BTreeSet::new(), LEADERS, |_| {
             Err(Error::Inference("fixture".into()))
         });
         assert_eq!(report.batches, 3);
