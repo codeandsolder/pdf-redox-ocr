@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, PageNumber, geometry::PageBox};
+use crate::{Error, PageNumber, geometry::PageBox, rasterize::DEFAULT_PAGE_MAX_SIDE};
 
 /// One source image occurrence within a PDF paint stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,7 +41,7 @@ pub struct SourcePolicy {
 impl Default for SourcePolicy {
     fn default() -> Self {
         Self {
-            max_side: 1600,
+            max_side: DEFAULT_PAGE_MAX_SIDE,
             max_inference_pixels: 8_000_000,
             max_sources: 12,
             minimum_source_pixels: 20_000,
@@ -251,8 +251,14 @@ mod tests {
     fn sampling_matches_mediabox_reference() -> Result<(), crate::Error> {
         let pages =
             BTreeMap::from([(PageNumber::new(1)?, PageBox::new([0.0, 0.0, 800.0, 600.0])?)]);
-        let (selected, report) =
-            choose_mixed_raster_sources(&[image(1)], &pages, SourcePolicy::default())?;
+        let (selected, report) = choose_mixed_raster_sources(
+            &[image(1)],
+            &pages,
+            SourcePolicy {
+                max_side: 1600,
+                ..SourcePolicy::default()
+            },
+        )?;
         assert!(selected.contains("15:0"));
         assert_eq!(report.sources[0].native_to_page_render_area_gain, 6.25);
         Ok(())

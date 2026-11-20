@@ -15,7 +15,7 @@ use pdf_redox_ocr::{
     native_font_mask::mask_native_fonts,
     page_selection::parse_page_selection,
     pdf_metadata::PdfMetadata,
-    rasterize::RenderPolicy,
+    rasterize::{DEFAULT_PAGE_MAX_SIDE, RenderPolicy},
     refinement::{Recognition, RefinementPolicy, RefinementRequest, refine_draft, refinement_plan},
 };
 use tempfile::NamedTempFile;
@@ -51,7 +51,7 @@ struct Args {
     #[arg(long, default_value_t = 2)]
     min_chars: usize,
     /// Longest side of the Poppler page render.
-    #[arg(long, default_value_t = 1600)]
+    #[arg(long, default_value_t = DEFAULT_PAGE_MAX_SIDE)]
     max_side: u32,
     #[arg(long, default_value_t = 72)]
     dpi: u32,

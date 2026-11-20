@@ -38,8 +38,12 @@ Optional Poppler native PNG extraction and decoding failures likewise trigger
 page OCR, after preflighting exported raster dimensions against inventory bounds.
 The PP-OCRv6 Small detector retains original detail up to 2048 pixels on its
 longest side rather than downscaling every page to the OAR 960-pixel preset;
-smaller native images are not artificially enlarged. The detector profile is
-included in the OCR draft's model provenance.
+smaller native images are not artificially enlarged. The page raster defaults
+to a 1920-pixel longest side (override with `--max-side`), following targeted
+1600/1800/1920/2048/2304-pixel tests of photographed electrical markings;
+the larger render has higher CPU and memory costs. The detector profile and
+actual page raster limit and DPI are included in OCR draft model provenance
+so outputs from different resolutions are not mistaken for the same run.
 
 The CLI recognizes native image XObjects once per source and skips page OCR
 on independently paint-safe raster-only pages. On mixed pages, native source

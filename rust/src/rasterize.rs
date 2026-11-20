@@ -15,6 +15,9 @@ use crate::{
     geometry::{DisplayMapper, PageBox, Point},
 };
 
+/// Empirically validated default page render limit, below the 2048-pixel detector bound.
+pub const DEFAULT_PAGE_MAX_SIDE: u32 = 1920;
+
 /// Rendering policy shared by full-page fallback and regression measurements.
 #[derive(Clone, Copy, Debug)]
 pub struct RenderPolicy {
@@ -27,7 +30,7 @@ pub struct RenderPolicy {
 impl Default for RenderPolicy {
     fn default() -> Self {
         Self {
-            max_side: 1600,
+            max_side: DEFAULT_PAGE_MAX_SIDE,
             dpi: 72,
         }
     }

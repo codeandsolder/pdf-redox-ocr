@@ -27,7 +27,7 @@ use pdf_redox_ocr::{
     page_selection::parse_page_selection,
     paint_scan::{PaintReport, enumerate_image_paints},
     pdf_metadata::PdfMetadata,
-    rasterize::{RenderPolicy, render_rgb_page},
+    rasterize::{DEFAULT_PAGE_MAX_SIDE, RenderPolicy, render_rgb_page},
     source_ocr::{
         SourceObservation, SourceOnlyResult, source_image_mapper, source_only_candidates,
         source_only_pages,
@@ -54,7 +54,7 @@ struct Args {
     #[arg(long)]
     pages: Option<String>,
     /// Longest rendered dimension in pixels.
-    #[arg(long, default_value_t = 1600)]
+    #[arg(long, default_value_t = DEFAULT_PAGE_MAX_SIDE)]
     max_side: u32,
     /// Base rendering DPI before page size limiting.
     #[arg(long, default_value_t = 72)]
@@ -399,6 +399,16 @@ fn prepare_native_sources(
     Ok(NativePreparation { source_only, mixed })
 }
 
+/// Include the actual page-raster sampling policy in every draft's provenance.
+fn model_provenance(stage: &str, render: RenderPolicy) -> String {
+    format!(
+        "{} {stage} page-raster-max-side={} page-raster-dpi={}",
+        OcrInference::MODEL_PROFILE,
+        render.max_side,
+        render.dpi,
+    )
+}
+
 /// Bind OCR observations to their original PDF and atomically publish outputs.
 fn write_draft_and_overlay(
     args: &Args,
@@ -530,12 +540,12 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     }
     let raster_draft = OcrDraft::new(
         digest.clone(),
-        format!("{} native-source", OcrInference::MODEL_PROFILE),
+        model_provenance("native-source", policy),
         raster_pages,
     );
     let fallback_draft = OcrDraft::new(
         digest,
-        format!("{} page-fallback", OcrInference::MODEL_PROFILE),
+        model_provenance("page-fallback", policy),
         fallback_pages,
     );
     let (draft, stats, _proposals) = merge_ocr(MergeInput {
@@ -564,7 +574,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_paths, parse_page_selection};
+    use super::{check_paths, model_provenance, parse_page_selection};
+    use pdf_redox_ocr::rasterize::{DEFAULT_PAGE_MAX_SIDE, RenderPolicy};
     use std::fs;
 
     #[test]
@@ -584,6 +595,26 @@ mod tests {
             assert!(check_paths(&input, &[&link]).is_err());
         }
         Ok(())
+    }
+
+    #[test]
+    fn draft_provenance_records_actual_render_configuration() {
+        let default = RenderPolicy::default();
+        assert_eq!(default.max_side, DEFAULT_PAGE_MAX_SIDE);
+        let fallback = model_provenance("page-fallback", default);
+        assert!(fallback.contains("page-raster-max-side=1920"));
+        assert!(fallback.contains("page-raster-dpi=72"));
+        assert_ne!(fallback, model_provenance("native-source", default));
+        assert_ne!(
+            fallback,
+            model_provenance(
+                "page-fallback",
+                RenderPolicy {
+                    max_side: 1600,
+                    ..default
+                }
+            )
+        );
     }
 
     #[test]
