@@ -17,7 +17,7 @@ use crate::{
 const MAX_BUCKETS_PER_PAINT: u64 = 256;
 
 /// Limits for high-resolution regional raster reconstruction.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct MosaicBudget {
     /// Maximum pixels in one native-resolution group crop.
     pub max_group_pixels: u64,

@@ -21,7 +21,7 @@ use crate::{
 pub const DEFAULT_PAGE_MAX_SIDE: u32 = 1920;
 
 /// Rendering policy shared by full-page fallback and regression measurements.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct RenderPolicy {
     /// Maximum rendered pixel dimension.
     pub max_side: u32,

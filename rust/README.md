@@ -139,6 +139,13 @@ raster dimensions. The default LRU budget retains at most 256 entries and
 inferences are never cached. `--no-recognition-cache` disables lookup and
 retention for diagnostic comparison, and `PipelineResult.recognition`
 reports model calls, cache hits, evictions and retained payload.
+The optional `--report audit.json` writes a separate schema-1 diagnostic
+report bound to the original PDF digest and model provenance. It includes
+the validated policy, raw native-image observations in source-pixel
+coordinates, original paint paths and native-only blockers, the per-page
+routing/residual decisions, differential visibility evidence, merge
+proposals, and recognition reuse counters. It is not an importer draft and
+cannot authorize an overlay.
 The scanner also certifies native-only or empty pages using shared paint
 closure and source context; those pages retain their native word regions
 without any OCR lines, rendering or font masking. The merge validates an

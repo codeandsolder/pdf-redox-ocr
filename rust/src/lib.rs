@@ -81,7 +81,8 @@ pub enum Error {
 }
 
 /// A one-based PDF page number.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(transparent)]
 pub struct PageNumber(u32);
 
 impl PageNumber {

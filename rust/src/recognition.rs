@@ -51,7 +51,7 @@ pub trait RecognitionBackend {
 }
 
 /// Bound retained recognition results, not the input raster allocation.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct RecognitionCacheBudget {
     /// Maximum number of distinct RGB inputs remembered.
     pub max_entries: usize,
@@ -81,7 +81,7 @@ impl RecognitionCacheBudget {
 }
 
 /// Job-local cache accounting, independent of page and source routing.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct RecognitionStats {
     pub inference_calls: usize,
     pub cache_hits: usize,

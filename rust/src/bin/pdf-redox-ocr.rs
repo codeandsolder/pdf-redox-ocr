@@ -10,7 +10,7 @@ use pdf_redox_ocr::{
     inference::OcrInference,
     mosaic::MosaicBudget,
     native_images::NativeImageBudget,
-    pipeline::{PipelinePolicy, PreparedOcr},
+    pipeline::{PipelinePolicy, PipelineResult, PreparedOcr},
     rasterize::{DEFAULT_PAGE_MAX_SIDE, RenderPolicy},
     recognition::RecognitionCacheBudget,
 };
@@ -28,6 +28,9 @@ struct Args {
     /// Write an optional PDF annotated through the Rust pdf-redox importer.
     #[arg(long)]
     output_pdf: Option<PathBuf>,
+    /// Optional SHA-bound JSON audit of source recognition, paint proofs and routing.
+    #[arg(long)]
+    report: Option<PathBuf>,
     /// One-based pages separated by commas or inclusive ranges, e.g. 1,3-5.
     #[arg(long)]
     pages: Option<String>,
@@ -140,16 +143,16 @@ fn importer_document(draft: &OcrDraft) -> Result<OcrDocument, Box<dyn Error>> {
 }
 
 /// Bind OCR observations to their original PDF and atomically publish outputs.
-fn write_draft_and_overlay(
+fn write_outputs(
     args: &Args,
     original_bytes: &[u8],
-    draft: &OcrDraft,
+    result: &PipelineResult,
 ) -> Result<(), Box<dyn Error>> {
+    let draft = &result.draft;
     // Catch a source replacement or mutation while page images were rendered.
     draft.verify_pdf(&args.pdf)?;
 
-    let mut serialized = serde_json::to_vec_pretty(draft)?;
-    serialized.push(b'\n');
+    let serialized = json_bytes(draft)?;
     let annotated = if args.output_pdf.is_some() {
         let (pdf, report) = pdf_redox::apply_ocr_overlay(
             original_bytes,
@@ -167,11 +170,25 @@ fn write_draft_and_overlay(
     } else {
         None
     };
+    let audit = args
+        .report
+        .as_ref()
+        .map(|_| json_bytes(&result.audit()))
+        .transpose()?;
     write_atomic(&args.output, &serialized)?;
     if let (Some(output_path), Some(bytes)) = (args.output_pdf.as_ref(), annotated) {
         write_atomic(output_path, &bytes)?;
     }
+    if let (Some(path), Some(bytes)) = (&args.report, audit) {
+        write_atomic(path, &bytes)?;
+    }
     Ok(())
+}
+
+fn json_bytes(value: &impl serde::Serialize) -> Result<Vec<u8>, serde_json::Error> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 
 fn run(args: &Args) -> Result<(), Box<dyn Error>> {
@@ -179,11 +196,14 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     if let Some(pdf) = &args.output_pdf {
         paths.push(pdf);
     }
+    if let Some(report) = &args.report {
+        paths.push(report);
+    }
     check_paths(&args.pdf, &paths)?;
     let job = PreparedOcr::open(&args.pdf, args.pages.as_deref(), configured_policy(args))?;
     let engine = OcrInference::pp_ocrv6_small();
     let result = job.recognize(&engine, |message| eprintln!("{message}"))?;
-    write_draft_and_overlay(args, job.original_bytes(), &result.draft)
+    write_outputs(args, job.original_bytes(), &result)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {

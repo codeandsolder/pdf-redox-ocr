@@ -40,7 +40,7 @@ use crate::{
 };
 
 /// Independent source raster, mosaic and fallback policy for an OCR job.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct PipelinePolicy {
     pub source_budget: NativeImageBudget,
     pub mosaic_budget: MosaicBudget,
@@ -95,6 +95,54 @@ pub struct PipelineResult {
     pub residual_pages: BTreeSet<PageNumber>,
     /// Model calls and reuse across all raster recognition paths.
     pub recognition: RecognitionStats,
+    /// Validated policy used for this complete recognition job.
+    pub policy: PipelinePolicy,
+    /// Actual source image paint closure and native-only blockers.
+    pub paints: PaintReport,
+    /// Native image OCR before mapping, visibility proof or merge admission.
+    pub source_observations: BTreeMap<String, SourceObservation>,
+}
+
+/// Versioned diagnostic evidence separate from the importer draft.
+///
+/// Geometry in `source_observations` is in unrotated native image pixels
+/// with bottom-left origin. Paint geometry and visibility are in PDF user
+/// space. Diagnostics cannot authorize an overlay.
+#[derive(serde::Serialize)]
+pub struct PipelineAudit<'a> {
+    schema_version: u32,
+    pdf_sha256: &'a str,
+    model: &'a str,
+    policy: PipelinePolicy,
+    recognition: RecognitionStats,
+    routes: &'a BTreeMap<PageNumber, PageRoute>,
+    residual_pages: &'a BTreeSet<PageNumber>,
+    merge: MergeStats,
+    source_observations: &'a BTreeMap<String, SourceObservation>,
+    paints: &'a PaintReport,
+    visibility: &'a MixedVisibility,
+    proposals: &'a [MergeProposal],
+}
+
+impl PipelineResult {
+    /// Borrow the complete source-bound diagnostic report without copying evidence.
+    #[must_use]
+    pub const fn audit(&self) -> PipelineAudit<'_> {
+        PipelineAudit {
+            schema_version: 1,
+            pdf_sha256: self.draft.pdf_sha256.as_str(),
+            model: self.draft.model.as_str(),
+            policy: self.policy,
+            recognition: self.recognition,
+            routes: &self.routes,
+            residual_pages: &self.residual_pages,
+            merge: self.stats,
+            source_observations: &self.source_observations,
+            paints: &self.paints,
+            visibility: &self.visibility,
+            proposals: self.proposals.as_slice(),
+        }
+    }
 }
 
 /// Immutable source metadata and native word exclusion for a validated OCR request.
@@ -278,6 +326,9 @@ impl PreparedOcr {
             visibility,
             residual_pages,
             recognition,
+            policy: self.policy,
+            paints: prepared.scanned,
+            source_observations: prepared.recognized,
         })
     }
 

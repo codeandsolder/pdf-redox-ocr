@@ -29,7 +29,7 @@ use crate::{
 };
 
 /// A visibility audit measuring actual final PDF raster differences.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SourceVisibilityAudit {
     /// One-based PDF page.
     pub page: PageNumber,
@@ -44,7 +44,7 @@ pub struct SourceVisibilityAudit {
 }
 
 /// Verified extra OCR observations plus the matching proof records.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 pub struct MixedVisibility {
     /// Source-bound OCR labels whose visible page pixels have been proved.
     pub observations: Vec<ImageObservation>,

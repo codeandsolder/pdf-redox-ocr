@@ -16,7 +16,7 @@ use crate::{
 };
 
 /// One native image's OCR observations in the image's own user-space frame.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SourceObservation {
     /// Original native image width.
     pub width: u32,

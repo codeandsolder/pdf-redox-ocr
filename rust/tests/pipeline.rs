@@ -600,6 +600,65 @@ fn translated_mosaics_fixture() -> Vec<u8> {
 }
 
 #[test]
+fn audit_binds_raw_source_observations_paints_and_admission_to_original_pdf()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let pdf = temp.path().join("selective.pdf");
+    fs::write(&pdf, selective_fixture())?;
+    let policy = PipelinePolicy {
+        render: RenderPolicy {
+            max_side: 600,
+            dpi: 72,
+        },
+        ..policy()
+    };
+    let result = PreparedOcr::open(&pdf, None, policy)?
+        .recognize(&SelectiveRecognizer::default(), |_| {})?;
+    let audit = serde_json::to_value(result.audit())?;
+    assert_eq!(audit["schema_version"], 1);
+    assert_eq!(audit["pdf_sha256"], result.draft.pdf_sha256);
+    assert_eq!(audit["model"], result.draft.model);
+    assert_eq!(audit["policy"]["render"]["max_side"], 600);
+    assert_eq!(audit["routes"]["1"], "page_fallback");
+    assert_eq!(audit["residual_pages"], serde_json::json!([1, 2]));
+    assert_eq!(audit["recognition"]["inference_calls"], 3);
+    assert_eq!(audit["source_observations"]["5:0"]["width"], 600);
+    assert_eq!(
+        audit["source_observations"]["5:0"]["lines"][0]["text"],
+        "ALPHA"
+    );
+    assert_eq!(
+        audit["source_observations"]["5:0"]["lines"][1]["text"],
+        "BETA"
+    );
+    assert_eq!(
+        audit["source_observations"]["5:0"]["lines"][0]["quad"][0],
+        serde_json::json!([50.0, 70.0])
+    );
+    assert_eq!(audit["paints"]["placements"][0]["source_id"], "5:0");
+    assert_eq!(
+        audit["visibility"]["proofs"].as_array().map(Vec::len),
+        Some(4)
+    );
+    assert_eq!(audit["visibility"]["audited"][0]["page"], 1);
+    let proposals = audit["proposals"].as_array().ok_or("missing proposals")?;
+    assert_eq!(proposals.len(), 4);
+    assert_eq!(
+        proposals
+            .iter()
+            .filter(|p| p["included_as_extra"] == true)
+            .count(),
+        3
+    );
+    assert_eq!(audit["merge"]["nonoverlapping_image_lines_added"], 3);
+    assert!(
+        audit.get("pages").is_none(),
+        "audit is not an importer draft"
+    );
+    Ok(())
+}
+
+#[test]
 fn repeated_mosaics_reuse_inference_without_reusing_occurrence_geometry()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;

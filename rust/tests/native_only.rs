@@ -280,6 +280,7 @@ fn native_cli_needs_no_model_cache_or_onnx_session() -> Result<(), Box<dyn std::
     let temp = tempfile::tempdir()?;
     let pdf = temp.path().join("original.pdf");
     let json = temp.path().join("draft.json");
+    let report = temp.path().join("audit.json");
     let cache = temp.path().join("unusable-model-cache");
     fs::write(&pdf, fixture())?;
     fs::write(&cache, b"a file is not a model-cache directory")?;
@@ -291,6 +292,8 @@ fn native_cli_needs_no_model_cache_or_onnx_session() -> Result<(), Box<dyn std::
         .arg(&pdf)
         .arg("--output")
         .arg(&json)
+        .arg("--report")
+        .arg(&report)
         .args(["--pages", "1-3,13"])
         .output()?;
     let stderr = String::from_utf8_lossy(&process.stderr);
@@ -308,6 +311,12 @@ fn native_cli_needs_no_model_cache_or_onnx_session() -> Result<(), Box<dyn std::
         "PDF native-searchable paint proof: no OCR required"
     );
     draft.verify_pdf(&pdf)?;
+    let audit: serde_json::Value = serde_json::from_slice(&fs::read(report)?)?;
+    assert_eq!(audit["pdf_sha256"], draft.pdf_sha256);
+    assert_eq!(audit["recognition"]["inference_calls"], 0);
+    assert_eq!(audit["recognition"]["cache_hits"], 0);
+    assert_eq!(audit["routes"]["13"], "native_only");
+    assert_eq!(audit["source_observations"], serde_json::json!({}));
     assert_eq!(fs::read(cache)?, b"a file is not a model-cache directory");
     Ok(())
 }

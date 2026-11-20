@@ -84,7 +84,7 @@ pub fn parse_inventory_line(line: &str) -> Result<Option<ImageInventoryEntry>, E
 }
 
 /// Independent resource limits for reusable native source raster decoding.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct NativeImageBudget {
     /// Maximum pixels for one source `XObject`.
     pub max_source_pixels: u64,
