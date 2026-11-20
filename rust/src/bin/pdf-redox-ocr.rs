@@ -35,15 +35,8 @@ struct Args {
     /// also retain its corresponding PDF using --optimized-pdf.
     #[arg(long)]
     output: Option<PathBuf>,
-    /// Optimize using pdf-redox's standard processing objective before OCR.
-    #[arg(long)]
-    optimize: bool,
-    /// Retain the exact optimized PDF to which the OCR draft is bound.
-    #[arg(long, requires = "optimize")]
-    optimized_pdf: Option<PathBuf>,
-    /// Directory for the scoped intermediate optimized PDF.
-    #[arg(long, requires = "optimize")]
-    work_dir: Option<PathBuf>,
+    #[command(flatten)]
+    preparation: PreparationArgs,
     /// Write an optional PDF annotated through the Rust pdf-redox importer.
     #[arg(long)]
     output_pdf: Option<PathBuf>,
@@ -110,6 +103,19 @@ struct Args {
     /// Maximum aggregate pixels that one Poppler extraction may produce.
     #[arg(long, default_value_t = 64_000_000)]
     max_native_extraction_pixels: u64,
+}
+
+#[derive(Debug, clap::Args)]
+struct PreparationArgs {
+    /// Optimize using pdf-redox's standard processing objective before OCR.
+    #[arg(long)]
+    optimize: bool,
+    /// Retain the exact optimized PDF to which the OCR draft is bound.
+    #[arg(long, requires = "optimize")]
+    optimized_pdf: Option<PathBuf>,
+    /// Directory for the scoped intermediate optimized PDF.
+    #[arg(long, requires = "optimize")]
+    work_dir: Option<PathBuf>,
 }
 
 fn configured_policy(args: &Args) -> PipelinePolicy {
@@ -215,7 +221,7 @@ fn write_outputs(
         .transpose()?;
     // Catch a change to either source immediately before publishing.
     input.verify_recognized(draft)?;
-    if let Some(path) = &args.optimized_pdf {
+    if let Some(path) = &args.preparation.optimized_pdf {
         write_atomic(path, prepared_bytes)?;
     }
     if let (Some(path), Some(bytes)) = (&args.output, serialized) {
@@ -273,21 +279,28 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     if args.output.is_none() && args.output_pdf.is_none() && args.report.is_none() {
         return Err("request at least one draft, searchable PDF or audit output".into());
     }
-    if args.optimize && args.output.is_some() && args.optimized_pdf.is_none() {
+    if args.preparation.optimize
+        && args.output.is_some()
+        && args.preparation.optimized_pdf.is_none()
+    {
         return Err("retaining an optimized-input draft requires --optimized-pdf".into());
     }
     let paths = [
         args.output.as_deref(),
         args.output_pdf.as_deref(),
         args.report.as_deref(),
-        args.optimized_pdf.as_deref(),
+        args.preparation.optimized_pdf.as_deref(),
         args.capture_residual_dir.as_deref(),
     ]
     .into_iter()
     .flatten()
     .collect::<Vec<_>>();
     check_paths(&args.pdf, &paths)?;
-    let input = PreparedInput::open(&args.pdf, args.optimize, args.work_dir.as_deref())?;
+    let input = PreparedInput::open(
+        &args.pdf,
+        args.preparation.optimize,
+        args.preparation.work_dir.as_deref(),
+    )?;
     if let Some(evidence) = &input.audit().processing {
         eprintln!(
             "PDF processing optimization: {} -> {} bytes",
