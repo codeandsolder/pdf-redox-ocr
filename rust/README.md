@@ -139,7 +139,7 @@ raster dimensions. The default LRU budget retains at most 256 entries and
 inferences are never cached. `--no-recognition-cache` disables lookup and
 retention for diagnostic comparison, and `PipelineResult.recognition`
 reports model calls, cache hits, evictions and retained payload.
-The optional `--report audit.json` writes a separate schema-2 diagnostic
+The optional `--report audit.json` writes a separate schema-3 diagnostic
 report bound to the original PDF digest and model provenance. It includes
 the validated policy, raw native-image observations in source-pixel
 coordinates, original paint paths and native-only blockers, the per-page
@@ -422,3 +422,20 @@ original observation, text, confidence and source PDF are never changed.
 Use sufficient padding (e.g. 120–160 pixels at 600 DPI) so the actual leader
 continuation is visible. This is diagnostic geometry, not automatic text
 normalization or importer authorization.
+
+
+For a targeted residual conflict, pass `--capture-residual-dir DIR` with
+a new directory whose parent already exists. The observer writes the exact
+ordinary and transferred treated RGB inputs as lossless PNG immediately
+before attempted residual inference. This is opt-in, uses borrowed images
+without changing model inputs, and performs no additional rendering.
+Schema-3 pipeline audits identify the required per-page source observations
+and retain rejected residual text/quads for correlation with the captures.
+
+Source candidates are vetoed by overlap only with page observations that
+qualify under the importer's automatic text/confidence gate (including
+explicitly reviewed text). Low-confidence raw lines are retained for review
+but cannot exclude a separately proved source label from the automatic
+overlay. The audit records both qualified and raw maximum overlap. Native
+text exclusion, visibility proofs and source confidence requirements are
+unchanged.

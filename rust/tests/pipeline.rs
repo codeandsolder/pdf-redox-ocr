@@ -12,7 +12,7 @@ use pdf_redox_ocr::{
     native_images::NativeImageBudget,
     paint_scan::enumerate_image_paints,
     pdf_metadata::PdfMetadata,
-    pipeline::{PipelinePolicy, PreparedOcr, RasterMode},
+    pipeline::{PipelineObserver, PipelinePolicy, PreparedOcr, RasterMode, ResidualInput},
     rasterize::RenderPolicy,
     rasterize::render_rgb_page,
     recognition::{PixelLine, RecognitionBackend, RecognitionCacheBudget},
@@ -25,7 +25,7 @@ struct Recognizer {
     fail_native: bool,
     recognize_fallback: bool,
     fallback_digests: RefCell<Vec<[u8; 32]>>,
-    conflict_once: Option<Quad>,
+    conflict_once: Option<(Quad, f64)>,
     fail_residual_once: bool,
 }
 
@@ -44,10 +44,10 @@ impl RecognitionBackend for Recognizer {
                 if self.fail_residual_once {
                     return Err(Error::Inference("fixture residual failure".into()));
                 }
-                if let Some(quad) = self.conflict_once {
+                if let Some((quad, confidence)) = self.conflict_once {
                     return Ok(vec![PixelLine {
                         text: "Conflicting residual".into(),
-                        confidence: 0.99,
+                        confidence,
                         quad,
                     }]);
                 }
@@ -81,6 +81,25 @@ impl RecognitionBackend for Recognizer {
             confidence: 0.99,
             quad,
         }])
+    }
+}
+
+#[derive(Default)]
+struct Capture {
+    rasters: Vec<([u8; 32], [u8; 32])>,
+}
+
+impl PipelineObserver for &mut Capture {
+    fn message(&mut self, _message: String) {}
+
+    fn residual_input(&mut self, input: ResidualInput<'_>) -> Result<(), Error> {
+        assert_eq!(input.page.get(), 1);
+        assert_eq!(input.required.len(), 1);
+        self.rasters.push((
+            Sha256::digest(input.ordinary.as_raw()).into(),
+            Sha256::digest(input.treated.as_raw()).into(),
+        ));
+        Ok(())
     }
 }
 
@@ -240,7 +259,7 @@ fn residual_conflict_or_inference_failure_retries_exact_ordinary_raster()
     let job = PreparedOcr::open(&pdf, Some("1"), policy())?;
     for recognizer in [
         Recognizer {
-            conflict_once: Some(conflict),
+            conflict_once: Some((conflict, 0.99)),
             ..Recognizer::default()
         },
         Recognizer {
@@ -248,12 +267,14 @@ fn residual_conflict_or_inference_failure_retries_exact_ordinary_raster()
             ..Recognizer::default()
         },
     ] {
-        let result = job.recognize(&recognizer, |_| {})?;
+        let mut capture = Capture::default();
+        let result = job.recognize(&recognizer, &mut capture)?;
         assert_eq!(result.residual_pages, std::collections::BTreeSet::new());
         let digests = recognizer.fallback_digests.borrow();
         assert_eq!(digests.len(), 2);
         assert_ne!(digests[0], ordinary);
         assert_eq!(digests[1], ordinary);
+        assert_eq!(capture.rasters, vec![(ordinary, digests[0])]);
         assert_eq!(result.draft.pages[0].lines.len(), 1);
         assert_eq!(result.draft.pages[0].lines[0].text, "CAPACITOR 47uF 16V");
         assert_eq!(result.stats.nonoverlapping_image_lines_added, 1);
@@ -283,6 +304,37 @@ fn residual_conflict_or_inference_failure_retries_exact_ordinary_raster()
             assert!(attempt["outcome"]["lines"][0]["quad"].is_array());
         }
     }
+    assert_low_confidence_residual_accepted(&job, page, conflict)?;
+    Ok(())
+}
+
+fn assert_low_confidence_residual_accepted(
+    job: &PreparedOcr,
+    page: PageNumber,
+    conflict: Quad,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let low_confidence = Recognizer {
+        conflict_once: Some((conflict, 0.64)),
+        ..Recognizer::default()
+    };
+    let mut capture = Capture::default();
+    let accepted = job.recognize(&low_confidence, &mut capture)?;
+    assert_eq!(
+        accepted.residual_pages,
+        std::collections::BTreeSet::from([page])
+    );
+    assert_eq!(accepted.recognition.inference_calls, 2);
+    assert_eq!(low_confidence.fallback_digests.borrow().len(), 1);
+    assert_eq!(accepted.draft.pages[0].lines.len(), 2);
+    assert_eq!(
+        accepted.draft.pages[0].lines[0].text,
+        "Conflicting residual"
+    );
+    assert_eq!(accepted.draft.pages[0].lines[0].confidence, 0.64);
+    assert_eq!(accepted.draft.pages[0].lines[1].text, "CAPACITOR 47uF 16V");
+    assert_eq!(accepted.proposals[0].page_overlap, 0.0);
+    assert!(accepted.proposals[0].raw_page_overlap > 0.99);
+    assert!(accepted.proposals[0].included_as_extra);
     Ok(())
 }
 
@@ -640,7 +692,7 @@ fn audit_binds_raw_source_observations_paints_and_admission_to_original_pdf()
     let result = PreparedOcr::open(&pdf, None, policy)?
         .recognize(&SelectiveRecognizer::default(), |_| {})?;
     let audit = serde_json::to_value(result.audit())?;
-    assert_eq!(audit["schema_version"], 2);
+    assert_eq!(audit["schema_version"], 3);
     assert_eq!(audit["pdf_sha256"], result.draft.pdf_sha256);
     assert_eq!(audit["model"], result.draft.model);
     assert_eq!(audit["policy"]["render"]["max_side"], 600);

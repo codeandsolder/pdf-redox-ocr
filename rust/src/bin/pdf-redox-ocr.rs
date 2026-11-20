@@ -1,8 +1,14 @@
 //! PDF-structure-aware Rust OCR with original vector page preservation.
 
-use std::{error::Error, num::NonZeroUsize, path::PathBuf};
+use std::{
+    error::Error,
+    fs,
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+};
 
 use clap::Parser;
+use image::{ImageEncoder, RgbImage, codecs::png::PngEncoder};
 use pdf_redox::{OcrDocument, OcrLine as PdfOcrLine, OcrOverlayOptions, OcrPage};
 use pdf_redox_ocr::{
     artifacts::{check_output_paths as check_paths, write_atomic},
@@ -10,7 +16,9 @@ use pdf_redox_ocr::{
     inference::OcrInference,
     mosaic::MosaicBudget,
     native_images::NativeImageBudget,
-    pipeline::{PipelinePolicy, PipelineResult, PreparedOcr, RasterMode},
+    pipeline::{
+        PipelineObserver, PipelinePolicy, PipelineResult, PreparedOcr, RasterMode, ResidualInput,
+    },
     rasterize::{DEFAULT_PAGE_MAX_SIDE, RenderPolicy},
     recognition::RecognitionCacheBudget,
 };
@@ -31,6 +39,9 @@ struct Args {
     /// Optional SHA-bound JSON audit of source recognition, paint proofs and routing.
     #[arg(long)]
     report: Option<PathBuf>,
+    /// Explicit new directory for lossless ordinary/treated residual raster captures.
+    #[arg(long)]
+    capture_residual_dir: Option<PathBuf>,
     /// One-based pages separated by commas or inclusive ranges, e.g. 1,3-5.
     #[arg(long)]
     pages: Option<String>,
@@ -198,6 +209,39 @@ fn json_bytes(value: &impl serde::Serialize) -> Result<Vec<u8>, serde_json::Erro
     Ok(bytes)
 }
 
+struct CliObserver {
+    capture: Option<PathBuf>,
+}
+
+fn write_capture(path: &Path, rgb: &RgbImage) -> Result<(), pdf_redox_ocr::Error> {
+    let mut bytes = Vec::new();
+    PngEncoder::new(&mut bytes).write_image(
+        rgb.as_raw(),
+        rgb.width(),
+        rgb.height(),
+        image::ExtendedColorType::Rgb8,
+    )?;
+    write_atomic(path, &bytes)
+}
+
+impl PipelineObserver for CliObserver {
+    fn message(&mut self, message: String) {
+        eprintln!("{message}");
+    }
+
+    fn residual_input(&mut self, input: ResidualInput<'_>) -> Result<(), pdf_redox_ocr::Error> {
+        if let Some(dir) = &self.capture {
+            for (name, image) in [("ordinary", input.ordinary), ("treated", input.treated)] {
+                write_capture(
+                    &dir.join(format!("page-{:06}-{name}.png", input.page.get())),
+                    image,
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
 fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     let mut paths = vec![args.output.as_path()];
     if let Some(pdf) = &args.output_pdf {
@@ -206,10 +250,21 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     if let Some(report) = &args.report {
         paths.push(report);
     }
+    if let Some(directory) = &args.capture_residual_dir {
+        paths.push(directory);
+    }
     check_paths(&args.pdf, &paths)?;
+    if let Some(directory) = &args.capture_residual_dir {
+        fs::create_dir(directory)?;
+    }
     let job = PreparedOcr::open(&args.pdf, args.pages.as_deref(), configured_policy(args))?;
     let engine = OcrInference::pp_ocrv6_small(args.ocr_threads);
-    let result = job.recognize(&engine, |message| eprintln!("{message}"))?;
+    let result = job.recognize(
+        &engine,
+        CliObserver {
+            capture: args.capture_residual_dir.clone(),
+        },
+    )?;
     write_outputs(args, job.original_bytes(), &result)
 }
 

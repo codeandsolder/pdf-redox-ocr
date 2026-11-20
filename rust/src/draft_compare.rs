@@ -229,7 +229,7 @@ pub fn compare<'a>(
     let qualified = |lines: &[OcrLine]| {
         lines
             .iter()
-            .filter(|line| line.confidence >= confidence_threshold || line.reviewed)
+            .filter(|line| line.overlay_qualified(confidence_threshold))
             .count()
     };
     for (page, a) in left {

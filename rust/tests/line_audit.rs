@@ -166,3 +166,84 @@ fn source_padding_recovers_clipped_stroke_across_rotations()
     assert!(audit_lines(&pdf, &draft, &targets, &LineAuditPolicy::default()).is_err());
     Ok(())
 }
+
+mod support;
+
+#[test]
+fn periodic_source_leader_mapping_preserves_body_ink_across_rotations()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let pdf = dir.path().join("leaders.pdf");
+    // The body has three text-like strokes and a separate internal dot.
+    // Ten compact vector dots form a leader extending beyond the original
+    // recognition's right edge. All four pages paint the same source geometry.
+    let content = b"0 g 42 54 7 12 re f 54 54 7 12 re f 64 54 2 2 re f 68 54 6 12 re f 84 54 2 2 re f 88 54 2 2 re f 92 54 2 2 re f 96 54 2 2 re f 100 54 2 2 re f 104 54 2 2 re f 108 54 2 2 re f 112 54 2 2 re f 116 54 2 2 re f 120 54 2 2 re f";
+    fs::write(
+        &pdf,
+        support::pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R] /Count 4 /MediaBox [0 0 180 120] >>"
+                .to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R /Rotate 90 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R /Rotate 180 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R /Rotate 270 >>".to_vec(),
+            support::stream("", content),
+        ]),
+    )?;
+    let quad = [
+        Point(36.0, 50.0),
+        Point(95.0, 50.0),
+        Point(95.0, 70.0),
+        Point(36.0, 70.0),
+    ];
+    let draft = OcrDraft::new(
+        sha256_file(&pdf)?,
+        "leader fixture".into(),
+        (1..=4)
+            .map(|page| DraftPage {
+                page,
+                native_text_regions: vec![],
+                lines: vec![OcrLine {
+                    text: "A.B...".into(),
+                    confidence: 0.99,
+                    quad,
+                    reviewed: false,
+                }],
+            })
+            .collect(),
+    );
+    let targets = (1..=4)
+        .map(|page| Ok((PageNumber::new(page)?, BTreeSet::from([0]))))
+        .collect::<Result<Targets, pdf_redox_ocr::Error>>()?;
+    let report = audit_lines(
+        &pdf,
+        &draft,
+        &targets,
+        &LineAuditPolicy {
+            padding_pixels: 160,
+            ..LineAuditPolicy::default()
+        },
+    )?;
+    for line in report.lines {
+        assert_eq!(
+            line.leaders.len(),
+            1,
+            "page {} {:#?}",
+            line.page,
+            line.leaders
+        );
+        let leader = &line.leaders[0];
+        assert_eq!(
+            leader.evidence.edge,
+            pdf_redox_ocr::layout_leaders::LeaderEdge::Right
+        );
+        assert_eq!(leader.evidence.inside_dots, 3);
+        assert!(leader.evidence.outside_dots >= 2);
+        assert!((leader.body_quad[1].0 - 79.0).abs() < 0.5);
+        assert!((leader.body_quad[2].0 - 79.0).abs() < 0.5);
+        assert_eq!(line.original_quad, quad);
+        assert_eq!(line.original_text, "A.B...");
+    }
+    Ok(())
+}

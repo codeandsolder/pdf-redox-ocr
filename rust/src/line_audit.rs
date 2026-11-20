@@ -343,6 +343,20 @@ pub struct LineAuditReport {
     pub lines: Vec<AuditedLine>,
 }
 
+fn mapped_leaders(
+    components: &[PixelRegion],
+    window: SampleWindow,
+    frame: LineFrame,
+) -> Vec<MappedLeader> {
+    detect_leaders(components, window.observation(frame))
+        .into_iter()
+        .map(|evidence| MappedLeader {
+            body_quad: window.quad(frame, evidence.body),
+            evidence,
+        })
+        .collect()
+}
+
 fn audit_line(
     pdf: &Path,
     metadata: &PdfMetadata,
@@ -409,13 +423,7 @@ fn audit_line(
             group,
         })
         .collect();
-    let leaders = detect_leaders(&components, observation)
-        .into_iter()
-        .map(|evidence| MappedLeader {
-            body_quad: window.quad(frame, evidence.body),
-            evidence,
-        })
-        .collect();
+    let leaders = mapped_leaders(&components, window, frame);
     let components = components
         .into_iter()
         .map(|component| MappedComponent {

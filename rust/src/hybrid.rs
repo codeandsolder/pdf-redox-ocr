@@ -131,8 +131,10 @@ pub struct MergeProposal {
     pub paint_index: u32,
     /// Raw recognition confidence.
     pub raster_confidence: f64,
-    /// Maximum page OCR overlap fraction.
+    /// Maximum overlap with text/confidence-qualified page observations.
     pub page_overlap: f64,
+    /// Maximum overlap including all low-confidence diagnostic observations.
+    pub raw_page_overlap: f64,
     /// Maximum overlap with existing native searchable text.
     pub native_overlap: f64,
     /// Source-specific visibility verified.
@@ -401,6 +403,7 @@ pub fn merge_ocr(
 /// independently by the merger.
 pub(crate) struct SourceAdmission {
     pub(crate) page_overlap: f64,
+    pub(crate) raw_page_overlap: f64,
     pub(crate) native_overlap: f64,
     pub(crate) included: bool,
 }
@@ -408,14 +411,23 @@ pub(crate) struct SourceAdmission {
 impl SourceAdmission {
     pub(crate) fn evaluate<'a>(
         line: &OcrLine,
-        existing: impl Iterator<Item = &'a Quad>,
+        existing: impl Iterator<Item = (&'a Quad, bool)>,
         native: &[Quad],
         visible: bool,
         threshold: f64,
     ) -> Self {
-        let page_overlap = existing
-            .map(|quad| overlap_fraction(&line.quad, quad))
-            .fold(0.0_f64, f64::max);
+        let (raw_page_overlap, page_overlap) =
+            existing.fold((0.0_f64, 0.0_f64), |(raw, qualified), (quad, eligible)| {
+                let overlap = overlap_fraction(&line.quad, quad);
+                (
+                    raw.max(overlap),
+                    if eligible {
+                        qualified.max(overlap)
+                    } else {
+                        qualified
+                    },
+                )
+            });
         let native_overlap = native
             .iter()
             .map(|quad| overlap_fraction(&line.quad, quad))
@@ -427,6 +439,7 @@ impl SourceAdmission {
             && line.text.trim().chars().count() >= 2;
         Self {
             page_overlap,
+            raw_page_overlap,
             native_overlap,
             included,
         }
@@ -460,7 +473,10 @@ fn merge_fallback_page(
                 });
         let admission = SourceAdmission::evaluate(
             &image.line,
-            output_page.lines.iter().map(|line| &line.quad),
+            output_page
+                .lines
+                .iter()
+                .map(|line| (&line.quad, line.overlay_qualified(threshold))),
             &baseline_page.native_text_regions,
             visible,
             threshold,
@@ -472,6 +488,7 @@ fn merge_fallback_page(
             paint_index: image.paint_index,
             raster_confidence: image.line.confidence,
             page_overlap: round4(admission.page_overlap),
+            raw_page_overlap: round4(admission.raw_page_overlap),
             native_overlap: round4(admission.native_overlap),
             verified_visible_source: visible,
             included_as_extra: admission.included,
@@ -718,6 +735,56 @@ mod tests {
             })
             .collect::<Vec<_>>();
         (raster, baseline, observations)
+    }
+
+    #[test]
+    fn only_overlay_qualified_page_observations_veto_verified_sources()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let sample = tempfile::NamedTempFile::new()?;
+        fs::write(sample.path(), b"confidence-aware source admission")?;
+        let (raster, mut baseline, observations) = merge_fixture(sha256_file(sample.path())?);
+        let selected = [PageNumber::new(1)?, PageNumber::new(2)?];
+        let routes = BTreeMap::from([
+            (selected[0], PageRoute::RasterOnly),
+            (selected[1], PageRoute::PageFallback),
+        ]);
+        let proofs = observations
+            .iter()
+            .map(|candidate| VisibilityProof {
+                page: candidate.page,
+                source_id: candidate.source_id.clone(),
+                paint_index: candidate.paint_index,
+                text: candidate.line.text.clone(),
+                quad: candidate.line.quad,
+                visible: true,
+            })
+            .collect::<Vec<_>>();
+        baseline.pages[0].lines[0].quad = observations[0].line.quad;
+        for (confidence, reviewed, expected) in [
+            (0.64, false, true),
+            (0.97, false, false),
+            (0.64, true, false),
+        ] {
+            baseline.pages[0].lines[0].confidence = confidence;
+            baseline.pages[0].lines[0].reviewed = reviewed;
+            let (draft, _, audit) = merge_ocr(MergeInput {
+                pdf: sample.path(),
+                selected: &selected,
+                raster: &raster,
+                image_observations: &observations,
+                baseline: &baseline,
+                routes: &routes,
+                proven_pages: &BTreeSet::from([selected[1]]),
+                visibility_proofs: &proofs,
+                threshold: 0.97,
+            })?;
+            assert_eq!(audit[0].raw_page_overlap, 1.0);
+            assert_eq!(audit[0].page_overlap, if expected { 0.0 } else { 1.0 });
+            assert_eq!(audit[0].included_as_extra, expected);
+            assert_eq!(draft.pages[1].lines[0].confidence, confidence);
+            assert_eq!(draft.pages[1].lines[0].reviewed, reviewed);
+        }
+        Ok(())
     }
 
     #[test]

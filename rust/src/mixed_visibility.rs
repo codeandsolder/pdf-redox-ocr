@@ -342,7 +342,7 @@ impl<'a> ResidualBuilder<'a> {
         {
             if SourceAdmission::evaluate(
                 &observation.line,
-                self.planned_quads.iter(),
+                self.planned_quads.iter().map(|quad| (quad, true)),
                 native,
                 true,
                 threshold,

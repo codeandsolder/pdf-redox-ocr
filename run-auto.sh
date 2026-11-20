@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-    printf '%s\n' "Usage: $0 SOURCE.pdf OUTPUT.pdf [--ocr-only] [--pages 1,8,10] [--confidence 0.97] [--max-side 1920] [--ocr-threads N] [--raster-mode auto|all|off] [--keep-native-text] [--report PATH] [--draft PATH]"
+    printf '%s\n' "Usage: $0 SOURCE.pdf OUTPUT.pdf [--ocr-only] [--pages 1,8,10] [--confidence 0.97] [--max-side 1920] [--ocr-threads N] [--raster-mode auto|all|off] [--keep-native-text] [--report PATH] [--draft PATH] [--capture-residual-dir DIR]"
 }
 
 if [[ ${1:-} == --help ]]; then
@@ -21,13 +21,14 @@ shift 2
 ocr_only=0
 draft=''
 report=''
+capture=''
 args=()
 while (( $# )); do
     case "$1" in
         --ocr-only) ocr_only=1; shift ;;
         --keep-native-text|--no-residual-ocr|--no-recognition-cache)
             args+=("$1"); shift ;;
-        --pages|--confidence|--max-side|--ocr-threads|--raster-mode|--dpi|--native-chunk|--max-native-source-pixels|--max-native-total-pixels|--max-native-sources|--max-native-extraction-pixels|--max-mosaic-group-pixels|--max-mosaic-page-pixels|--max-mosaic-groups|--max-mosaic-dpi|--report|--draft)
+        --pages|--confidence|--max-side|--ocr-threads|--raster-mode|--dpi|--native-chunk|--max-native-source-pixels|--max-native-total-pixels|--max-native-sources|--max-native-extraction-pixels|--max-mosaic-group-pixels|--max-mosaic-page-pixels|--max-mosaic-groups|--max-mosaic-dpi|--report|--draft|--capture-residual-dir)
             if (( $# < 2 )); then
                 printf 'Missing value for %s\n' "$1" >&2
                 exit 2
@@ -35,6 +36,7 @@ while (( $# )); do
             case "$1" in
                 --report) report=$(realpath -m -- "$2") ;;
                 --draft) draft=$(realpath -m -- "$2") ;;
+                --capture-residual-dir) capture=$(realpath -m -- "$2") ;;
                 *) args+=("$1" "$2") ;;
             esac
             shift 2 ;;
@@ -44,7 +46,7 @@ done
 
 # Protect the original input even when the recognizer sees an optimized copy.
 targets=("$output_pdf")
-for path in "$draft" "$report"; do
+for path in "$draft" "$report" "$capture"; do
     if [[ -n "$path" ]]; then targets+=("$path"); fi
 done
 for ((i=0; i<${#targets[@]}; i++)); do
@@ -88,5 +90,8 @@ mkdir -p -- "$(dirname -- "$output_pdf")"
 if [[ -n "$report" ]]; then
     mkdir -p -- "$(dirname -- "$report")"
     args+=(--report "$report")
+fi
+if [[ -n "$capture" ]]; then
+    args+=(--capture-residual-dir "$capture")
 fi
 "$recognizer" --pdf "$input_pdf" --output "$draft" --output-pdf "$output_pdf" "${args[@]}"
