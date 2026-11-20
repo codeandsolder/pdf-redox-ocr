@@ -383,7 +383,7 @@ mod tests {
             calls: Cell<usize>,
         }
         impl RecognitionBackend for Backend {
-            fn model_profile(&self) -> &str {
+            fn model_profile(&self) -> &'static str {
                 "leader fixture"
             }
             fn recognize_pixels(&self, rgb: RgbImage) -> Result<RasterRecognition, Error> {

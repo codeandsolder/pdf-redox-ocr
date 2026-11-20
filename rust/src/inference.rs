@@ -76,7 +76,7 @@ const fn small_detector_config() -> TextDetectionConfig {
     }
 }
 
-fn inference_error(error: OCRError) -> Error {
+fn inference_error(error: &OCRError) -> Error {
     Error::Inference(error.to_string())
 }
 
@@ -103,10 +103,11 @@ impl PrimaryCrop {
 
 impl OcrModels {
     fn load(threads: Option<NonZeroUsize>) -> Result<Self, Error> {
-        let dictionary =
-            std::fs::read_to_string(resolve_path(DICTIONARY).map_err(inference_error)?)?;
-        let det_path = resolve_path(DETECTION_MODEL).map_err(inference_error)?;
-        let rec_path = resolve_path(RECOGNITION_MODEL).map_err(inference_error)?;
+        let dictionary = std::fs::read_to_string(
+            resolve_path(DICTIONARY).map_err(|error| inference_error(&error))?,
+        )?;
+        let det_path = resolve_path(DETECTION_MODEL).map_err(|error| inference_error(&error))?;
+        let rec_path = resolve_path(RECOGNITION_MODEL).map_err(|error| inference_error(&error))?;
         let mut detection = TextDetectionAdapterBuilder::new().with_config(small_detector_config());
         let mut recognition = TextRecognitionAdapterBuilder::new()
             .character_dict(dictionary.lines().map(str::to_owned).collect());
@@ -119,8 +120,12 @@ impl OcrModels {
             recognition = recognition.with_ort_config(config);
         }
         Ok(Self {
-            detection: detection.build(det_path).map_err(inference_error)?,
-            recognition: recognition.build(rec_path).map_err(inference_error)?,
+            detection: detection
+                .build(det_path)
+                .map_err(|error| inference_error(&error))?,
+            recognition: recognition
+                .build(rec_path)
+                .map_err(|error| inference_error(&error))?,
         })
     }
 
@@ -133,7 +138,7 @@ impl OcrModels {
         let prediction = self
             .recognition
             .execute(ImageTaskInput::from_arc_images(images), config)
-            .map_err(inference_error)?;
+            .map_err(|error| inference_error(&error))?;
         if prediction.texts.len() != count || prediction.scores.len() != count {
             return Err(Error::Inference(
                 "recognizer returned inconsistent batch dimensions".into(),
@@ -157,7 +162,7 @@ impl OcrModels {
                 ImageTaskInput::from_arc_images(vec![Arc::clone(image)]),
                 None,
             )
-            .map_err(inference_error)?;
+            .map_err(|error| inference_error(&error))?;
         let Some(detected) = detection.detections.into_iter().next() else {
             return Err(Error::Inference("detector returned no image result".into()));
         };
@@ -168,7 +173,7 @@ impl OcrModels {
         }
         let pixels = TextCroppingProcessor::new(true)
             .process((Arc::clone(image), boxes.clone()))
-            .map_err(inference_error)?;
+            .map_err(|error| inference_error(&error))?;
         if pixels.len() != count {
             return Err(Error::Inference(
                 "crop processor returned inconsistent batch dimensions".into(),
@@ -235,7 +240,7 @@ impl OcrModels {
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
             crops.push(Arc::new(
-                get_rotate_crop_image(image, &points).map_err(inference_error)?,
+                get_rotate_crop_image(image, &points).map_err(|error| inference_error(&error))?,
             ));
         }
         // Keep all real hypotheses in the audit, including low scores.
