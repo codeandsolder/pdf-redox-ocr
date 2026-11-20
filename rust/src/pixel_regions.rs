@@ -71,7 +71,7 @@ impl ObservationSupport {
         }
     }
 
-    pub(crate) fn add(&mut self, other: Self) {
+    pub(crate) const fn add(&mut self, other: Self) {
         self.inside_pixels += other.inside_pixels;
         self.outside_pixels += other.outside_pixels;
         self.touches_observation_edge |= other.touches_observation_edge;
