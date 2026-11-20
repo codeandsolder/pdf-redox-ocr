@@ -1,12 +1,6 @@
 //! Research-only PP-OCRv6 medium recognition on uncertain PDF text quads.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    error::Error,
-    fs,
-    io::Write,
-    path::PathBuf,
-};
+use std::{collections::BTreeSet, error::Error, fs, io::Write, path::PathBuf};
 
 use clap::Parser;
 use image::{RgbImage, imageops};
@@ -19,7 +13,7 @@ use pdf_redox_ocr::{
     artifacts::{check_output_paths, write_atomic},
     draft::OcrDraft,
     native_font_mask::mask_native_fonts,
-    page_selection::parse_page_selection,
+    page_selection::{parse_exact_lines, parse_page_selection},
     pdf_metadata::PdfMetadata,
     rasterize::{DEFAULT_PAGE_MAX_SIDE, RenderPolicy},
     refinement::{
@@ -157,31 +151,6 @@ impl OnnxRecognizer {
             })
             .collect())
     }
-}
-
-/// Parse original draft page and zero-based line indices without ambiguity.
-fn parse_exact_lines(
-    specifications: &[String],
-) -> Result<BTreeMap<PageNumber, BTreeSet<usize>>, pdf_redox_ocr::Error> {
-    let mut targets = BTreeMap::<PageNumber, BTreeSet<usize>>::new();
-    for spec in specifications {
-        let (page, index) = spec.split_once(':').ok_or_else(|| {
-            pdf_redox_ocr::Error::Invalid(format!("expected PAGE:INDEX, got {spec:?}"))
-        })?;
-        let number = page.parse::<u32>().map_err(|_| {
-            pdf_redox_ocr::Error::Invalid(format!("invalid OCR target page {page:?}"))
-        })?;
-        let number = PageNumber::new(number)?;
-        let index = index.parse::<usize>().map_err(|_| {
-            pdf_redox_ocr::Error::Invalid(format!("invalid OCR target index {index:?}"))
-        })?;
-        if !targets.entry(number).or_default().insert(index) {
-            return Err(pdf_redox_ocr::Error::Invalid(format!(
-                "duplicate explicit OCR target {spec:?}"
-            )));
-        }
-    }
-    Ok(targets)
 }
 
 fn run(args: &Args) -> Result<(), Box<dyn Error>> {

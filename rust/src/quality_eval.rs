@@ -254,18 +254,7 @@ pub fn character_edits(reference: &str, prediction: &str) -> usize {
     } else {
         (second, first)
     };
-    let mut previous = (0..=short.len()).collect::<Vec<_>>();
-    let mut current = vec![0; short.len() + 1];
-    for (i, left) in long.into_iter().enumerate() {
-        current[0] = i + 1;
-        for (j, &right) in short.iter().enumerate() {
-            current[j + 1] = (previous[j + 1] + 1)
-                .min(current[j] + 1)
-                .min(previous[j] + usize::from(left != right));
-        }
-        std::mem::swap(&mut previous, &mut current);
-    }
-    previous[short.len()]
+    alignment::last_row(&long, &short)[short.len()]
 }
 
 /// Half-plane membership for an arbitrary convex OCR quadrilateral.

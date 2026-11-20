@@ -4,7 +4,7 @@
 /// A reference character and aligned OCR prediction; None is an alignment gap.
 pub(super) type Aligned = (Option<char>, Option<char>);
 
-fn last_row(reference: &[char], predicted: &[char]) -> Vec<usize> {
+pub(super) fn last_row(reference: &[char], predicted: &[char]) -> Vec<usize> {
     let mut prev = (0..=predicted.len()).collect::<Vec<_>>();
     let mut curr = vec![0; predicted.len() + 1];
     for (i, &expected) in reference.iter().enumerate() {

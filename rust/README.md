@@ -219,6 +219,33 @@ not evidence that the pixels intrinsically mean a particular Unicode
 character: cropped edges, touching neighboring strokes, raster resolution
 and differing typefaces all matter. No automatic OCR replacement is made.
 
+## Source-PDF line isolation
+
+Use the original draft's exact page and line indices to inspect a bounded
+native-resolution source region without preparing individual glyph images:
+
+```sh
+pdf-redox-ocr-line-audit --pdf source.pdf --primary-ocr draft.json \
+  --line 28:2 --line 28:11 --report line-topology.json
+```
+
+The command checks the original PDF digest, renders only the specified line's
+bounding region (600 DPI by default), and rectifies its ordered quadrilateral
+into an oriented grayscale raster. An elongated vertical observation uses
+the longer axis; this does not determine reading direction. It divides the
+raster at blank columns at the selected segmentation threshold (default
+192); touching ink remains joined, while detached marks sharing columns
+remain together. Each group reports its half-open ink/crop pixel bounds,
+original PDF-space quadrilaterals, line-edge contact at the segmentation
+threshold, and topology at the selected cutoffs (64/128/192/224 by default).
+Topology at a higher threshold can include additional ink at the crop edge.
+
+This is an inspection of visible ink groups, not a character segmentation
+guarantee. It does not compare group counts with recognized strings, assign
+Unicode, exclude unrelated diagram strokes, or edit the input draft. The
+renderer and rectified image are independently bounded by `--max-pixels`.
+The report records both original and oriented line geometry.
+
 ## Correctness policy
 
 A source-image result may replace full-page OCR only if the page is pure

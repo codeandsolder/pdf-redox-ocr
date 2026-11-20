@@ -1,6 +1,6 @@
 //! Shared one-based PDF page selection grammar.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{Error, PageNumber};
 
@@ -53,6 +53,36 @@ pub fn parse_page_selection(
         return Err(Error::Invalid("empty page selection".into()));
     }
     pages.into_iter().map(PageNumber::new).collect()
+}
+
+/// Parse explicit original-draft page and zero-based line indices.
+///
+/// An empty specification means no explicit selection.
+///
+/// # Errors
+/// Rejects malformed or duplicate targets.
+pub fn parse_exact_lines(
+    specifications: &[String],
+) -> Result<BTreeMap<PageNumber, BTreeSet<usize>>, Error> {
+    let mut targets = BTreeMap::<PageNumber, BTreeSet<usize>>::new();
+    for spec in specifications {
+        let (page, index) = spec
+            .split_once(':')
+            .ok_or_else(|| Error::Invalid(format!("expected PAGE:INDEX, got {spec:?}")))?;
+        let number = page
+            .parse::<u32>()
+            .map_err(|_| Error::Invalid(format!("invalid OCR target page {page:?}")))?;
+        let number = PageNumber::new(number)?;
+        let index = index
+            .parse::<usize>()
+            .map_err(|_| Error::Invalid(format!("invalid OCR target index {index:?}")))?;
+        if !targets.entry(number).or_default().insert(index) {
+            return Err(Error::Invalid(format!(
+                "duplicate explicit OCR target {spec:?}"
+            )));
+        }
+    }
+    Ok(targets)
 }
 
 #[cfg(test)]

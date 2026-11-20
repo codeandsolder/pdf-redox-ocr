@@ -15,7 +15,7 @@ use crate::{
     inference::OcrInference,
     mosaic::{MosaicAxes, MosaicBudget, MosaicPlan},
     paint_scan::ImagePaint,
-    rasterize::{CropPixelMapper, render_rgb_region},
+    rasterize::{CropPixelMapper, render_rgb_region, sample_whitened},
 };
 
 fn inside_convex(point: Point, polygon: &Quad) -> bool {
@@ -198,33 +198,6 @@ fn oriented_bounds(
         num_traits::ToPrimitive::to_u32(&(x1 - x0))?,
         num_traits::ToPrimitive::to_u32(&(y1 - y0))?,
     ))
-}
-
-fn sample_whitened(image: &RgbImage, Point(x, y): Point) -> Rgb<u8> {
-    // Pixel centers are at i+0.5; sample in that convention. Sampling
-    // outside the region contributes white exactly as Poppler's backdrop.
-    let x = x - 0.5;
-    let y = y - 0.5;
-    let left = x.floor();
-    let top = y.floor();
-    let dx = x - left;
-    let dy = y - top;
-    let mut channels = [0.0_f64; 3];
-    for (offset_y, weight_y) in [(0.0, 1.0 - dy), (1.0, dy)] {
-        for (offset_x, weight_x) in [(0.0, 1.0 - dx), (1.0, dx)] {
-            let rgba = num_traits::ToPrimitive::to_u32(&(left + offset_x))
-                .zip(num_traits::ToPrimitive::to_u32(&(top + offset_y)))
-                .filter(|(column, row)| *column < image.width() && *row < image.height())
-                .map_or([255, 255, 255], |(column, row)| {
-                    image.get_pixel(column, row).0
-                });
-            let weight = weight_x * weight_y;
-            for index in 0..3 {
-                channels[index] = f64::from(rgba[index]).mul_add(weight, channels[index]);
-            }
-        }
-    }
-    Rgb(channels.map(|channel| num_traits::ToPrimitive::to_u8(&channel.round()).unwrap_or(255)))
 }
 
 /// Rectify a PDF-composited crop into a native-text-upright affine frame.
