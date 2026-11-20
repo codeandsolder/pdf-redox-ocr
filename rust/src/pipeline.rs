@@ -110,6 +110,8 @@ pub struct PipelineResult {
     pub visibility: MixedVisibility,
     /// Fallback pages recognized from verified residual rasters.
     pub residual_pages: BTreeSet<PageNumber>,
+    /// Completed residual alternatives, including rejected inference evidence.
+    pub residual_attempts: Vec<ResidualAttempt>,
     /// Model calls and reuse across all raster recognition paths.
     pub recognition: RecognitionStats,
     /// Validated policy used for this complete recognition job.
@@ -118,6 +120,50 @@ pub struct PipelineResult {
     pub paints: PaintReport,
     /// Native image OCR before mapping, visibility proof or merge admission.
     pub source_observations: BTreeMap<String, SourceObservation>,
+}
+
+/// The disposition of a fully verified source-suppression alternative.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ResidualOutcome {
+    /// Native font masking changed pixels needed for exact treatment transfer.
+    TransferRejected,
+    /// At least one required source would fail admission even without page OCR.
+    PreflightRejected { conflicts: Vec<ResidualConflict> },
+    /// The backend could not recognize the treatment.
+    InferenceFailed { error: String },
+    /// The treatment produced conflicting labels. Keep the actual observations
+    /// for diagnosis, not for automatic importer use.
+    MergeRejected {
+        conflicts: Vec<ResidualConflict>,
+        lines: Vec<OcrLine>,
+    },
+    /// The treated page passed the same source admission checks as the final merge.
+    Accepted,
+}
+
+/// A required source observation that cannot survive the attempted page merge.
+#[derive(Debug, serde::Serialize)]
+pub struct ResidualConflict {
+    /// Index in this page's visibility observations (not the global array).
+    pub observation_index: usize,
+    pub proposal: MergeProposal,
+}
+
+/// Evidence for one attempted residual recognition route.
+#[derive(Debug, serde::Serialize)]
+pub struct ResidualAttempt {
+    pub page: PageNumber,
+    pub paint_count: usize,
+    /// Indices in `visibility.observations` filtered to this page, in original order.
+    pub required: BTreeSet<usize>,
+    pub outcome: ResidualOutcome,
+}
+
+impl ResidualAttempt {
+    const fn accepted(&self) -> bool {
+        matches!(self.outcome, ResidualOutcome::Accepted)
+    }
 }
 
 /// Versioned diagnostic evidence separate from the importer draft.
@@ -134,6 +180,7 @@ pub struct PipelineAudit<'a> {
     recognition: RecognitionStats,
     routes: &'a BTreeMap<PageNumber, PageRoute>,
     residual_pages: &'a BTreeSet<PageNumber>,
+    residual_attempts: &'a [ResidualAttempt],
     merge: MergeStats,
     source_observations: &'a BTreeMap<String, SourceObservation>,
     paints: &'a PaintReport,
@@ -146,13 +193,14 @@ impl PipelineResult {
     #[must_use]
     pub const fn audit(&self) -> PipelineAudit<'_> {
         PipelineAudit {
-            schema_version: 1,
+            schema_version: 2,
             pdf_sha256: self.draft.pdf_sha256.as_str(),
             model: self.draft.model.as_str(),
             policy: self.policy,
             recognition: self.recognition,
             routes: &self.routes,
             residual_pages: &self.residual_pages,
+            residual_attempts: self.residual_attempts.as_slice(),
             merge: self.stats,
             source_observations: &self.source_observations,
             paints: &self.paints,
@@ -188,7 +236,13 @@ struct RecognizedPages {
     raster: Vec<DraftPage>,
     fallback: Vec<DraftPage>,
     visibility: MixedVisibility,
-    residual_pages: BTreeSet<PageNumber>,
+    residual_attempts: Vec<ResidualAttempt>,
+}
+
+struct FallbackRecognition {
+    lines: Vec<OcrLine>,
+    evidence: MixedVisibility,
+    attempt: Option<ResidualAttempt>,
 }
 
 type FragmentPlans = (BTreeSet<PageNumber>, BTreeMap<PageNumber, MosaicPlan>);
@@ -286,8 +340,13 @@ impl PreparedOcr {
             raster,
             fallback,
             visibility,
-            residual_pages,
+            residual_attempts,
         } = self.recognize_pages(&mut session, &prepared, raster_pdf, &mut progress)?;
+        let residual_pages = residual_attempts
+            .iter()
+            .filter(|attempt| attempt.accepted())
+            .map(|attempt| attempt.page)
+            .collect::<BTreeSet<_>>();
         let policy = self.policy.render;
         let raster_draft = OcrDraft::new(
             self.digest.clone(),
@@ -342,6 +401,7 @@ impl PreparedOcr {
             proposals,
             visibility,
             residual_pages,
+            residual_attempts,
             recognition,
             policy: self.policy,
             paints: prepared.scanned,
@@ -400,7 +460,11 @@ impl PreparedOcr {
                         PageVerification::default()
                     }
                 };
-                let (lines, residual, evidence) = self.recognize_fallback(
+                let FallbackRecognition {
+                    lines,
+                    evidence,
+                    attempt,
+                } = self.recognize_fallback(
                     engine,
                     raster_pdf,
                     page,
@@ -408,9 +472,7 @@ impl PreparedOcr {
                     page_evidence,
                     progress,
                 )?;
-                if residual {
-                    result.residual_pages.insert(page);
-                }
+                result.residual_attempts.extend(attempt);
                 result.visibility.extend(evidence);
                 progress(format!(
                     "page {} (fallback): {} OCR lines, {} native words",
@@ -436,12 +498,18 @@ impl PreparedOcr {
         native: &[Quad],
         verified: PageVerification,
         progress: &mut dyn FnMut(String),
-    ) -> Result<(Vec<OcrLine>, bool, MixedVisibility), Error> {
+    ) -> Result<FallbackRecognition, Error> {
         let PageVerification {
             evidence,
             control,
             residual,
         } = verified;
+        let mut attempt = residual.as_ref().map(|r| ResidualAttempt {
+            page,
+            paint_count: r.paint_count,
+            required: r.required.clone(),
+            outcome: ResidualOutcome::TransferRejected,
+        });
         let (ordinary, alternative) = match control {
             Some(control) if raster_pdf == self.pdf => (control, residual),
             Some(control) => {
@@ -452,12 +520,8 @@ impl PreparedOcr {
             None => (render_rgb_page(raster_pdf, page, self.policy.render)?, None),
         };
         let mapper = self.doc.mapper(page)?;
-        if let Some(alternative) = alternative {
-            let crate::mixed_visibility::ResidualRaster {
-                image,
-                required,
-                paint_count,
-            } = alternative;
+        if let (Some(alternative), Some(attempt)) = (alternative, attempt.as_mut()) {
+            let required = &attempt.required;
             let mut candidate = DraftPage {
                 page: page.get(),
                 lines: Vec::new(),
@@ -468,13 +532,22 @@ impl PreparedOcr {
                     draft,
                     &evidence.observations,
                     &evidence.proofs,
-                    &required,
+                    required,
                     self.policy.minimum_confidence,
                 )
+                .map(|conflicts| {
+                    conflicts
+                        .into_iter()
+                        .map(|(observation_index, proposal)| ResidualConflict {
+                            observation_index,
+                            proposal,
+                        })
+                        .collect::<Vec<_>>()
+                })
             };
-            // First check the source/native exclusions without spending inference.
-            if conflicts(&candidate)?.is_empty() {
-                match engine.recognize_page(image, mapper) {
+            let preflight = conflicts(&candidate)?;
+            attempt.outcome = if preflight.is_empty() {
+                match engine.recognize_page(alternative.image, mapper) {
                     Ok(lines) => {
                         candidate.lines = lines;
                         let rejected = conflicts(&candidate)?;
@@ -482,44 +555,66 @@ impl PreparedOcr {
                             progress(format!(
                                 "page {}: verified residual OCR accepted ({} paints, {} source labels)",
                                 page.get(),
-                                paint_count,
-                                required.len()
+                                attempt.paint_count,
+                                attempt.required.len()
                             ));
-                            return Ok((candidate.lines, true, evidence));
-                        }
-                        for (index, reason) in rejected {
-                            let source = &evidence.observations[index];
-                            let conflicting = candidate
-                                .lines
-                                .iter()
-                                .filter(|line| {
-                                    crate::polygon::overlap_fraction(&source.line.quad, &line.quad)
-                                        >= 0.30
-                                })
-                                .map(|line| line.text.as_str())
-                                .collect::<Vec<_>>();
-                            progress(format!(
-                                "page {} residual source {:?} rejected: page overlap {}, native overlap {}, residual lines {:?}",
-                                page.get(),
-                                reason.raster_text,
-                                reason.page_overlap,
-                                reason.native_overlap,
-                                conflicting
-                            ));
+                            ResidualOutcome::Accepted
+                        } else {
+                            for conflict in &rejected {
+                                progress(format!(
+                                    "page {} residual source {:?} rejected: page overlap {}, native overlap {}",
+                                    page.get(),
+                                    conflict.proposal.raster_text,
+                                    conflict.proposal.page_overlap,
+                                    conflict.proposal.native_overlap
+                                ));
+                            }
+                            ResidualOutcome::MergeRejected {
+                                conflicts: rejected,
+                                lines: std::mem::take(&mut candidate.lines),
+                            }
                         }
                     }
-                    Err(error) => progress(format!(
-                        "page {} residual recognition failed: {error}",
-                        page.get()
-                    )),
+                    Err(error) => ResidualOutcome::InferenceFailed {
+                        error: error.to_string(),
+                    },
                 }
+            } else {
+                ResidualOutcome::PreflightRejected {
+                    conflicts: preflight,
+                }
+            };
+            if attempt.accepted() {
+                return Ok(FallbackRecognition {
+                    lines: candidate.lines,
+                    evidence,
+                    attempt: Some(ResidualAttempt {
+                        page: attempt.page,
+                        paint_count: attempt.paint_count,
+                        required: std::mem::take(&mut attempt.required),
+                        outcome: ResidualOutcome::Accepted,
+                    }),
+                });
             }
+        }
+        if let Some(attempt) = &attempt {
             progress(format!(
-                "page {}: residual merge conflict; recognizing ordinary page",
-                page.get()
+                "page {}: residual {:?}; recognizing ordinary page",
+                page.get(),
+                match &attempt.outcome {
+                    ResidualOutcome::TransferRejected => "transfer rejected",
+                    ResidualOutcome::PreflightRejected { .. } => "preflight rejected",
+                    ResidualOutcome::InferenceFailed { .. } => "inference failed",
+                    ResidualOutcome::MergeRejected { .. } => "merge rejected",
+                    ResidualOutcome::Accepted => "accepted",
+                }
             ));
         }
-        Ok((engine.recognize_page(ordinary, mapper)?, false, evidence))
+        Ok(FallbackRecognition {
+            lines: engine.recognize_page(ordinary, mapper)?,
+            evidence,
+            attempt,
+        })
     }
 
     fn plan_native_fragment_pages(&self, scanned: &PaintReport) -> Result<FragmentPlans, Error> {

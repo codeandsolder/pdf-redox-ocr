@@ -257,6 +257,31 @@ fn residual_conflict_or_inference_failure_retries_exact_ordinary_raster()
         assert_eq!(result.draft.pages[0].lines.len(), 1);
         assert_eq!(result.draft.pages[0].lines[0].text, "CAPACITOR 47uF 16V");
         assert_eq!(result.stats.nonoverlapping_image_lines_added, 1);
+        let audit = serde_json::to_value(result.audit())?;
+        let attempt = &audit["residual_attempts"][0];
+        assert_eq!(attempt["page"], 1);
+        assert_eq!(attempt["paint_count"], 1);
+        assert_eq!(attempt["required"], serde_json::json!([0]));
+        if recognizer.fail_residual_once {
+            assert_eq!(attempt["outcome"]["status"], "inference_failed");
+            assert!(
+                attempt["outcome"]["error"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("fixture residual failure"))
+            );
+        } else {
+            assert_eq!(attempt["outcome"]["status"], "merge_rejected");
+            assert_eq!(
+                attempt["outcome"]["lines"][0]["text"],
+                "Conflicting residual"
+            );
+            assert_eq!(attempt["outcome"]["conflicts"][0]["observation_index"], 0);
+            assert_eq!(
+                attempt["outcome"]["conflicts"][0]["proposal"]["raster_text"],
+                "CAPACITOR 47uF 16V"
+            );
+            assert!(attempt["outcome"]["lines"][0]["quad"].is_array());
+        }
     }
     Ok(())
 }
@@ -615,12 +640,21 @@ fn audit_binds_raw_source_observations_paints_and_admission_to_original_pdf()
     let result = PreparedOcr::open(&pdf, None, policy)?
         .recognize(&SelectiveRecognizer::default(), |_| {})?;
     let audit = serde_json::to_value(result.audit())?;
-    assert_eq!(audit["schema_version"], 1);
+    assert_eq!(audit["schema_version"], 2);
     assert_eq!(audit["pdf_sha256"], result.draft.pdf_sha256);
     assert_eq!(audit["model"], result.draft.model);
     assert_eq!(audit["policy"]["render"]["max_side"], 600);
     assert_eq!(audit["routes"]["1"], "page_fallback");
     assert_eq!(audit["residual_pages"], serde_json::json!([1, 2]));
+    let attempts = audit["residual_attempts"]
+        .as_array()
+        .ok_or("missing residual attempts")?;
+    assert_eq!(attempts.len(), 2);
+    assert!(
+        attempts
+            .iter()
+            .all(|a| a["outcome"]["status"] == "accepted")
+    );
     assert_eq!(audit["recognition"]["inference_calls"], 3);
     assert_eq!(audit["source_observations"]["5:0"]["width"], 600);
     assert_eq!(
