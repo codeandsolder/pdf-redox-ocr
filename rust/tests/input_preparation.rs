@@ -81,6 +81,7 @@ fn processing_cli_retains_exact_draft_input_without_model_or_optimizer_binary()
     let draft_path = dir.path().join("draft.json");
     let prepared_path = dir.path().join("optimized.pdf");
     let report_path = dir.path().join("audit.json");
+    let catalog_path = dir.path().join("glyphs.json");
     let work = dir.path().join("work");
     let cache = dir.path().join("invalid-model-cache");
     fs::create_dir(&work)?;
@@ -114,6 +115,9 @@ fn processing_cli_retains_exact_draft_input_without_model_or_optimizer_binary()
         .arg(&prepared_path)
         .arg("--report")
         .arg(&report_path)
+        .arg("--output-glyph-catalog")
+        .arg(&catalog_path)
+        .args(["--confirm-with", "medium"])
         .output()?;
     assert!(
         processed.status.success(),
@@ -126,7 +130,7 @@ fn processing_cli_retains_exact_draft_input_without_model_or_optimizer_binary()
     assert_eq!(draft.pages.len(), 1);
     assert!(draft.pages[0].lines.is_empty());
     let audit: serde_json::Value = serde_json::from_slice(&fs::read(&report_path)?)?;
-    assert_eq!(audit["schema_version"], 8);
+    assert_eq!(audit["schema_version"], 9);
     assert_eq!(
         audit["preparation"]["original_sha256"],
         sha256_file(&input)?
@@ -134,6 +138,9 @@ fn processing_cli_retains_exact_draft_input_without_model_or_optimizer_binary()
     assert_eq!(audit["preparation"]["ocr_input_sha256"], draft.pdf_sha256);
     assert_eq!(audit["pdf_sha256"], draft.pdf_sha256);
     assert_eq!(audit["recognition"]["inference_calls"], 0);
+    assert_eq!(audit["recognition"]["confirmation_attempts"], 0);
+    let catalog: serde_json::Value = serde_json::from_slice(&fs::read(&catalog_path)?)?;
+    assert_eq!(catalog["optimized_pdf_sha256"], draft.pdf_sha256);
     assert_eq!(
         audit["preparation"]["processing"]["config"]["optimization_goal"],
         "processing"

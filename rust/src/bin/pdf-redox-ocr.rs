@@ -138,6 +138,9 @@ struct RecognitionArgs {
     /// Select the PP-OCRv6 recognition model, retaining the same detector.
     #[arg(long, value_enum, default_value = "small")]
     recognizer: RecognitionModel,
+    /// Confirm below-threshold original crops using a different actual recognition model.
+    #[arg(long, value_enum, requires = "report")]
+    confirm_with: Option<RecognitionModel>,
 }
 
 fn configured_policy(args: &Args) -> PipelinePolicy {
@@ -314,6 +317,9 @@ impl PipelineObserver for CliObserver {
 }
 
 fn run(args: &Args) -> Result<(), Box<dyn Error>> {
+    if args.recognition.confirm_with == Some(args.recognition.recognizer) {
+        return Err("alternative recognizer must differ from primary".into());
+    }
     if args.output.is_none() && args.output_pdf.is_none() && args.report.is_none() {
         return Err("request at least one draft, searchable PDF or audit output".into());
     }
@@ -371,6 +377,14 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
         },
         args.character_audit || input.catalog().is_some(),
         args.recognition.recognizer,
+        args.recognition.confirm_with.map(|model| {
+            pdf_redox_ocr::inference::AlternativeRecognizer {
+                model,
+                policy: pdf_redox_ocr::glyph_confirmation::ConfirmationPolicy::for_overlay(
+                    args.confidence,
+                ),
+            }
+        }),
     );
     let mut result = job.recognize(
         &engine,

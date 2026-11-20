@@ -7,7 +7,9 @@
 use crate::{
     Error,
     crop_geometry::CropGeometry,
+    crop_repair::BodyPrediction,
     disjoint_set::DisjointSet,
+    glyph_confirmation::{ConfirmationDecision, ConfirmationPolicy},
     glyph_isolation::{InkGroup, isolate_ink},
     ink_polarity::{Polarity, PolarityEvidence, estimate},
     pixel_regions::{InkBounds, PixelRegion},
@@ -121,12 +123,50 @@ pub struct CharacterLineAudit {
     pub anchors: Vec<CharacterAnchor>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ConfirmedPrediction {
+    pub prediction: BodyPrediction,
+    pub tensor_width: usize,
+    pub resized_width: usize,
+    pub sequence_length: usize,
+    pub anchors: Vec<CharacterAnchor>,
+    pub decision: ConfirmationDecision,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ConfirmationOutcome {
+    Predicted { result: ConfirmedPrediction },
+    InferenceFailed { error: String },
+}
+
+impl ConfirmationOutcome {
+    #[must_use]
+    pub const fn accepted(&self) -> bool {
+        matches!(self,Self::Predicted{result} if result.decision.accepted())
+    }
+    #[must_use]
+    pub const fn failed(&self) -> bool {
+        matches!(self, Self::InferenceFailed { .. })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct CharacterConfirmation {
+    pub detection_index: usize,
+    pub original: PixelLine,
+    pub crop_sha256: String,
+    pub outcome: ConfirmationOutcome,
+}
+
 #[derive(Debug, Default, Serialize)]
 pub struct CharacterAuditReport {
     pub lines: Vec<CharacterLineAudit>,
     pub skipped_budget: usize,
     pub invalid_metadata: usize,
     pub sampled_pixels: u64,
+    pub confirmation_batches: usize,
+    pub confirmations: Vec<CharacterConfirmation>,
 }
 
 const MAX_SAMPLE_PIXELS: u64 = 16_000_000;
@@ -262,7 +302,83 @@ fn align_runs(anchors: &mut [CharacterAnchor], run_count: usize, crop_width: u32
     }
 }
 
+fn prediction_anchors(
+    text: &str,
+    dimensions: (u32, u32),
+    batch: BatchGeometry,
+    columns: &[usize],
+    sequence_length: usize,
+    runs: &[InkGroup],
+) -> Result<Vec<CharacterAnchor>, Error> {
+    let resized_width = batch.resized_width(dimensions)?;
+    let characters = text.chars().collect::<Vec<_>>();
+    if sequence_length == 0
+        || columns.len() != characters.len()
+        || columns.iter().any(|&column| column >= sequence_length)
+        || columns.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(Error::Invalid("inconsistent CTC emission columns".into()));
+    }
+    let scale = batch.tensor_width.to_f64().ok_or_else(invalid_geometry)?
+        / sequence_length.to_f64().ok_or_else(invalid_geometry)?
+        * f64::from(dimensions.0)
+        / resized_width.to_f64().ok_or_else(invalid_geometry)?;
+    let cells = characters
+        .into_iter()
+        .zip(columns.iter().copied())
+        .map(|(character, column)| {
+            Ok((
+                character,
+                column,
+                (column.to_f64().ok_or_else(invalid_geometry)? + 0.5) * scale,
+            ))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let mut anchors = anchor_candidates(&cells, runs);
+    align_runs(&mut anchors, runs.len(), dimensions.0);
+    Ok(anchors)
+}
+
 impl CharacterLineAudit {
+    /// Project a second actual prediction on the very same source ink.
+    /// No image resampling or new segmentation is required.
+    ///
+    /// # Errors
+    /// Returns invalid CTC metadata errors.
+    pub fn confirmation(
+        &self,
+        prediction: BodyPrediction,
+        batch: BatchGeometry,
+        columns: &[usize],
+        length: usize,
+        policy: ConfirmationPolicy,
+    ) -> Result<ConfirmedPrediction, Error> {
+        let anchors = prediction_anchors(
+            &prediction.text,
+            self.crop_dimensions,
+            batch,
+            columns,
+            length,
+            &self.runs,
+        )?;
+        let decision = crate::glyph_confirmation::decide(
+            self.original.confidence,
+            prediction.confidence,
+            policy,
+            &self.anchors,
+            &anchors,
+            self.runs.len(),
+        );
+        Ok(ConfirmedPrediction {
+            prediction,
+            tensor_width: batch.tensor_width,
+            resized_width: batch.resized_width(self.crop_dimensions)?,
+            sequence_length: length,
+            anchors,
+            decision,
+        })
+    }
+
     fn measure(
         original: PixelLine,
         crop: &RgbImage,
@@ -272,29 +388,6 @@ impl CharacterLineAudit {
     ) -> Result<Self, Error> {
         let dimensions = crop.dimensions();
         let resized_width = batch.resized_width(dimensions)?;
-        let characters = original.text.chars().collect::<Vec<_>>();
-        if sequence_length == 0
-            || columns.len() != characters.len()
-            || columns.iter().any(|&column| column >= sequence_length)
-            || columns.windows(2).any(|pair| pair[0] >= pair[1])
-        {
-            return Err(Error::Invalid("inconsistent CTC emission columns".into()));
-        }
-        let scale = batch.tensor_width.to_f64().ok_or_else(invalid_geometry)?
-            / sequence_length.to_f64().ok_or_else(invalid_geometry)?
-            * f64::from(dimensions.0)
-            / resized_width.to_f64().ok_or_else(invalid_geometry)?;
-        let cells = characters
-            .into_iter()
-            .zip(columns.iter().copied())
-            .map(|(character, column)| {
-                Ok((
-                    character,
-                    column,
-                    (column.to_f64().ok_or_else(invalid_geometry)? + 0.5) * scale,
-                ))
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
         let gray = image::GrayImage::from_fn(dimensions.0, dimensions.1, |x, y| {
             crop.get_pixel(x, y).to_luma()
         });
@@ -311,8 +404,14 @@ impl CharacterLineAudit {
             192,
             &[128, 192, 224],
         )?;
-        let mut anchors = anchor_candidates(&cells, &isolation.groups);
-        align_runs(&mut anchors, isolation.groups.len(), dimensions.0);
+        let anchors = prediction_anchors(
+            &original.text,
+            dimensions,
+            batch,
+            columns,
+            sequence_length,
+            &isolation.groups,
+        )?;
         Ok(Self {
             detection_index: 0,
             original,

@@ -360,7 +360,7 @@ impl PipelineResult {
     #[must_use]
     pub const fn audit(&self) -> PipelineAudit<'_> {
         PipelineAudit {
-            schema_version: 8,
+            schema_version: 9,
             preparation: None,
             pdf_sha256: self.draft.pdf_sha256.as_str(),
             model: self.draft.model.as_str(),
@@ -446,6 +446,33 @@ fn model_provenance(profile: &str, stage: &str, render: RenderPolicy) -> String 
         "{profile} {stage} page-raster-max-side={} page-raster-dpi={}",
         render.max_side, render.dpi
     )
+}
+
+fn report_recognition(recognition: RecognitionStats, observer: &mut impl PipelineObserver) {
+    observer.message(format!(
+        "recognition: {} model calls, {} exact RGB cache hits, {} retained bytes",
+        recognition.inference_calls, recognition.cache_hits, recognition.retained_bytes
+    ));
+    if recognition.leader_candidates + recognition.boundary_candidates > 0 {
+        observer.message(format!(
+            "crop repairs: leader {}/{}, boundary {}/{} in {} batches ({} failed)",
+            recognition.leader_accepted,
+            recognition.leader_candidates,
+            recognition.boundary_accepted,
+            recognition.boundary_candidates,
+            recognition.crop_batches,
+            recognition.crop_failures
+        ));
+    }
+    if recognition.confirmation_attempts > 0 {
+        observer.message(format!(
+            "alternative recognition: {}/{} admitted in {} batches ({} failed)",
+            recognition.confirmation_accepted,
+            recognition.confirmation_attempts,
+            recognition.confirmation_batches,
+            recognition.confirmation_failures
+        ));
+    }
 }
 
 impl PreparedOcr {
@@ -564,21 +591,7 @@ impl PreparedOcr {
             residual_pages.len()
         ));
         let recognition = session.stats();
-        observer.message(format!(
-            "recognition: {} model calls, {} exact RGB cache hits, {} retained bytes",
-            recognition.inference_calls, recognition.cache_hits, recognition.retained_bytes
-        ));
-        if recognition.leader_candidates + recognition.boundary_candidates > 0 {
-            observer.message(format!(
-                "crop repairs: leader {}/{}, boundary {}/{} in {} batches ({} failed)",
-                recognition.leader_accepted,
-                recognition.leader_candidates,
-                recognition.boundary_accepted,
-                recognition.boundary_candidates,
-                recognition.crop_batches,
-                recognition.crop_failures
-            ));
-        }
+        report_recognition(recognition, &mut observer);
         self.verify_source()?;
         Ok(PipelineResult {
             draft,

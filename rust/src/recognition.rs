@@ -143,6 +143,10 @@ pub struct RecognitionStats {
     pub boundary_candidates: usize,
     pub boundary_accepted: usize,
     pub crop_failures: usize,
+    pub confirmation_batches: usize,
+    pub confirmation_attempts: usize,
+    pub confirmation_accepted: usize,
+    pub confirmation_failures: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,6 +206,10 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
                 boundary_candidates: 0,
                 boundary_accepted: 0,
                 crop_failures: 0,
+                confirmation_batches: 0,
+                confirmation_attempts: 0,
+                confirmation_accepted: 0,
+                confirmation_failures: 0,
             },
         }
     }
@@ -262,7 +270,20 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
         Ok(lines)
     }
 
-    fn record_characters(&mut self, key: RasterKey, report: CharacterAuditReport) {
+    fn record_characters(&mut self, key: RasterKey, report: CharacterAuditReport) -> bool {
+        self.stats.confirmation_batches += report.confirmation_batches;
+        self.stats.confirmation_attempts += report.confirmations.len();
+        self.stats.confirmation_accepted += report
+            .confirmations
+            .iter()
+            .filter(|c| c.outcome.accepted())
+            .count();
+        let failures = report
+            .confirmations
+            .iter()
+            .filter(|c| c.outcome.failed())
+            .count();
+        self.stats.confirmation_failures += failures;
         if !report.lines.is_empty() || report.skipped_budget > 0 || report.invalid_metadata > 0 {
             self.character_audits.push(RasterCharacterAudit {
                 dimensions: key.dimensions,
@@ -270,6 +291,7 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
                 report,
             });
         }
+        failures == 0
     }
 
     fn record_repairs(&mut self, key: RasterKey, report: RepairReport) -> bool {
@@ -354,8 +376,8 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
             crop_repair,
             character_audit,
         } = self.backend.recognize_pixels(rgb)?;
-        self.record_characters(key, character_audit);
-        let complete = self.record_repairs(key, crop_repair);
+        let complete_characters = self.record_characters(key, character_audit);
+        let complete = self.record_repairs(key, crop_repair) && complete_characters;
         if self.budget.enabled() && complete {
             self.remember(key, &lines);
         }
