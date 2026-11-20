@@ -34,7 +34,7 @@ cat "$input" >> "$draft"
 while (( $# )); do
     case "$1" in
         --report) printf 'audit:' > "$2"; cat "$input" >> "$2"; shift 2 ;;
-        --keep-native-text|--no-recognition-cache|--no-residual-ocr) shift ;;
+        --keep-native-text|--no-recognition-cache|--no-residual-ocr|--no-leader-repair) shift ;;
         *) shift 2 ;;
     esac
 done
@@ -55,8 +55,9 @@ expected=$'--pages\n1,3\n--confidence\n0.99\n--ocr-threads\n2\n--raster-mode\nal
 [[ -z $(ls -A "$PDF_REDOX_WORK_DIR") ]]
 
 : > "$CALL_LOG"
-PDF_REDOX_RELEASE_BIN_DIR="$scratch/nonexistent" "$root/run-auto.sh" "$source" "$output" --ocr-only --no-recognition-cache
+PDF_REDOX_RELEASE_BIN_DIR="$scratch/nonexistent" "$root/run-auto.sh" "$source" "$output" --ocr-only --no-recognition-cache --no-leader-repair
 [[ $(cat "$CALL_LOG") == recognize ]]
+[[ $(cat "$CALL_LOG.args") == $'--no-recognition-cache\n--no-leader-repair' ]]
 [[ $(cat "$output") == source ]]
 [[ $(cat "$source") == source ]]
 [[ -z $(ls -A "$PDF_REDOX_WORK_DIR") ]]

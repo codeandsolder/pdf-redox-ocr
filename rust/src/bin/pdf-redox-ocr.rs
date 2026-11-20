@@ -66,6 +66,9 @@ struct Args {
     /// Diagnostic: disable job-local exact RGB recognition reuse.
     #[arg(long)]
     no_recognition_cache: bool,
+    /// Disable geometry-confirmed re-recognition of dotted layout leaders.
+    #[arg(long)]
+    no_leader_repair: bool,
     /// Automatic, exhaustive bounded, or disabled native-raster recognition.
     #[arg(long, value_enum, default_value = "auto")]
     raster_mode: RasterMode,
@@ -258,7 +261,10 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
         fs::create_dir(directory)?;
     }
     let job = PreparedOcr::open(&args.pdf, args.pages.as_deref(), configured_policy(args))?;
-    let engine = OcrInference::pp_ocrv6_small(args.ocr_threads);
+    let engine = OcrInference::pp_ocrv6_small(
+        args.ocr_threads,
+        (!args.no_leader_repair).then_some(args.confidence.max(0.97)),
+    );
     let result = job.recognize(
         &engine,
         CliObserver {

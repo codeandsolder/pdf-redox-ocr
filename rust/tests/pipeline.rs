@@ -15,7 +15,7 @@ use pdf_redox_ocr::{
     pipeline::{PipelineObserver, PipelinePolicy, PreparedOcr, RasterMode, ResidualInput},
     rasterize::RenderPolicy,
     rasterize::render_rgb_page,
-    recognition::{PixelLine, RecognitionBackend, RecognitionCacheBudget},
+    recognition::{PixelLine, RasterRecognition, RecognitionBackend, RecognitionCacheBudget},
 };
 use sha2::{Digest, Sha256};
 
@@ -34,7 +34,7 @@ impl RecognitionBackend for Recognizer {
         "fixture recognizer"
     }
 
-    fn recognize_pixels(&self, rgb: RgbImage) -> Result<Vec<PixelLine>, Error> {
+    fn recognize_pixels(&self, rgb: RgbImage) -> Result<RasterRecognition, Error> {
         let (w, h) = rgb.dimensions();
         self.calls.borrow_mut().push((w, h));
         if (w, h) != (1200, 300) {
@@ -49,7 +49,8 @@ impl RecognitionBackend for Recognizer {
                         text: "Conflicting residual".into(),
                         confidence,
                         quad,
-                    }]);
+                    }]
+                    .into());
                 }
             }
         }
@@ -74,13 +75,14 @@ impl RecognitionBackend for Recognizer {
                 Point(w * 0.25, h * 0.25),
             ]
         } else {
-            return Ok(vec![]);
+            return Ok(RasterRecognition::default());
         };
         Ok(vec![PixelLine {
             text: "CAPACITOR 47uF 16V".into(),
             confidence: 0.99,
             quad,
-        }])
+        }]
+        .into())
     }
 }
 
@@ -531,14 +533,14 @@ impl RecognitionBackend for SelectiveRecognizer {
         "selective fixture"
     }
 
-    fn recognize_pixels(&self, rgb: RgbImage) -> Result<Vec<PixelLine>, Error> {
+    fn recognize_pixels(&self, rgb: RgbImage) -> Result<RasterRecognition, Error> {
         // Native and fallback rasters have identical dimensions in this
         // fixture, so use deterministic call order to distinguish them.
         let mut calls = self.calls.borrow_mut();
         let source = calls.is_empty();
         calls.push(rgb);
         if !source {
-            return Ok(Vec::new());
+            return Ok(RasterRecognition::default());
         }
         Ok([("ALPHA", 50.0, 250.0), ("BETA", 350.0, 550.0)]
             .into_iter()
@@ -552,7 +554,8 @@ impl RecognitionBackend for SelectiveRecognizer {
                     Point(left, 70.0),
                 ],
             })
-            .collect())
+            .collect::<Vec<_>>()
+            .into())
     }
 }
 
@@ -692,7 +695,7 @@ fn audit_binds_raw_source_observations_paints_and_admission_to_original_pdf()
     let result = PreparedOcr::open(&pdf, None, policy)?
         .recognize(&SelectiveRecognizer::default(), |_| {})?;
     let audit = serde_json::to_value(result.audit())?;
-    assert_eq!(audit["schema_version"], 3);
+    assert_eq!(audit["schema_version"], 4);
     assert_eq!(audit["pdf_sha256"], result.draft.pdf_sha256);
     assert_eq!(audit["model"], result.draft.model);
     assert_eq!(audit["policy"]["render"]["max_side"], 600);

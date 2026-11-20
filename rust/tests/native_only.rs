@@ -14,7 +14,7 @@ use pdf_redox_ocr::{
     pdf_metadata::PdfMetadata,
     pipeline::{PipelinePolicy, PreparedOcr},
     rasterize::RenderPolicy,
-    recognition::{PixelLine, RecognitionBackend, RecognitionCacheBudget},
+    recognition::{PixelLine, RasterRecognition, RecognitionBackend, RecognitionCacheBudget},
 };
 
 mod support;
@@ -99,11 +99,11 @@ impl RecognitionBackend for Recognizer {
         "native-only fixture"
     }
 
-    fn recognize_pixels(&self, image: RgbImage) -> Result<Vec<PixelLine>, Error> {
+    fn recognize_pixels(&self, image: RgbImage) -> Result<RasterRecognition, Error> {
         let dimensions = image.dimensions();
         self.0.borrow_mut().push(dimensions);
         if dimensions != (80, 20) {
-            return Ok(Vec::new());
+            return Ok(RasterRecognition::default());
         }
         Ok(vec![PixelLine {
             text: "Raster source".into(),
@@ -114,7 +114,8 @@ impl RecognitionBackend for Recognizer {
                 Point(70.0, 5.0),
                 Point(10.0, 5.0),
             ],
-        }])
+        }]
+        .into())
     }
 }
 

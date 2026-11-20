@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-    printf '%s\n' "Usage: $0 SOURCE.pdf OUTPUT.pdf [--ocr-only] [--pages 1,8,10] [--confidence 0.97] [--max-side 1920] [--ocr-threads N] [--raster-mode auto|all|off] [--keep-native-text] [--report PATH] [--draft PATH] [--capture-residual-dir DIR]"
+    printf '%s\n' "Usage: $0 SOURCE.pdf OUTPUT.pdf [--ocr-only] [--pages 1,8,10] [--confidence 0.97] [--max-side 1920] [--ocr-threads N] [--raster-mode auto|all|off] [--keep-native-text] [--report PATH] [--draft PATH] [--capture-residual-dir DIR] [--no-leader-repair]"
 }
 
 if [[ ${1:-} == --help ]]; then
@@ -26,7 +26,7 @@ args=()
 while (( $# )); do
     case "$1" in
         --ocr-only) ocr_only=1; shift ;;
-        --keep-native-text|--no-residual-ocr|--no-recognition-cache)
+        --keep-native-text|--no-residual-ocr|--no-recognition-cache|--no-leader-repair)
             args+=("$1"); shift ;;
         --pages|--confidence|--max-side|--ocr-threads|--raster-mode|--dpi|--native-chunk|--max-native-source-pixels|--max-native-total-pixels|--max-native-sources|--max-native-extraction-pixels|--max-mosaic-group-pixels|--max-mosaic-page-pixels|--max-mosaic-groups|--max-mosaic-dpi|--report|--draft|--capture-residual-dir)
             if (( $# < 2 )); then

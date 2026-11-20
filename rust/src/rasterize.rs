@@ -8,7 +8,6 @@ use std::{
     process::{Command, Stdio},
 };
 
-#[cfg(feature = "pdf-integration")]
 use image::Rgb;
 use image::{ImageFormat, RgbImage};
 
@@ -287,7 +286,6 @@ pub fn render_rgb_region(
 }
 
 /// Sample pixel-center RGB coordinates with a white exterior.
-#[cfg(feature = "pdf-integration")]
 pub(crate) fn sample_whitened(image: &RgbImage, Point(x, y): Point) -> Rgb<u8> {
     // Pixel centers are at i+0.5; sample in that convention. Sampling
     // outside the region contributes white exactly as Poppler's backdrop.

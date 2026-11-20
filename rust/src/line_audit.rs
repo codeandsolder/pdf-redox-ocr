@@ -6,8 +6,6 @@ use std::{
     path::Path,
 };
 
-use image::{GrayImage, Pixel, imageops};
-use num_traits::ToPrimitive;
 use serde::Serialize;
 
 use crate::{
@@ -15,11 +13,12 @@ use crate::{
     draft::{OcrDraft, OcrLine, sha256_file},
     geometry::{DisplayMapper, PageBox, Point, Quad},
     glyph_isolation::{InkBand, InkGroup, InkIsolation, InkRun, isolate_ink},
-    ink_polarity::{Polarity, PolarityEvidence, estimate},
+    ink_polarity::{Polarity, PolarityEvidence},
     layout_leaders::{LeaderEvidence, detect_leaders},
+    line_frame::{LineFrame, SampleWindow},
     pdf_metadata::PdfMetadata,
     pixel_regions::{InkBounds, PixelRegion},
-    rasterize::{render_rgb_region, sample_whitened},
+    rasterize::render_rgb_region,
 };
 
 /// Native source resolution and ink measurement settings.
@@ -60,189 +59,10 @@ impl LineAuditPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct LineFrame {
-    corners: Quad,
-    width: u32,
-    height: u32,
-    axis_swapped: bool,
-}
-
-fn distance(a: Point, b: Point) -> f64 {
-    (b.0 - a.0).hypot(b.1 - a.1)
-}
-
-fn interpolate(a: Point, b: Point, t: f64) -> Point {
-    Point((b.0 - a.0).mul_add(t, a.0), (b.1 - a.1).mul_add(t, a.1))
-}
-
-fn convex(quad: &Quad) -> bool {
-    let mut positive = false;
-    for index in 0..4 {
-        let [a, b, c] = [quad[index], quad[(index + 1) % 4], quad[(index + 2) % 4]];
-        let cross = (b.0 - a.0).mul_add(c.1 - b.1, -(b.1 - a.1) * (c.0 - b.0));
-        if !cross.is_finite()
-            || cross.abs() <= 1e-9
-            || (index != 0 && cross.is_sign_positive() != positive)
-        {
-            return false;
-        }
-        positive = cross.is_sign_positive();
-    }
-    true
-}
-
-impl LineFrame {
-    fn new(mut corners: Quad, policy: &LineAuditPolicy) -> Result<Self, Error> {
-        if !convex(&corners) {
-            return Err(Error::Invalid(
-                "nonconvex or degenerate line audit quad".into(),
-            ));
-        }
-        // Draft winding is BL/BR/TR/TL in the detector's frame.
-        // For elongated vertical boxes, measure along the longer edge.
-        // This establishes an axis, not the reading direction of the text.
-        let horizontal = f64::midpoint(
-            distance(corners[0], corners[1]),
-            distance(corners[3], corners[2]),
-        );
-        let vertical = f64::midpoint(
-            distance(corners[0], corners[3]),
-            distance(corners[1], corners[2]),
-        );
-        let axis_swapped = vertical > 1.5 * horizontal;
-        let (w, h) = if axis_swapped {
-            corners.rotate_left(1);
-            (vertical, horizontal)
-        } else {
-            (horizontal, vertical)
-        };
-        let pixels = |points: f64| {
-            (points * f64::from(policy.dpi) / 72.0)
-                .ceil()
-                .to_u32()
-                .filter(|&value| value > 0)
-                .ok_or_else(|| Error::Invalid("unrepresentable line raster extent".into()))
-        };
-        let width = pixels(w)?;
-        let height = pixels(h)?;
-        if u64::from(width) * u64::from(height) > policy.max_pixels {
-            return Err(Error::Invalid("oriented line exceeds raster budget".into()));
-        }
-        Ok(Self {
-            corners,
-            width,
-            height,
-            axis_swapped,
-        })
-    }
-
-    /// Bilinear quad interpolation in pixel-corner coordinates.
-    fn to_pdf(self, Point(x, y): Point) -> Point {
-        let u = x / f64::from(self.width);
-        let v = y / f64::from(self.height);
-        let top = interpolate(self.corners[3], self.corners[2], u);
-        let bottom = interpolate(self.corners[0], self.corners[1], u);
-        interpolate(top, bottom, v)
-    }
-}
-
-/// The extended sampling rectangle in the original line's pixel coordinate
-/// system. Negative positions are valid, but all four mapped corners must
-/// remain within the physical PDF page.
-#[derive(Clone, Copy, Debug)]
-struct SampleWindow {
-    padding: [u32; 4], // left, top, right, bottom
-}
-
-impl SampleWindow {
-    fn dimensions(self, frame: LineFrame) -> Option<(u32, u32)> {
-        let [left, top, right, bottom] = self.padding;
-        Some((
-            frame.width.checked_add(left)?.checked_add(right)?,
-            frame.height.checked_add(top)?.checked_add(bottom)?,
-        ))
-    }
-
-    const fn observation(self, frame: LineFrame) -> InkBounds {
-        let [left, top, _, _] = self.padding;
-        InkBounds {
-            left,
-            top,
-            right: left + frame.width,
-            bottom: top + frame.height,
-        }
-    }
-
-    fn to_pdf(self, frame: LineFrame, point: Point) -> Point {
-        frame.to_pdf(Point(
-            point.0 - f64::from(self.padding[0]),
-            point.1 - f64::from(self.padding[1]),
-        ))
-    }
-
-    fn quad(self, frame: LineFrame, bounds: InkBounds) -> Quad {
-        let l = f64::from(bounds.left);
-        let r = f64::from(bounds.right);
-        let t = f64::from(bounds.top);
-        let b = f64::from(bounds.bottom);
-        [Point(l, b), Point(r, b), Point(r, t), Point(l, t)].map(|p| self.to_pdf(frame, p))
-    }
-
-    fn valid(self, frame: LineFrame, display: DisplayMapper) -> bool {
-        let Some((width, height)) = self.dimensions(frame) else {
-            return false;
-        };
-        let quad = self.quad(
-            frame,
-            InkBounds {
-                left: 0,
-                top: 0,
-                right: width,
-                bottom: height,
-            },
-        );
-        convex(&quad)
-            && quad.iter().all(|&point| {
-                let Point(u, v) = display.to_raster(point);
-                (-1e-8..=1.0 + 1e-8).contains(&u) && (-1e-8..=1.0 + 1e-8).contains(&v)
-            })
-    }
-
-    /// Grow each side independently, keeping the complete mapped rectangle
-    /// inside the page and rejecting folded extrapolations.
-    fn new(
-        frame: LineFrame,
-        display: DisplayMapper,
-        requested: u32,
-        max_pixels: u64,
-    ) -> Result<Self, Error> {
-        let mut result = Self { padding: [0; 4] };
-        if !result.valid(frame, display) {
-            return Err(Error::Invalid(
-                "line audit quad extends outside original page".into(),
-            ));
-        }
-        for side in 0..4 {
-            let (mut low, mut high) = (0, requested);
-            while low < high {
-                let candidate = low + (high - low).div_ceil(2);
-                result.padding[side] = candidate;
-                if result.valid(frame, display) {
-                    low = candidate;
-                } else {
-                    high = candidate - 1;
-                }
-            }
-            result.padding[side] = low;
-        }
-        let (width, height) = result
-            .dimensions(frame)
-            .ok_or_else(|| Error::Invalid("unrepresentable padded line".into()))?;
-        if u64::from(width) * u64::from(height) > max_pixels {
-            return Err(Error::Invalid("padded line exceeds raster budget".into()));
-        }
-        Ok(result)
+fn inside_page(display: DisplayMapper) -> impl Fn(Point) -> bool {
+    move |point| {
+        let Point(u, v) = display.to_raster(point);
+        (-1e-8..=1.0 + 1e-8).contains(&u) && (-1e-8..=1.0 + 1e-8).contains(&v)
     }
 }
 
@@ -365,9 +185,18 @@ fn audit_line(
     line: &OcrLine,
     policy: &LineAuditPolicy,
 ) -> Result<AuditedLine, Error> {
-    let frame = LineFrame::new(line.quad, policy)?;
+    let frame = LineFrame::new(
+        line.quad,
+        |points| points * f64::from(policy.dpi) / 72.0,
+        policy.max_pixels,
+    )?;
     let display = metadata.mapper(page)?;
-    let window = SampleWindow::new(frame, display, policy.padding_pixels, policy.max_pixels)?;
+    let window = SampleWindow::new(
+        frame,
+        inside_page(display),
+        policy.padding_pixels,
+        policy.max_pixels,
+    )?;
     let (width, height) = window
         .dimensions(frame)
         .ok_or_else(|| Error::Invalid("unrepresentable sample window".into()))?;
@@ -390,20 +219,12 @@ fn audit_line(
         policy.max_pixels,
     )?;
     let mapper = crop.pixel_mapper();
-    let raster = GrayImage::from_fn(width, height, |x, y| {
-        let source = window.to_pdf(frame, Point(f64::from(x) + 0.5, f64::from(y) + 0.5));
-        sample_whitened(&crop.rgb, mapper.to_raster(source)).to_luma()
-    });
-    let original = imageops::crop_imm(
-        &raster,
-        observation.left,
-        observation.top,
-        frame.width,
-        frame.height,
-    )
-    .to_image();
-    let polarity = estimate(&original, policy.polarity)?;
-    let normalized = polarity.normalize(&raster);
+    let (normalized, polarity) = window.normalized_ink(
+        frame,
+        &crop.rgb,
+        |point| mapper.to_raster(point),
+        policy.polarity,
+    )?;
     let InkIsolation {
         components,
         groups,
@@ -534,7 +355,7 @@ pub fn audit_lines(
 
 #[cfg(test)]
 mod tests {
-    use super::{LineAuditPolicy, LineFrame, SampleWindow};
+    use super::{LineAuditPolicy, LineFrame, SampleWindow, inside_page};
     use crate::{
         geometry::{DisplayMapper, PageBox, Point, Rotation},
         pixel_regions::InkBounds,
@@ -548,7 +369,7 @@ mod tests {
             Point(28.0, 31.0),
             Point(8.0, 26.0),
         ];
-        let frame = LineFrame::new(corners, &LineAuditPolicy::default())?;
+        let frame = LineFrame::new(corners, |points| points * 600.0 / 72.0, 2_000_000)?;
         let bounds = InkBounds {
             left: 0,
             top: 0,
@@ -559,7 +380,7 @@ mod tests {
         for (actual, expected) in window.quad(frame, bounds).iter().zip(corners) {
             assert!((actual.0 - expected.0).abs() < 1e-10 && (actual.1 - expected.1).abs() < 1e-10);
         }
-        let center = frame.to_pdf(Point(
+        let center = frame.to_source(Point(
             f64::from(frame.width) / 2.0,
             f64::from(frame.height) / 2.0,
         ));
@@ -567,17 +388,8 @@ mod tests {
         assert!((center.1 - 25.5).abs() < 1e-10);
         let mut bad = corners;
         bad.swap(1, 2);
-        assert!(LineFrame::new(bad, &LineAuditPolicy::default()).is_err());
-        assert!(
-            LineFrame::new(
-                corners,
-                &LineAuditPolicy {
-                    max_pixels: 1,
-                    ..LineAuditPolicy::default()
-                }
-            )
-            .is_err()
-        );
+        assert!(LineFrame::new(bad, |points| points * 600.0 / 72.0, 2_000_000).is_err());
+        assert!(LineFrame::new(corners, |points| points * 600.0 / 72.0, 1).is_err());
         Ok(())
     }
 
@@ -591,7 +403,11 @@ mod tests {
             Point(30.0, 60.0),
         ];
         let policy = LineAuditPolicy::default();
-        let frame = LineFrame::new(corners, &policy)?;
+        let frame = LineFrame::new(
+            corners,
+            |points| points * f64::from(policy.dpi) / 72.0,
+            policy.max_pixels,
+        )?;
         let page = PageBox::new([30.0, 40.0, 190.0, 160.0])?;
         for rotation in [
             Rotation::Deg0,
@@ -600,7 +416,7 @@ mod tests {
             Rotation::Deg270,
         ] {
             let display = DisplayMapper::new(page, rotation);
-            let window = SampleWindow::new(frame, display, 8, policy.max_pixels)?;
+            let window = SampleWindow::new(frame, inside_page(display), 8, policy.max_pixels)?;
             assert_eq!(window.padding, [0, 8, 8, 8]);
             let original = window.observation(frame);
             for (actual, expected) in window.quad(frame, original).iter().zip(corners) {
@@ -608,7 +424,7 @@ mod tests {
                     (actual.0 - expected.0).abs() < 1e-10 && (actual.1 - expected.1).abs() < 1e-10
                 );
             }
-            assert!(SampleWindow::new(frame, display, 8, 1).is_err());
+            assert!(SampleWindow::new(frame, inside_page(display), 8, 1).is_err());
         }
         Ok(())
     }
@@ -621,7 +437,7 @@ mod tests {
             Point(4.0, 20.0),
             Point(0.0, 20.0),
         ];
-        let frame = LineFrame::new(corners, &LineAuditPolicy::default())?;
+        let frame = LineFrame::new(corners, |points| points * 600.0 / 72.0, 2_000_000)?;
         assert!(frame.axis_swapped);
         assert!(frame.width > frame.height);
         assert_eq!(

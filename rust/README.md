@@ -129,7 +129,7 @@ binds the source bytes, and extracts native word exclusion geometry before
 model initialization. `recognize` then runs source reuse, source-resolution
 mosaics, paint visibility proofs, and the masked full-page fallback through
 one `RecognitionBackend`. The backend receives owned RGB rasters and
-returns typed `PixelLine` observations in the original raster's pixel frame,
+returns typed `RasterRecognition` (pixel-space lines and repair evidence) in the original raster's pixel frame,
 with no PDF placement data. The job-local `RecognitionSession` maps each
 occurrence after inference. Successful results (including empty observations)
 are reused across native sources, rectified mosaics, residual rasters and
@@ -138,14 +138,14 @@ raster dimensions. The default LRU budget retains at most 256 entries and
 4 MiB of observation payload; input image buffers are not retained. Failed
 inferences are never cached. `--no-recognition-cache` disables lookup and
 retention for diagnostic comparison, and `PipelineResult.recognition`
-reports model calls, cache hits, evictions and retained payload.
-The optional `--report audit.json` writes a separate schema-3 diagnostic
+reports full-raster calls, cache hits, evictions, retained payload and additional leader crop batches/candidate outcomes.
+The optional `--report audit.json` writes a separate schema-4 diagnostic
 report bound to the original PDF digest and model provenance. It includes
 the validated policy, raw native-image observations in source-pixel
 coordinates, original paint paths and native-only blockers, the per-page
 routing/residual decisions, differential visibility evidence, merge
 proposals, per-page residual attempt outcomes and original rejected recognition
-lines/quads, and recognition reuse counters. It is not an importer draft and
+lines/quads, exact-RGB-bound leader repair evidence and recognition reuse counters. It is not an importer draft and
 cannot authorize an overlay.
 The scanner also certifies native-only or empty pages using shared paint
 closure and source context; those pages retain their native word regions
@@ -429,7 +429,7 @@ a new directory whose parent already exists. The observer writes the exact
 ordinary and transferred treated RGB inputs as lossless PNG immediately
 before attempted residual inference. This is opt-in, uses borrowed images
 without changing model inputs, and performs no additional rendering.
-Schema-3 pipeline audits identify the required per-page source observations
+Schema-4 pipeline audits identify the required per-page source observations
 and retain rejected residual text/quads for correlation with the captures.
 
 Source candidates are vetoed by overlap only with page observations that
@@ -439,3 +439,33 @@ but cannot exclude a separately proved source label from the automatic
 overlay. The audit records both qualified and raw maximum overlap. Native
 text exclusion, visibility proofs and source confidence requirements are
 unchanged.
+
+
+### Retained-raster layout leader repair
+
+Normal inference confirms dotted layout leader corrections using the same
+PP-OCRv6 Small recognition session as the initial detection/crop pipeline.
+The OAR task adapters keep the original detector configuration, quad sorting,
+crop rectification, stable aspect-ratio ordering and four-region batching.
+Only observations with terminal dot-like punctuation enter bounded geometry
+sampling (two line heights of padding, up to 2M sample pixels per line and
+16M per raster). The same sampler and polarity estimation as the standalone
+line audit provide periodic ink-chain evidence. Only the proved boundary
+moves; the body must retain all other supported ink.
+
+Recognition-only body crops run in batches of at most four, without another
+detector call or PDF render. Replacement is permitted only when the genuine
+prediction matches the full original body exactly after removal of proved
+boundary dots/adjacent whitespace, is nonblank, and reaches both 0.97 and the
+requested overlay threshold. Geometry and actual recognition scores are
+retained, not invented. Failed or conflicting crops leave original
+observations unchanged. Failed repair attempts prevent caching the incomplete
+raster result; successful exact RGB reuse includes the confirmed repairs.
+
+Pipeline audit schema 4 records original pixel-space observations, sample
+frame, component bounds, leader evidence, body crop quad and each actual
+prediction/decision by exact RGB SHA-256 and dimensions. Full-raster inference
+calls remain separate from recognition-only batch counters. Disable the stage
+with `--no-leader-repair` for exact policy A/B comparisons. Native-only pages
+still initialize no model. The standalone line-audit tool remains purely
+diagnostic; its schema 5 and original PDF coordinate contract are unchanged.

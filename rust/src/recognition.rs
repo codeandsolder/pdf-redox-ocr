@@ -9,13 +9,14 @@ use crate::{
     Error,
     draft::OcrLine,
     geometry::{DisplayMapper, Point, Quad},
+    leader_repair::{LeaderRepair, RepairReport},
 };
 
 /// A model observation in the original input raster's pixel-corner frame.
 ///
 /// Coordinates grow rightwards and downwards. Corners are ordered bottom-left,
 /// bottom-right, top-right, top-left relative to the detected text orientation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct PixelLine {
     pub text: String,
     pub confidence: f64,
@@ -35,6 +36,32 @@ impl PixelLine {
     }
 }
 
+/// Observations and evidence emitted by one complete raster recognition.
+#[derive(Default)]
+pub struct RasterRecognition {
+    pub lines: Vec<PixelLine>,
+    pub leader_repair: RepairReport,
+}
+
+impl From<Vec<PixelLine>> for RasterRecognition {
+    fn from(lines: Vec<PixelLine>) -> Self {
+        Self {
+            lines,
+            leader_repair: RepairReport::default(),
+        }
+    }
+}
+
+/// Original raster identity and all actual crop-repair attempts for that input.
+/// Cached occurrences reuse the same pixel-space recognition, not new attempts.
+#[derive(Debug, serde::Serialize)]
+pub struct RasterRepairAudit {
+    pub dimensions: (u32, u32),
+    pub rgb_sha256: String,
+    pub batches: usize,
+    pub repairs: Vec<LeaderRepair>,
+}
+
 /// A reusable recognizer whose result depends only on the input RGB raster.
 ///
 /// A backend must use the same inference policy throughout a recognition
@@ -47,7 +74,7 @@ pub trait RecognitionBackend {
     ///
     /// # Errors
     /// Returns an error when recognition fails.
-    fn recognize_pixels(&self, rgb: RgbImage) -> Result<Vec<PixelLine>, Error>;
+    fn recognize_pixels(&self, rgb: RgbImage) -> Result<RasterRecognition, Error>;
 }
 
 /// Bound retained recognition results, not the input raster allocation.
@@ -87,6 +114,10 @@ pub struct RecognitionStats {
     pub cache_hits: usize,
     pub evictions: usize,
     pub retained_bytes: usize,
+    pub leader_batches: usize,
+    pub leader_candidates: usize,
+    pub leader_accepted: usize,
+    pub leader_failures: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,6 +151,7 @@ pub struct RecognitionSession<'a, B> {
     budget: RecognitionCacheBudget,
     entries: VecDeque<CacheEntry>,
     stats: RecognitionStats,
+    repair_audits: Vec<RasterRepairAudit>,
 }
 
 impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
@@ -129,11 +161,16 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
             backend,
             budget,
             entries: VecDeque::new(),
+            repair_audits: Vec::new(),
             stats: RecognitionStats {
                 inference_calls: 0,
                 cache_hits: 0,
                 evictions: 0,
                 retained_bytes: 0,
+                leader_batches: 0,
+                leader_candidates: 0,
+                leader_accepted: 0,
+                leader_failures: 0,
             },
         }
     }
@@ -141,6 +178,32 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
     #[must_use]
     pub const fn stats(&self) -> RecognitionStats {
         self.stats
+    }
+
+    /// Finish collecting evidence without retaining input raster buffers.
+    pub fn take_repair_audits(&mut self) -> Vec<RasterRepairAudit> {
+        std::mem::take(&mut self.repair_audits)
+    }
+
+    fn record_repairs(&mut self, key: RasterKey, report: RepairReport) -> bool {
+        self.stats.leader_batches += report.batches;
+        self.stats.leader_candidates += report.repairs.len();
+        self.stats.leader_accepted += report
+            .repairs
+            .iter()
+            .filter(|r| r.outcome.accepted())
+            .count();
+        let failures = report.repairs.iter().filter(|r| r.outcome.failed()).count();
+        self.stats.leader_failures += failures;
+        if !report.repairs.is_empty() {
+            self.repair_audits.push(RasterRepairAudit {
+                dimensions: key.dimensions,
+                rgb_sha256: hex::encode(key.digest),
+                batches: report.batches,
+                repairs: report.repairs,
+            });
+        }
+        failures == 0
     }
 
     fn remember(&mut self, key: RasterKey, lines: &[PixelLine]) {
@@ -177,8 +240,8 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
         if rgb.width() == 0 || rgb.height() == 0 {
             return Err(Error::Invalid("empty OCR raster".into()));
         }
-        let key = self.budget.enabled().then(|| RasterKey::new(&rgb));
-        if let Some(key) = key
+        let key = RasterKey::new(&rgb);
+        if self.budget.enabled()
             && let Some(index) = self.entries.iter().position(|entry| entry.key == key)
             && let Some(entry) = self.entries.remove(index)
         {
@@ -188,11 +251,15 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
             return Ok(result);
         }
         self.stats.inference_calls += 1;
-        let result = self.backend.recognize_pixels(rgb)?;
-        if let Some(key) = key {
-            self.remember(key, &result);
+        let RasterRecognition {
+            lines,
+            leader_repair,
+        } = self.backend.recognize_pixels(rgb)?;
+        let complete = self.record_repairs(key, leader_repair);
+        if self.budget.enabled() && complete {
+            self.remember(key, &lines);
         }
-        Ok(result)
+        Ok(lines)
     }
 
     /// Recognize in pixel space and project into the current occurrence.
@@ -230,7 +297,10 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PixelLine, RecognitionBackend, RecognitionCacheBudget, RecognitionSession};
+    use super::{
+        PixelLine, RasterRecognition, RecognitionBackend, RecognitionCacheBudget,
+        RecognitionSession,
+    };
     use crate::{Error, geometry::Point};
     use image::{Rgb, RgbImage};
     use std::cell::Cell;
@@ -247,7 +317,7 @@ mod tests {
             "pixel cache fixture"
         }
 
-        fn recognize_pixels(&self, _rgb: RgbImage) -> Result<Vec<PixelLine>, Error> {
+        fn recognize_pixels(&self, _rgb: RgbImage) -> Result<RasterRecognition, Error> {
             self.calls.set(self.calls.get() + 1);
             if self.fail_next.replace(false) {
                 return Err(Error::Inference("transient fixture failure".into()));
@@ -265,7 +335,8 @@ mod tests {
                         Point(1.0, 1.0),
                     ],
                 }]
-            })
+            }
+            .into())
         }
     }
 
