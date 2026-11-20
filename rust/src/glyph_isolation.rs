@@ -29,7 +29,15 @@ pub struct InkGroup {
     pub topology: Vec<GlyphTopology>,
 }
 
-/// Independent components and two projections of the same source evidence.
+/// A row-projection band with its independent column projection.
+#[derive(Debug, Serialize)]
+pub struct InkBand {
+    #[serde(flatten)]
+    pub run: InkRun,
+    pub column_runs: Vec<InkRun>,
+}
+
+/// Independent components and complementary projections of the same source evidence.
 #[derive(Debug)]
 pub struct InkIsolation {
     pub components: Vec<PixelRegion>,
@@ -37,22 +45,48 @@ pub struct InkIsolation {
     /// Projection of only components with pixels inside the observation.
     /// Entire connected boundary continuations remain included.
     pub supported_runs: Vec<InkRun>,
+    /// Orthogonal projection of source-supported components. Detached marks
+    /// may occupy their own band; neither bands nor runs imply characters.
+    pub supported_bands: Vec<InkBand>,
 }
 
-fn projection_runs(components: &[PixelRegion], supported_only: bool) -> Vec<InkRun> {
-    let mut indices = (0..components.len())
-        .filter(|&index| !supported_only || components[index].observation_support.inside_pixels > 0)
-        .collect::<Vec<_>>();
+#[derive(Clone, Copy)]
+enum Axis {
+    Columns,
+    Rows,
+}
+
+impl Axis {
+    const fn interval(self, bounds: InkBounds) -> (u32, u32) {
+        match self {
+            Self::Columns => (bounds.left, bounds.right),
+            Self::Rows => (bounds.top, bounds.bottom),
+        }
+    }
+}
+
+fn projection_runs(
+    components: &[PixelRegion],
+    indices: impl IntoIterator<Item = usize>,
+    axis: Axis,
+) -> Vec<InkRun> {
+    let mut indices = indices.into_iter().collect::<Vec<_>>();
     indices.sort_unstable_by_key(|&index| {
-        let b = components[index].bounds;
-        (b.left, b.top, b.right, b.bottom, index)
+        let bounds = components[index].bounds;
+        let other = match axis {
+            Axis::Columns => Axis::Rows,
+            Axis::Rows => Axis::Columns,
+        };
+        let (start, end) = axis.interval(bounds);
+        let (other_start, other_end) = other.interval(bounds);
+        (start, other_start, end, other_end, index)
     });
     let mut runs: Vec<InkRun> = Vec::new();
     for index in indices {
         let component = &components[index];
         if let Some(run) = runs
             .last_mut()
-            .filter(|run| component.bounds.left <= run.ink.right)
+            .filter(|run| axis.interval(component.bounds).0 <= axis.interval(run.ink).1)
         {
             run.ink = run.ink.union(component.bounds);
             run.component_indices.push(index);
@@ -117,15 +151,31 @@ pub fn isolate_ink(
         return Err(Error::Invalid("invalid glyph isolation thresholds".into()));
     }
     let components = regions(image, threshold, PixelClass::Ink, observation)?;
-    let groups = projection_runs(&components, false)
+    let groups = projection_runs(&components, 0..components.len(), Axis::Columns)
         .into_iter()
         .map(|run| measure_run(image, run, topology_thresholds))
         .collect::<Result<Vec<_>, _>>()?;
-    let supported_runs = projection_runs(&components, true);
+    let supported = || {
+        (0..components.len())
+            .filter(|&index| components[index].observation_support.inside_pixels > 0)
+    };
+    let supported_runs = projection_runs(&components, supported(), Axis::Columns);
+    let supported_bands = projection_runs(&components, supported(), Axis::Rows)
+        .into_iter()
+        .map(|run| InkBand {
+            column_runs: projection_runs(
+                &components,
+                run.component_indices.iter().copied(),
+                Axis::Columns,
+            ),
+            run,
+        })
+        .collect();
     Ok(InkIsolation {
         components,
         groups,
         supported_runs,
+        supported_bands,
     })
 }
 
@@ -221,7 +271,7 @@ mod tests {
     #[test]
     fn component_projection_equals_pixel_projection_for_all_small_bitmaps()
     -> Result<(), Box<dyn std::error::Error>> {
-        use super::projection_runs;
+        use super::{Axis, projection_runs};
         use crate::pixel_regions::{PixelClass, regions};
         for bits in 0_u16..4096 {
             let image = GrayImage::from_fn(4, 3, |x, y| {
@@ -232,7 +282,7 @@ mod tests {
                 }])
             });
             let components = regions(&image, 128, PixelClass::Ink, full(&image))?;
-            let runs = projection_runs(&components, false);
+            let runs = projection_runs(&components, 0..components.len(), Axis::Columns);
             let mut actual = [false; 4];
             for run in &runs {
                 for x in run.ink.left..run.ink.right {
@@ -246,6 +296,25 @@ mod tests {
                 runs.windows(2)
                     .all(|pair| pair[0].ink.right < pair[1].ink.left)
             );
+            let bands = projection_runs(&components, 0..components.len(), Axis::Rows);
+            let mut actual_rows = [false; 3];
+            let mut members = Vec::new();
+            for band in &bands {
+                for y in band.ink.top..band.ink.bottom {
+                    actual_rows[usize::try_from(y)?] = true;
+                }
+                let columns = projection_runs(
+                    &components,
+                    band.component_indices.iter().copied(),
+                    Axis::Columns,
+                );
+                members.extend(columns.into_iter().flat_map(|run| run.component_indices));
+            }
+            members.sort_unstable();
+            assert_eq!(members, (0..components.len()).collect::<Vec<_>>());
+            for (y, occupied) in actual_rows.into_iter().enumerate() {
+                assert_eq!(occupied, (0..4).any(|x| bits & (1 << (y * 4 + x)) != 0));
+            }
             assert_eq!(
                 components
                     .iter()
@@ -254,6 +323,29 @@ mod tests {
                 usize::try_from(bits.count_ones())?
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn orthogonal_bands_preserve_in_observation_rules_and_detached_marks()
+    -> Result<(), crate::Error> {
+        let mut image = GrayImage::from_pixel(17, 12, Luma([255]));
+        for x in 0..17 {
+            image.put_pixel(x, 10, Luma([0]));
+        }
+        image.put_pixel(4, 0, Luma([0]));
+        for y in 3..8 {
+            image.put_pixel(4, y, Luma([0]));
+            image.put_pixel(12, y, Luma([0]));
+        }
+        let audit = isolate_ink(&image, full(&image), 128, &[128])?;
+        assert_eq!(audit.supported_runs.len(), 1);
+        assert_eq!(audit.supported_bands.len(), 3);
+        let bands = &audit.supported_bands;
+        assert_eq!(bands[0].run.component_indices.len(), 1);
+        assert_eq!(bands[1].column_runs.len(), 2);
+        assert_eq!(bands[2].run.observation_support.inside_pixels, 17);
+        assert_eq!(bands[2].column_runs.len(), 1);
         Ok(())
     }
 

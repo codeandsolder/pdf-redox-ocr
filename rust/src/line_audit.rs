@@ -14,7 +14,7 @@ use crate::{
     Error, PageNumber,
     draft::{OcrDraft, OcrLine, sha256_file},
     geometry::{DisplayMapper, PageBox, Point, Quad},
-    glyph_isolation::{InkGroup, InkIsolation, InkRun, isolate_ink},
+    glyph_isolation::{InkBand, InkGroup, InkIsolation, InkRun, isolate_ink},
     ink_polarity::{Polarity, PolarityEvidence, estimate},
     pdf_metadata::PdfMetadata,
     pixel_regions::{InkBounds, PixelRegion},
@@ -289,6 +289,14 @@ pub struct MappedSupportedRun {
     pub ink_quad: Quad,
 }
 
+/// Source-supported row band with independently mapped column runs.
+#[derive(Debug, Serialize)]
+pub struct MappedInkBand {
+    #[serde(flatten)]
+    pub band: MappedSupportedRun,
+    pub column_runs: Vec<MappedSupportedRun>,
+}
+
 /// Audit an original OCR observation without assigning text to individual ink groups.
 #[derive(Debug, Serialize)]
 pub struct AuditedLine {
@@ -308,6 +316,7 @@ pub struct AuditedLine {
     pub groups: Vec<MappedInkGroup>,
     pub components: Vec<MappedComponent>,
     pub supported_runs: Vec<MappedSupportedRun>,
+    pub supported_bands: Vec<MappedInkBand>,
 }
 
 /// Provenance-bound geometric evidence, not an OCR replacement draft.
@@ -375,6 +384,7 @@ fn audit_line(
         components,
         groups,
         supported_runs,
+        supported_bands,
     } = isolate_ink(
         &normalized,
         observation,
@@ -396,11 +406,16 @@ fn audit_line(
             component,
         })
         .collect();
-    let supported_runs = supported_runs
+    let map_run = |run: InkRun| MappedSupportedRun {
+        ink_quad: window.quad(frame, run.ink),
+        run,
+    };
+    let supported_runs = supported_runs.into_iter().map(map_run).collect();
+    let supported_bands = supported_bands
         .into_iter()
-        .map(|run| MappedSupportedRun {
-            ink_quad: window.quad(frame, run.ink),
-            run,
+        .map(|InkBand { run, column_runs }| MappedInkBand {
+            band: map_run(run),
+            column_runs: column_runs.into_iter().map(map_run).collect(),
         })
         .collect();
     Ok(AuditedLine {
@@ -419,6 +434,7 @@ fn audit_line(
         groups,
         components,
         supported_runs,
+        supported_bands,
     })
 }
 
@@ -478,7 +494,7 @@ pub fn audit_lines(
         ));
     }
     Ok(LineAuditReport {
-        schema_version: 3,
+        schema_version: 4,
         pdf_sha256: draft.pdf_sha256.clone(),
         draft_model: draft.model.clone(),
         dpi: policy.dpi,

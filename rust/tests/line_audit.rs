@@ -61,6 +61,25 @@ fn source_ink_topology_and_pdf_mapping_survive_all_page_rotations()
         assert_eq!(line.groups.len(), 3, "page {}", line.page);
         assert_eq!(line.components.len(), 4);
         assert_eq!(line.supported_runs.len(), 3);
+        let mut band_components = line
+            .supported_bands
+            .iter()
+            .flat_map(|band| band.column_runs.iter())
+            .flat_map(|run| run.run.component_indices.iter().copied())
+            .collect::<Vec<_>>();
+        band_components.sort_unstable();
+        assert_eq!(band_components, vec![0, 1, 2, 3]);
+        for band in &line.supported_bands {
+            let mut expected = band.band.run.component_indices.clone();
+            expected.sort_unstable();
+            let mut actual = band
+                .column_runs
+                .iter()
+                .flat_map(|run| run.run.component_indices.iter().copied())
+                .collect::<Vec<_>>();
+            actual.sort_unstable();
+            assert_eq!(actual, expected);
+        }
         assert_eq!(line.groups[2].group.run.component_indices.len(), 2);
         for ((group, expected_holes), expected_left) in
             line.groups.iter().zip([1, 2, 0]).zip([55.0, 75.0, 100.0])

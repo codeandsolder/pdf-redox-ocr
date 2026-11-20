@@ -255,7 +255,7 @@ Background topology uses the complementary four-connected traversal.
 Optional `--padding-pixels N` (default 0) expands the sampled source region
 on each side within the actual page, retaining the original rectification
 scale. Padding is not painted synthetically and does not affect polarity
-estimation. Version-3 reports identify the original observation rectangle
+estimation. Version-4 reports identify the original observation rectangle
 inside the padded sampling rectangle, both quads, and per-group foreground
 pixel counts inside and outside the original observation, plus original
 boundary contact. Padding can also introduce unrelated neighboring ink:
@@ -263,8 +263,13 @@ padded-only components are retained in the full report, even when their
 column extent merges otherwise separate groups. The additional
 `supported_runs` projection omits only whole components with zero foreground
 pixels inside the original observation; connected boundary continuations
-are retained. This projection is geometric evidence, not a cleaned image
-or character assignment. Each full group reports its half-open ink/crop bounds,
+are retained. The `supported_bands` array independently projects those same
+components onto rows, then projects each band onto columns. It preserves
+component indices, inside/outside pixel support, and mapped PDF quadrilaterals
+at both levels. A detached horizontal rule can occupy a separate band without
+joining letter runs; detached accents or dots can likewise occupy a separate
+band. Neither representation establishes character identity or reading order.
+These projections are geometric evidence, not a cleaned image or character assignment. Each full group reports its half-open ink/crop bounds,
 original PDF-space quadrilaterals, line-edge contact at the segmentation
 threshold, and topology at the selected cutoffs (64/128/192/224 by default).
 Topology at a higher threshold can include additional ink at the crop edge.
