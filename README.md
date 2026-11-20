@@ -47,7 +47,6 @@ The legacy Python pipeline, its tests, all original documentation and
 experimental scripts remain available at the immutable baseline
 [legacy-python-reference-20261120](https://github.com/codeandsolder/pdf-redox-ocr/tree/legacy-python-reference-20261120).
 They are independent comparison tools, not a second runtime maintained
-inside the Rust implementation. The Rust rewrite branch remains a draft
-cutover candidate until representative corpus quality and performance
-are verified; the archived experimental research scripts are not claimed
-to have one-for-one replacements.
+inside the Rust implementation. Rust is now the production pipeline. The archived
+experimental research scripts are historical references, not runtime
+dependencies or maintained one-for-one replacements.

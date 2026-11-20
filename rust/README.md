@@ -2,8 +2,8 @@
 
 The native implementation lives in this crate. The independent legacy
 Python pipeline and research scripts are frozen at Git tag
-`legacy-python-reference-20261120`. This rewrite remains a cutover
-candidate until representative corpus quality and performance are verified.
+`legacy-python-reference-20261120`. The native pipeline is production; the archive
+is retained solely for historical comparison.
 
 ## Implemented
 
