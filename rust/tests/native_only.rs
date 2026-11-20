@@ -8,14 +8,13 @@ use std::{cell::RefCell, fs};
 use image::RgbImage;
 use pdf_redox_ocr::{
     Error, PageNumber,
-    draft::OcrLine,
     geometry::Point,
     hybrid::PageRoute,
     paint_scan::{NativeOnlyBlocker, enumerate_image_paints},
     pdf_metadata::PdfMetadata,
     pipeline::{PipelinePolicy, PreparedOcr},
     rasterize::RenderPolicy,
-    recognition::RecognitionBackend,
+    recognition::{PixelLine, RecognitionBackend, RecognitionCacheBudget},
 };
 
 mod support;
@@ -100,17 +99,13 @@ impl RecognitionBackend for Recognizer {
         "native-only fixture"
     }
 
-    fn recognize_mapped(
-        &self,
-        image: RgbImage,
-        to_pdf: &dyn Fn(Point) -> Point,
-    ) -> Result<Vec<OcrLine>, Error> {
+    fn recognize_pixels(&self, image: RgbImage) -> Result<Vec<PixelLine>, Error> {
         let dimensions = image.dimensions();
         self.0.borrow_mut().push(dimensions);
         if dimensions != (80, 20) {
             return Ok(Vec::new());
         }
-        Ok(vec![OcrLine {
+        Ok(vec![PixelLine {
             text: "Raster source".into(),
             confidence: 0.99,
             quad: [
@@ -118,9 +113,7 @@ impl RecognitionBackend for Recognizer {
                 Point(70.0, 15.0),
                 Point(70.0, 5.0),
                 Point(10.0, 5.0),
-            ]
-            .map(to_pdf),
-            reviewed: false,
+            ],
         }])
     }
 }
@@ -184,6 +177,7 @@ fn all_three_routes_preserve_selected_order_and_native_words()
                 max_side: 300,
                 dpi: 72,
             },
+            recognition_cache: RecognitionCacheBudget::DISABLED,
             ..PipelinePolicy::default()
         },
     )?;
@@ -247,6 +241,7 @@ fn native_only_selection_and_keep_native_text_control_recognition()
             max_side: 300,
             dpi: 72,
         },
+        recognition_cache: RecognitionCacheBudget::DISABLED,
         ..PipelinePolicy::default()
     };
     let doc = PreparedOcr::open(&path, Some("1-3,13"), policy)?;

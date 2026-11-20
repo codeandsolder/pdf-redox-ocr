@@ -128,8 +128,17 @@ callers. `PreparedOcr::open` validates the selection and resource policies,
 binds the source bytes, and extracts native word exclusion geometry before
 model initialization. `recognize` then runs source reuse, source-resolution
 mosaics, paint visibility proofs, and the masked full-page fallback through
-one `RecognitionBackend`. The backend receives owned RGB rasters and an
-explicit pixel-to-PDF coordinate mapping; it supplies its model provenance.
+one `RecognitionBackend`. The backend receives owned RGB rasters and
+returns typed `PixelLine` observations in the original raster's pixel frame,
+with no PDF placement data. The job-local `RecognitionSession` maps each
+occurrence after inference. Successful results (including empty observations)
+are reused across native sources, rectified mosaics, residual rasters and
+ordinary fallback using a content key of SHA-256 of all RGB bytes and exact
+raster dimensions. The default LRU budget retains at most 256 entries and
+4 MiB of observation payload; input image buffers are not retained. Failed
+inferences are never cached. `--no-recognition-cache` disables lookup and
+retention for diagnostic comparison, and `PipelineResult.recognition`
+reports model calls, cache hits, evictions and retained payload.
 The scanner also certifies native-only or empty pages using shared paint
 closure and source context; those pages retain their native word regions
 without any OCR lines, rendering or font masking. The merge validates an

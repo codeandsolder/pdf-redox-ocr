@@ -29,7 +29,9 @@ use crate::{
     paint_scan::{PaintReport, enumerate_image_paints},
     pdf_metadata::PdfMetadata,
     rasterize::{RenderPolicy, render_rgb_page},
-    recognition::RecognitionBackend,
+    recognition::{
+        RecognitionBackend, RecognitionCacheBudget, RecognitionSession, RecognitionStats,
+    },
     source_ocr::{
         SourceObservation, SourceOnlyResult, source_image_mapper, source_only_candidates,
         source_only_pages,
@@ -48,6 +50,8 @@ pub struct PipelinePolicy {
     pub keep_native_text: bool,
     /// Reuse verified source-masked rasters instead of ordinary full-page input.
     pub residual_ocr: bool,
+    /// Job-local cache limits for unmapped model observations.
+    pub recognition_cache: RecognitionCacheBudget,
 }
 
 impl Default for PipelinePolicy {
@@ -60,6 +64,7 @@ impl Default for PipelinePolicy {
             native_chunk: 24,
             keep_native_text: false,
             residual_ocr: true,
+            recognition_cache: RecognitionCacheBudget::default(),
         }
     }
 }
@@ -88,6 +93,8 @@ pub struct PipelineResult {
     pub visibility: MixedVisibility,
     /// Fallback pages recognized from verified residual rasters.
     pub residual_pages: BTreeSet<PageNumber>,
+    /// Model calls and reuse across all raster recognition paths.
+    pub recognition: RecognitionStats,
 }
 
 /// Immutable source metadata and native word exclusion for a validated OCR request.
@@ -204,7 +211,8 @@ impl PreparedOcr {
         mut progress: impl FnMut(String),
     ) -> Result<PipelineResult, Error> {
         self.verify_source()?;
-        let prepared = self.prepare_native_sources(engine, &mut progress)?;
+        let mut session = RecognitionSession::new(engine, self.policy.recognition_cache);
+        let prepared = self.prepare_native_sources(&mut session, &mut progress)?;
         let temporary_mask = self.prepare_raster_pdf(&prepared.fallback_pages, &mut progress)?;
         let raster_pdf = temporary_mask
             .as_ref()
@@ -214,7 +222,7 @@ impl PreparedOcr {
             fallback,
             visibility,
             residual_pages,
-        } = self.recognize_pages(engine, &prepared, raster_pdf, &mut progress)?;
+        } = self.recognize_pages(&mut session, &prepared, raster_pdf, &mut progress)?;
         let policy = self.policy.render;
         let raster_draft = OcrDraft::new(
             self.digest.clone(),
@@ -256,6 +264,11 @@ impl PreparedOcr {
             "verified residual rasters used on {} pages",
             residual_pages.len()
         ));
+        let recognition = session.stats();
+        progress(format!(
+            "recognition: {} model calls, {} exact RGB cache hits, {} retained bytes",
+            recognition.inference_calls, recognition.cache_hits, recognition.retained_bytes
+        ));
         self.verify_source()?;
         Ok(PipelineResult {
             draft,
@@ -264,12 +277,13 @@ impl PreparedOcr {
             proposals,
             visibility,
             residual_pages,
+            recognition,
         })
     }
 
     fn recognize_pages(
         &self,
-        engine: &impl RecognitionBackend,
+        engine: &mut RecognitionSession<'_, impl RecognitionBackend>,
         prepared: &NativePreparation,
         raster_pdf: &Path,
         progress: &mut dyn FnMut(String),
@@ -348,7 +362,7 @@ impl PreparedOcr {
 
     fn recognize_fallback(
         &self,
-        engine: &impl RecognitionBackend,
+        engine: &mut RecognitionSession<'_, impl RecognitionBackend>,
         raster_pdf: &Path,
         page: PageNumber,
         native: &[Quad],
@@ -537,7 +551,7 @@ impl PreparedOcr {
 
     fn recognize_native_sources(
         &self,
-        engine: &impl RecognitionBackend,
+        engine: &mut RecognitionSession<'_, impl RecognitionBackend>,
         plan: &NativeSourcePlan,
         progress: &mut dyn FnMut(String),
     ) -> Result<BTreeMap<String, SourceObservation>, Error> {
@@ -582,7 +596,7 @@ impl PreparedOcr {
 
     fn add_reconstructed_mosaics(
         &self,
-        engine: &impl RecognitionBackend,
+        engine: &mut RecognitionSession<'_, impl RecognitionBackend>,
         scanned: &PaintReport,
         plans: &BTreeMap<PageNumber, MosaicPlan>,
         source_only: &mut SourceOnlyResult,
@@ -632,7 +646,7 @@ impl PreparedOcr {
     /// mosaics, and verify exact mixed-page source paint visibility.
     fn prepare_native_sources(
         &self,
-        engine: &impl RecognitionBackend,
+        engine: &mut RecognitionSession<'_, impl RecognitionBackend>,
         progress: &mut dyn FnMut(String),
     ) -> Result<NativePreparation, Error> {
         let scanned = enumerate_image_paints(&self.doc, &self.selected)?;

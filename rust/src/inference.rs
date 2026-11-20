@@ -14,9 +14,8 @@ use oar_ocr::{
 
 use crate::{
     Error,
-    draft::OcrLine,
     geometry::{Point, Quad},
-    recognition::RecognitionBackend,
+    recognition::{PixelLine, RecognitionBackend},
 };
 
 /// One lazily initialized CPU OCR pipeline reused across multiple raster and PDF pages.
@@ -76,16 +75,11 @@ impl RecognitionBackend for OcrInference {
         Self::MODEL_PROFILE
     }
 
-    /// Recognize a cropped or reoriented raster while preserving the exact
-    /// pixel-to-PDF map instead of guessing a full-page display rectangle.
+    /// Recognize the original input raster without applying PDF placement geometry.
     ///
     /// # Errors
     /// Returns an error for invalid image geometry or ONNX inference failure.
-    fn recognize_mapped(
-        &self,
-        rgb: RgbImage,
-        pixel_to_pdf: &dyn Fn(Point) -> Point,
-    ) -> Result<Vec<OcrLine>, Error> {
+    fn recognize_pixels(&self, rgb: RgbImage) -> Result<Vec<PixelLine>, Error> {
         let width = f64::from(rgb.width());
         let height = f64::from(rgb.height());
         let results = self
@@ -105,13 +99,11 @@ impl RecognitionBackend for OcrInference {
             if text.trim().is_empty() {
                 continue;
             }
-            let quad =
-                image_polygon_to_quad(&region.bounding_box.points, width, height, &pixel_to_pdf)?;
-            lines.push(OcrLine {
+            let quad = image_polygon_to_quad(&region.bounding_box.points, width, height)?;
+            lines.push(PixelLine {
                 text: text.to_owned(),
                 confidence: f64::from(confidence),
                 quad,
-                reviewed: false,
             });
         }
         Ok(lines)
@@ -122,7 +114,6 @@ fn image_polygon_to_quad(
     points: &[oar_ocr::processors::Point],
     width: f64,
     height: f64,
-    pixel_to_pdf: &impl Fn(Point) -> Point,
 ) -> Result<Quad, Error> {
     if points.len() < 3
         || !width.is_finite()
@@ -135,9 +126,8 @@ fn image_polygon_to_quad(
     {
         return Err(Error::Inference("invalid OCR image-region geometry".into()));
     }
-    let normalized = |point: oar_ocr::processors::Point| {
-        pixel_to_pdf(Point(f64::from(point.x), f64::from(point.y)))
-    };
+    let normalized =
+        |point: oar_ocr::processors::Point| Point(f64::from(point.x), f64::from(point.y));
     if let [top_left, top_right, bottom_right, bottom_left] = points {
         return Ok([
             normalized(*bottom_left),
@@ -152,8 +142,7 @@ fn image_polygon_to_quad(
     let max_x = points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
     let min_y = points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
     let max_y = points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
-    let from_pixel =
-        |pixel_x: f32, pixel_y: f32| pixel_to_pdf(Point(f64::from(pixel_x), f64::from(pixel_y)));
+    let from_pixel = |x: f32, y: f32| Point(f64::from(x), f64::from(y));
     Ok([
         from_pixel(min_x, max_y),
         from_pixel(max_x, max_y),
@@ -189,9 +178,8 @@ mod tests {
             OarPoint::new(120.0, 30.0),
             OarPoint::new(20.0, 30.0),
         ];
-        let quad = image_polygon_to_quad(&box_, 800.0, 600.0, &|point| {
-            mapper.to_pdf(point.0 / 800.0, point.1 / 600.0)
-        })?;
+        let quad = image_polygon_to_quad(&box_, 800.0, 600.0)?
+            .map(|point| mapper.to_pdf(point.0 / 800.0, point.1 / 600.0));
         assert_eq!(
             quad,
             [

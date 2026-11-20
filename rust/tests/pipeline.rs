@@ -15,7 +15,7 @@ use pdf_redox_ocr::{
     pipeline::{PipelinePolicy, PreparedOcr},
     rasterize::RenderPolicy,
     rasterize::render_rgb_page,
-    recognition::RecognitionBackend,
+    recognition::{PixelLine, RecognitionBackend, RecognitionCacheBudget},
 };
 use sha2::{Digest, Sha256};
 
@@ -34,11 +34,7 @@ impl RecognitionBackend for Recognizer {
         "fixture recognizer"
     }
 
-    fn recognize_mapped(
-        &self,
-        rgb: RgbImage,
-        mapper: &dyn Fn(Point) -> Point,
-    ) -> Result<Vec<OcrLine>, Error> {
+    fn recognize_pixels(&self, rgb: RgbImage) -> Result<Vec<PixelLine>, Error> {
         let (w, h) = rgb.dimensions();
         self.calls.borrow_mut().push((w, h));
         if (w, h) != (1200, 300) {
@@ -49,11 +45,10 @@ impl RecognitionBackend for Recognizer {
                     return Err(Error::Inference("fixture residual failure".into()));
                 }
                 if let Some(quad) = self.conflict_once {
-                    return Ok(vec![OcrLine {
+                    return Ok(vec![PixelLine {
                         text: "Conflicting residual".into(),
                         confidence: 0.99,
                         quad,
-                        reviewed: false,
                     }]);
                 }
             }
@@ -81,11 +76,10 @@ impl RecognitionBackend for Recognizer {
         } else {
             return Ok(vec![]);
         };
-        Ok(vec![OcrLine {
+        Ok(vec![PixelLine {
             text: "CAPACITOR 47uF 16V".into(),
             confidence: 0.99,
-            quad: quad.map(mapper),
-            reviewed: false,
+            quad,
         }])
     }
 }
@@ -96,6 +90,7 @@ fn policy() -> PipelinePolicy {
             max_side: 1600,
             dpi: 72,
         },
+        recognition_cache: RecognitionCacheBudget::DISABLED,
         ..PipelinePolicy::default()
     }
 }
@@ -234,6 +229,12 @@ fn residual_conflict_or_inference_failure_retries_exact_ordinary_raster()
     };
     let conflict =
         pdf_redox_ocr::source_ocr::map_observations_to_paint(&observation, source)?[0].quad;
+    let mapper = doc.mapper(page)?;
+    let rgb = render_rgb_page(&pdf, page, policy().render)?;
+    let conflict = conflict.map(|point| {
+        let Point(x, y) = mapper.to_raster(point);
+        Point(x * f64::from(rgb.width()), y * f64::from(rgb.height()))
+    });
     let ordinary: [u8; 32] =
         Sha256::digest(render_rgb_page(&pdf, page, policy().render)?.as_raw()).into();
     let job = PreparedOcr::open(&pdf, Some("1"), policy())?;
@@ -453,11 +454,7 @@ impl RecognitionBackend for SelectiveRecognizer {
         "selective fixture"
     }
 
-    fn recognize_mapped(
-        &self,
-        rgb: RgbImage,
-        mapper: &dyn Fn(Point) -> Point,
-    ) -> Result<Vec<OcrLine>, Error> {
+    fn recognize_pixels(&self, rgb: RgbImage) -> Result<Vec<PixelLine>, Error> {
         // Native and fallback rasters have identical dimensions in this
         // fixture, so use deterministic call order to distinguish them.
         let mut calls = self.calls.borrow_mut();
@@ -468,7 +465,7 @@ impl RecognitionBackend for SelectiveRecognizer {
         }
         Ok([("ALPHA", 50.0, 250.0), ("BETA", 350.0, 550.0)]
             .into_iter()
-            .map(|(text, left, right)| OcrLine {
+            .map(|(text, left, right)| PixelLine {
                 text: text.into(),
                 confidence: 0.99,
                 quad: [
@@ -476,9 +473,7 @@ impl RecognitionBackend for SelectiveRecognizer {
                     Point(right, 130.0),
                     Point(right, 70.0),
                     Point(left, 70.0),
-                ]
-                .map(mapper),
-                reviewed: false,
+                ],
             })
             .collect())
     }
@@ -567,5 +562,95 @@ fn selective_masks_preserve_unproved_and_native_excluded_lines()
         assert_eq!(image.get_pixel(290, 175), original.get_pixel(290, 175));
     }
     result.draft.verify_pdf(&pdf)?;
+    Ok(())
+}
+
+/// Rectified native mosaics with identical samples at different placements,
+/// followed by a changed source and a repeated original occurrence.
+fn translated_mosaics_fixture() -> Vec<u8> {
+    let mut samples = vec![255; 128 * 64];
+    for row in samples
+        .as_chunks_mut::<128>()
+        .0
+        .iter_mut()
+        .skip(20)
+        .take(24)
+    {
+        row[16..48].fill(0);
+        row[80..112].fill(0);
+    }
+    let mut changed = samples.clone();
+    for row in changed.as_chunks_mut::<128>().0.iter_mut().skip(8).take(8) {
+        row[8..24].fill(0);
+    }
+    let format = "/Type /XObject /Subtype /Image /Width 128 /Height 64 /BitsPerComponent 8 /ColorSpace /DeviceGray";
+    support::pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R] /Count 4 /MediaBox [0 0 512 256] /Resources << /XObject << /A 7 0 R /B 8 0 R >> >> >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Contents 9 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Contents 10 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Contents 11 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Contents 9 0 R >>".to_vec(),
+        support::stream(format,&samples),
+        support::stream(format,&changed),
+        support::stream("", b"q 128 0 0 64 32 64 cm /A Do Q q 128 0 0 64 160 64 cm /A Do Q"),
+        support::stream("", b"q 128 0 0 64 96 96 cm /A Do Q q 128 0 0 64 224 96 cm /A Do Q"),
+        support::stream("", b"q 128 0 0 64 96 96 cm /A Do Q q 128 0 0 64 224 96 cm /B Do Q"),
+    ])
+}
+
+#[test]
+fn repeated_mosaics_reuse_inference_without_reusing_occurrence_geometry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let pdf = temp.path().join("translated-mosaics.pdf");
+    fs::write(&pdf, translated_mosaics_fixture())?;
+    let policy = PipelinePolicy {
+        recognition_cache: RecognitionCacheBudget::default(),
+        ..policy()
+    };
+    let recognizer = Recognizer {
+        recognize_fallback: true,
+        ..Recognizer::default()
+    };
+    let job = PreparedOcr::open(&pdf, None, policy)?;
+    let mut progress = Vec::new();
+    let cached = job.recognize(&recognizer, |message| progress.push(message))?;
+    assert_eq!(cached.stats.image_source_only_pages, 4, "{progress:#?}");
+    assert_eq!(cached.recognition.inference_calls, 2, "{progress:#?}");
+    assert_eq!(cached.recognition.cache_hits, 2);
+    assert_eq!(recognizer.calls.borrow().len(), 2);
+    let first = &cached.draft.pages[0].lines[0].quad;
+    let second = &cached.draft.pages[1].lines[0].quad;
+    for (a, b) in first.iter().zip(second) {
+        assert!((b.0 - a.0 - 64.0).abs() < 1e-10);
+        assert!((b.1 - a.1 - 32.0).abs() < 1e-10);
+    }
+    let uncached = PreparedOcr::open(
+        &pdf,
+        None,
+        PipelinePolicy {
+            recognition_cache: RecognitionCacheBudget::DISABLED,
+            ..policy
+        },
+    )?
+    .recognize(
+        &Recognizer {
+            recognize_fallback: true,
+            ..Recognizer::default()
+        },
+        |_| {},
+    )?;
+    assert_eq!(uncached.recognition.inference_calls, 4);
+    assert_eq!(uncached.recognition.cache_hits, 0);
+    assert_eq!(
+        serde_json::to_value(cached.draft)?,
+        serde_json::to_value(uncached.draft)?
+    );
+    // Each recognize() call is an independent job, even on the same prepared PDF.
+    let repeated = job.recognize(&recognizer, |_| {})?;
+    assert_eq!(repeated.recognition.inference_calls, 2);
+    assert_eq!(repeated.recognition.cache_hits, 2);
+    assert_eq!(recognizer.calls.borrow().len(), 4);
     Ok(())
 }

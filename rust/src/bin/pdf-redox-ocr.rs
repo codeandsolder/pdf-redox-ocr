@@ -12,6 +12,7 @@ use pdf_redox_ocr::{
     native_images::NativeImageBudget,
     pipeline::{PipelinePolicy, PreparedOcr},
     rasterize::{DEFAULT_PAGE_MAX_SIDE, RenderPolicy},
+    recognition::RecognitionCacheBudget,
 };
 
 /// Generate SHA-bound PDF OCR geometry and optionally apply invisible semantic text.
@@ -48,6 +49,9 @@ struct Args {
     /// Diagnostic: recognize the complete fallback raster, even with source proofs.
     #[arg(long)]
     no_residual_ocr: bool,
+    /// Diagnostic: disable job-local exact RGB recognition reuse.
+    #[arg(long)]
+    no_recognition_cache: bool,
     /// Maximum pixels allowed in a single decoded native-image OCR source.
     #[arg(long, default_value_t = 8_000_000)]
     max_native_source_pixels: u64,
@@ -74,7 +78,7 @@ struct Args {
     max_native_extraction_pixels: u64,
 }
 
-const fn configured_policy(args: &Args) -> PipelinePolicy {
+fn configured_policy(args: &Args) -> PipelinePolicy {
     PipelinePolicy {
         source_budget: NativeImageBudget {
             max_source_pixels: args.max_native_source_pixels,
@@ -95,6 +99,11 @@ const fn configured_policy(args: &Args) -> PipelinePolicy {
         native_chunk: args.native_chunk,
         keep_native_text: args.keep_native_text,
         residual_ocr: !args.no_residual_ocr,
+        recognition_cache: if args.no_recognition_cache {
+            RecognitionCacheBudget::DISABLED
+        } else {
+            RecognitionCacheBudget::default()
+        },
         minimum_confidence: args.confidence,
     }
 }
