@@ -321,14 +321,16 @@ pub fn direct_native_images(
             .or_default()
             .push(Expected { paint, seen: false });
     }
-    for page in pages {
+    // Preflight all selected page contexts before interpreting any of them.
+    // A later incompatible occurrence must not consume earlier decode budgets.
+    for &page in &pages {
         let index = usize::try_from(page.get() - 1)
             .map_err(|_| Error::Invalid("invalid extraction page".into()))?;
         let source_page = pdf
             .pages()
             .get(index)
             .ok_or_else(|| Error::Invalid("extraction page outside source".into()))?;
-        let Some(expected) = expected_pages.remove(&page) else {
+        let Some(expected) = expected_pages.get(&page) else {
             continue;
         };
         // interpret_page does not wrap the root page in its declared
@@ -338,14 +340,18 @@ pub fn direct_native_images(
             for id in expected.keys() {
                 collector.reject(id, "page_transparency_group");
             }
-            continue;
         }
+    }
+    for (page, expected) in expected_pages {
         if expected
             .keys()
             .all(|id| collector.result.stats.rejected_sources.contains_key(id))
         {
             continue;
         }
+        let index = usize::try_from(page.get() - 1)
+            .map_err(|_| Error::Invalid("invalid extraction page".into()))?;
+        let source_page = &pdf.pages()[index];
         // Do not reuse Hayro's document-wide object cache between different
         // page contexts: independently resolve color resources for each page.
         let cache = InterpreterCache::new();

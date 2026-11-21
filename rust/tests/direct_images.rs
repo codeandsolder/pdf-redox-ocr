@@ -289,3 +289,45 @@ fn unmatched_geometry_cannot_publish_a_source() -> Result<(), Box<dyn std::error
     );
     Ok(())
 }
+
+#[test]
+fn later_incompatible_page_does_not_starve_independent_source()
+-> Result<(), Box<dyn std::error::Error>> {
+    let bytes = support::pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /XObject << /A 7 0 R /B 8 0 R >> >> /Contents 5 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Group << /S /Transparency /CS /DeviceGray >> /Resources << /XObject << /A 7 0 R >> >> /Contents 6 0 R >>".to_vec(),
+        support::stream("", b"q 50 0 0 50 0 0 cm /A Do Q q 50 0 0 50 50 0 cm /B Do Q"),
+        support::stream("", b"q 50 0 0 50 0 0 cm /A Do Q"),
+        support::stream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8", &[255, 0, 0]),
+        support::stream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8", &[0, 255, 0]),
+    ]);
+    let pages = [PageNumber::new(1)?, PageNumber::new(2)?];
+    let result = extract(
+        &bytes,
+        &pages,
+        NativeImageBudget {
+            sources: 1,
+            total_pixels: 1,
+            extraction_pixels: 1,
+            ..NativeImageBudget::default()
+        },
+    )?;
+    assert_eq!(
+        result.stats.rejected_sources.get("7:0"),
+        Some(&"page_transparency_group")
+    );
+    assert_eq!(result.stats.decoded_pixels, 1);
+    assert_eq!(result.stats.decoded_occurrences, 1);
+    assert_eq!(result.stats.accepted_sources, 1);
+    assert_eq!(
+        result
+            .images
+            .get("8:0")
+            .ok_or("independent source missing")?
+            .as_raw(),
+        &[0, 255, 0]
+    );
+    Ok(())
+}
