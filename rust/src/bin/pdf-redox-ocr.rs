@@ -19,7 +19,8 @@ use pdf_redox_ocr::{
     mosaic::MosaicBudget,
     native_images::NativeImageBudget,
     pipeline::{
-        PipelineObserver, PipelinePolicy, PipelineResult, PreparedOcr, RasterMode, ResidualInput,
+        NativeImageDecoder, PipelineObserver, PipelinePolicy, PipelineResult, PreparedOcr,
+        RasterMode, ResidualInput,
     },
     quality_eval::GroundTruth,
     rasterize::{DEFAULT_PAGE_MAX_SIDE, RenderPolicy},
@@ -84,6 +85,9 @@ struct Args {
     /// Automatic, exhaustive bounded, or disabled native-raster recognition.
     #[arg(long, value_enum, default_value = "auto")]
     raster_mode: RasterMode,
+    /// Native image extraction backend; Hayro is the direct in-process experiment.
+    #[arg(long, value_enum, default_value = "poppler")]
+    native_image_decoder: NativeImageDecoder,
     /// Maximum pixels allowed in a single decoded native-image OCR source.
     #[arg(long, default_value_t = 8_000_000)]
     max_native_source_pixels: u64,
@@ -105,7 +109,7 @@ struct Args {
     /// Upper Poppler renderer DPI for native-resolution mosaic crops.
     #[arg(long, default_value_t = 2400)]
     max_mosaic_dpi: u32,
-    /// Maximum aggregate pixels that one Poppler extraction may produce.
+    /// Maximum aggregate decoded pixels per page (including repeated source checks in Hayro).
     #[arg(long, default_value_t = 64_000_000)]
     max_native_extraction_pixels: u64,
 }
@@ -157,6 +161,7 @@ struct RecognitionArgs {
 fn configured_policy(args: &Args) -> PipelinePolicy {
     PipelinePolicy {
         raster_mode: args.raster_mode,
+        native_image_decoder: args.native_image_decoder,
         source_budget: NativeImageBudget {
             source_pixels: args.max_native_source_pixels,
             total_pixels: args.max_native_total_pixels,

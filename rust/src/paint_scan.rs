@@ -844,7 +844,7 @@ impl ScanContext<'_> {
             return Ok(());
         };
         match subtype(self.source, dict)?.as_deref() {
-            Some(b"Image") => self.visit_image(id, dict, state),
+            Some(b"Image") => self.visit_image(id, dict, resources, state),
             Some(b"Form") => self.visit_form(id, dict, resources, state, depth),
             _ => {
                 self.summary.unknown_paint += 1;
@@ -857,6 +857,7 @@ impl ScanContext<'_> {
         &mut self,
         id: ObjectId,
         dict: &OwnedDictionary,
+        resources: &OwnedDictionary,
         state: &State,
     ) -> Result<(), Error> {
         self.summary.image_paints += 1;
@@ -883,8 +884,23 @@ impl ScanContext<'_> {
         if state.gs_unsafe {
             unsafe_reasons.push("unsupported_transparency_or_graphics_state");
         }
-        if dict.contains_key(b"SMask".as_slice()) || dict.contains_key(b"Mask".as_slice()) {
+        if [b"SMask".as_slice(), b"Mask", b"SMaskInData"]
+            .iter()
+            .any(|key| dict.contains_key(*key))
+        {
             unsafe_reasons.push("source_alpha_or_color_key_requires_compositing");
+        }
+        // Neither source-ID reuse nor the pinned interpreter can establish
+        // equivalent device colors when resources override a default space.
+        // Nested Indexed/Separation bases may also use these defaults.
+        if let Some(spaces) = resources.get(b"ColorSpace".as_slice())
+            && resolve_dictionary(self.source, spaces).map_or(true, |dict| {
+                [b"DefaultGray".as_slice(), b"DefaultRGB", b"DefaultCMYK"]
+                    .iter()
+                    .any(|key| dict.contains_key(*key))
+            })
+        {
+            unsafe_reasons.push("resource_default_color_space_requires_resolution");
         }
         if !unsafe_reasons.is_empty() {
             self.summary.unsafe_image_paints += 1;
