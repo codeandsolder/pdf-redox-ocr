@@ -58,19 +58,49 @@ fn unrelated_inline_image_does_not_consume_targeted_decode_budget()
 -> Result<(), Box<dyn std::error::Error>> {
     let bytes = include_bytes!("fixtures/inline-plus-source-budget.pdf");
     let pages = [PageNumber::new(1)?];
-    for (extraction_pixels, expected) in [(359_999, 0), (360_000, 1)] {
-        let actual = extract(
-            bytes,
-            &pages,
+    for (budget, expected, reason) in [
+        (
             NativeImageBudget {
-                extraction_pixels,
+                extraction_pixels: 360_000,
                 ..NativeImageBudget::default()
             },
-        )?;
+            1,
+            None,
+        ),
+        (
+            NativeImageBudget {
+                extraction_pixels: 359_999,
+                ..NativeImageBudget::default()
+            },
+            0,
+            Some("page_decode_budget"),
+        ),
+        (
+            NativeImageBudget {
+                source_pixels: 359_999,
+                ..NativeImageBudget::default()
+            },
+            0,
+            Some("source_pixel_budget"),
+        ),
+        (
+            NativeImageBudget {
+                total_pixels: 359_999,
+                ..NativeImageBudget::default()
+            },
+            0,
+            Some("resident_source_budget"),
+        ),
+    ] {
+        let actual = extract(bytes, &pages, budget)?;
         assert_eq!(actual.images.len(), expected, "{:?}", actual.stats);
         assert_eq!(
             actual.stats.decoded_pixels,
             if expected == 1 { 360_000 } else { 0 }
+        );
+        assert_eq!(
+            actual.stats.rejected_sources.values().next().copied(),
+            reason
         );
     }
     Ok(())
@@ -194,34 +224,46 @@ fn different_resolved_resource_contexts_do_not_share_pixels()
 }
 
 #[test]
-fn default_device_colorspace_override_is_not_assumed_equivalent()
+fn unsupported_root_color_contexts_cannot_publish_independent_rgb()
 -> Result<(), Box<dyn std::error::Error>> {
-    let bytes=support::pdf(&[
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /ColorSpace << /DefaultRGB [/CalRGB << /WhitePoint [0.95 1 1.09] /Gamma [2.2 2.2 2.2] >>] >> /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
-        support::stream("",b"q 100 0 0 100 0 0 cm /Im Do Q"),
-        support::stream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8",&[128,64,32]),
-    ]);
-    let pages = [PageNumber::new(1)?];
-    let doc = PdfMetadata::from_bytes(bytes)?;
-    let paints = enumerate_image_paints(&doc, &pages)?;
-    assert_eq!(
-        paints.placements[0].unsafe_reasons,
-        vec!["resource_default_color_space_requires_resolution"]
-    );
-    let result = direct_native_images(
-        &doc,
-        &pages,
-        &BTreeSet::from(["5:0".into()]),
-        &paints.placements,
-        NativeImageBudget::default(),
-    )?;
-    assert_eq!(result.stats.decoded_occurrences, 0);
-    assert_eq!(
-        result.stats.rejected_sources.get("5:0"),
-        Some(&"unsafe_scanned_occurrence")
-    );
+    for (resources, page_extra, reason) in [
+        (
+            "/ColorSpace << /DefaultRGB [/CalRGB << /WhitePoint [0.95 1 1.09] /Gamma [2.2 2.2 2.2] >>] >>",
+            "",
+            "unsafe_scanned_occurrence",
+        ),
+        (
+            "",
+            "/Group << /S /Transparency /CS /DeviceGray >>",
+            "page_transparency_group",
+        ),
+    ] {
+        let bytes=support::pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << {resources} /XObject << /Im 5 0 R >> >> /Contents 4 0 R {page_extra} >>").into_bytes(),
+            support::stream("",b"q 100 0 0 100 0 0 cm /Im Do Q"),
+            support::stream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8",&[128,64,32]),
+        ]);
+        let pages = [PageNumber::new(1)?];
+        let doc = PdfMetadata::from_bytes(bytes)?;
+        let paints = enumerate_image_paints(&doc, &pages)?;
+        if !resources.is_empty() {
+            assert_eq!(
+                paints.placements[0].unsafe_reasons,
+                vec!["resource_default_color_space_requires_resolution"]
+            );
+        }
+        let result = direct_native_images(
+            &doc,
+            &pages,
+            &BTreeSet::from(["5:0".into()]),
+            &paints.placements,
+            NativeImageBudget::default(),
+        )?;
+        assert_eq!(result.stats.decoded_occurrences, 0);
+        assert_eq!(result.stats.rejected_sources.get("5:0"), Some(&reason));
+    }
     Ok(())
 }
 
