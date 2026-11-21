@@ -12,6 +12,7 @@ use tempfile::NamedTempFile;
 use crate::{
     Error, PageNumber,
     catalog_evidence::CatalogEvidence,
+    direct_images::{DirectDecodeStats, direct_native_images},
     draft::{DraftPage, OcrDraft, OcrLine, sha256_file},
     geometry::{DisplayMapper, Quad},
     hybrid::{
@@ -57,10 +58,22 @@ pub enum RasterMode {
     Off,
 }
 
+/// Source image extraction backend. The interpreter path is initially
+/// explicit so source pixels and OCR quality can be compared independently.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+#[serde(rename_all = "snake_case")]
+pub enum NativeImageDecoder {
+    #[default]
+    Poppler,
+    Hayro,
+}
+
 /// Independent source raster, mosaic and fallback policy for an OCR job.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct PipelinePolicy {
     pub source_budget: NativeImageBudget,
+    pub native_image_decoder: NativeImageDecoder,
     pub raster_mode: RasterMode,
     pub mosaic_budget: MosaicBudget,
     pub render: RenderPolicy,
@@ -77,6 +90,7 @@ impl Default for PipelinePolicy {
     fn default() -> Self {
         Self {
             source_budget: NativeImageBudget::default(),
+            native_image_decoder: NativeImageDecoder::default(),
             raster_mode: RasterMode::Auto,
             mosaic_budget: MosaicBudget::default(),
             render: RenderPolicy::default(),
@@ -98,6 +112,24 @@ impl PipelinePolicy {
             return Err(Error::Invalid("invalid OCR pipeline policy".into()));
         }
         Ok(self)
+    }
+}
+
+/// Exact native RGB input, independently of OCR model output.
+#[derive(Debug, serde::Serialize)]
+pub struct SourceRasterIdentity {
+    pub width: u32,
+    pub height: u32,
+    pub rgb_sha256: String,
+}
+
+impl SourceRasterIdentity {
+    fn measure(rgb: &image::RgbImage) -> Self {
+        Self {
+            width: rgb.width(),
+            height: rgb.height(),
+            rgb_sha256: hex::encode(Sha256::digest(rgb.as_raw())),
+        }
     }
 }
 
@@ -127,6 +159,8 @@ pub struct PipelineResult {
     pub paints: PaintReport,
     /// Native image OCR before mapping, visibility proof or merge admission.
     pub source_observations: BTreeMap<String, SourceObservation>,
+    pub direct_decode: Option<DirectDecodeStats>,
+    pub source_rasters: BTreeMap<String, SourceRasterIdentity>,
 }
 
 /// The disposition of a fully verified source-suppression alternative.
@@ -319,6 +353,8 @@ pub struct PipelineAudit<'a> {
     residual_attempts: &'a [ResidualAttempt],
     merge: MergeStats,
     source_observations: &'a BTreeMap<String, SourceObservation>,
+    direct_decode: Option<&'a DirectDecodeStats>,
+    source_rasters: &'a BTreeMap<String, SourceRasterIdentity>,
     paints: &'a PaintReport,
     visibility: &'a MixedVisibility,
     proposals: &'a [MergeProposal],
@@ -360,7 +396,7 @@ impl PipelineResult {
     #[must_use]
     pub const fn audit(&self) -> PipelineAudit<'_> {
         PipelineAudit {
-            schema_version: 12,
+            schema_version: 13,
             preparation: None,
             pdf_sha256: self.draft.pdf_sha256.as_str(),
             model: self.draft.model.as_str(),
@@ -375,6 +411,8 @@ impl PipelineResult {
             residual_attempts: self.residual_attempts.as_slice(),
             merge: self.stats,
             source_observations: &self.source_observations,
+            direct_decode: self.direct_decode.as_ref(),
+            source_rasters: &self.source_rasters,
             paints: &self.paints,
             visibility: &self.visibility,
             proposals: self.proposals.as_slice(),
@@ -399,6 +437,8 @@ struct NativePreparation {
     source_only: SourceOnlyResult,
     scanned: PaintReport,
     recognized: BTreeMap<String, SourceObservation>,
+    direct_decode: Option<DirectDecodeStats>,
+    source_rasters: BTreeMap<String, SourceRasterIdentity>,
     routes: BTreeMap<PageNumber, PageRoute>,
     fallback_pages: Vec<PageNumber>,
 }
@@ -615,6 +655,8 @@ impl PreparedOcr {
             policy: self.policy,
             paints: prepared.scanned,
             source_observations: prepared.recognized,
+            direct_decode: prepared.direct_decode,
+            source_rasters: prepared.source_rasters,
         })
     }
 
@@ -884,12 +926,37 @@ impl PreparedOcr {
         Ok(ids)
     }
 
-    fn recognize_native_sources(
+    fn decode_native_sources(
         &self,
-        engine: &mut RecognitionSession<'_, impl RecognitionBackend>,
         plan: &NativeSourcePlan,
+        scanned: &PaintReport,
         progress: &mut dyn FnMut(String),
-    ) -> Result<BTreeMap<String, SourceObservation>, Error> {
+    ) -> (BTreeMap<String, image::RgbImage>, Option<DirectDecodeStats>) {
+        if self.policy.native_image_decoder == NativeImageDecoder::Hayro {
+            return match direct_native_images(
+                &self.doc,
+                &plan.pages,
+                &plan.ids,
+                &scanned.placements,
+                self.policy.source_budget,
+            ) {
+                Ok(result) => {
+                    progress(format!(
+                        "direct native decode: {} accepted sources, {} rejected, {} decoded occurrences",
+                        result.stats.accepted_sources,
+                        result.stats.rejected_sources.len(),
+                        result.stats.decoded_occurrences
+                    ));
+                    (result.images, Some(result.stats))
+                }
+                Err(error) => {
+                    progress(format!(
+                        "Direct native source decoding unavailable: {error}; using page OCR"
+                    ));
+                    (BTreeMap::new(), None)
+                }
+            };
+        }
         let decoded = match native_source_images(
             &self.pdf,
             &plan.pages,
@@ -904,6 +971,14 @@ impl PreparedOcr {
                 BTreeMap::new()
             }
         };
+        (decoded, None)
+    }
+
+    fn recognize_native_sources(
+        engine: &mut RecognitionSession<'_, impl RecognitionBackend>,
+        decoded: BTreeMap<String, image::RgbImage>,
+        progress: &mut dyn FnMut(String),
+    ) -> Result<BTreeMap<String, SourceObservation>, Error> {
         let mut recognized = BTreeMap::new();
         for (source_id, rgb) in decoded {
             let (width, height) = (rgb.width(), rgb.height());
@@ -991,7 +1066,12 @@ impl PreparedOcr {
             self.plan_native_fragment_pages(&scanned)?
         };
         let source_plan = self.plan_native_sources(&scanned, &fragmented, progress)?;
-        let recognized = self.recognize_native_sources(engine, &source_plan, progress)?;
+        let (decoded, direct_decode) = self.decode_native_sources(&source_plan, &scanned, progress);
+        let source_rasters = decoded
+            .iter()
+            .map(|(id, rgb)| (id.clone(), SourceRasterIdentity::measure(rgb)))
+            .collect();
+        let recognized = Self::recognize_native_sources(engine, decoded, progress)?;
         let mut source_only = source_only_pages(&scanned, &recognized)?;
         for &page in &fragmented {
             source_only.approved_pages.remove(&page);
@@ -1050,6 +1130,8 @@ impl PreparedOcr {
             source_only,
             scanned,
             recognized,
+            direct_decode,
+            source_rasters,
             routes,
             fallback_pages: fallback_selected,
         })

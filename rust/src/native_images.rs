@@ -92,7 +92,7 @@ pub struct NativeImageBudget {
     pub total_pixels: u64,
     /// Maximum number of distinct source objects.
     pub sources: usize,
-    /// Upper bound on all images a single pdfimages invocation may extract.
+    /// Per-page extraction work: all Poppler image pixels or targeted Hayro decode pixels.
     pub extraction_pixels: u64,
 }
 

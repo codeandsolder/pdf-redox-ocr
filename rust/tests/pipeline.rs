@@ -123,7 +123,37 @@ fn repeated_visible_source_is_recognized_once_and_occluded_paints_never_admitted
     let pdf = dir.path().join("mixed.pdf");
     let original = include_bytes!("fixtures/repeated-nested-paint-occlusion.pdf");
     fs::write(&pdf, original)?;
-    let job = PreparedOcr::open(&pdf, None, policy())?;
+    let mut reference = None;
+    for decoder in [
+        pdf_redox_ocr::pipeline::NativeImageDecoder::Poppler,
+        pdf_redox_ocr::pipeline::NativeImageDecoder::Hayro,
+    ] {
+        let output = check_repeated_visible_source(&pdf, original, decoder)?;
+        if let Some(previous) = &reference {
+            assert_eq!(
+                previous, &output,
+                "direct decode changed source pixels or admission"
+            );
+        } else {
+            reference = Some(output);
+        }
+    }
+    Ok(())
+}
+
+fn check_repeated_visible_source(
+    pdf: &std::path::Path,
+    original: &[u8],
+    decoder: pdf_redox_ocr::pipeline::NativeImageDecoder,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let job = PreparedOcr::open(
+        pdf,
+        None,
+        PipelinePolicy {
+            native_image_decoder: decoder,
+            ..policy()
+        },
+    )?;
     let recognizer = Recognizer::default();
     let mut progress = Vec::new();
     let output = job.recognize(&recognizer, |message| progress.push(message))?;
@@ -186,10 +216,13 @@ fn repeated_visible_source_is_recognized_once_and_occluded_paints_never_admitted
             .model
             .contains("page-raster-max-side=1600 page-raster-dpi=72")
     );
-    output.draft.verify_pdf(&pdf)?;
-    assert_eq!(fs::read(&pdf)?, original);
+    output.draft.verify_pdf(pdf)?;
+    assert_eq!(fs::read(pdf)?, original);
     assert_eq!(job.original_bytes(), original);
-    Ok(())
+    let audit = serde_json::to_value(output.audit())?;
+    Ok(
+        serde_json::json!({"pages":output.draft.pages,"source_rasters":audit["source_rasters"],"routes":audit["routes"],"visibility":audit["visibility"],"proposals":audit["proposals"]}),
+    )
 }
 
 #[test]
@@ -691,7 +724,7 @@ fn audit_binds_raw_source_observations_paints_and_admission_to_original_pdf()
     let result = PreparedOcr::open(&pdf, None, policy)?
         .recognize(&SelectiveRecognizer::default(), |_| {})?;
     let audit = serde_json::to_value(result.audit())?;
-    assert_eq!(audit["schema_version"], 12);
+    assert_eq!(audit["schema_version"], 13);
     assert_eq!(audit["pdf_sha256"], result.draft.pdf_sha256);
     assert_eq!(audit["model"], result.draft.model);
     assert_eq!(audit["policy"]["render"]["max_side"], 600);
