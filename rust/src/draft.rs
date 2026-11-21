@@ -44,7 +44,7 @@ pub struct OcrLine {
     pub text: String,
     /// Model confidence, not a guarantee of textual correctness.
     pub confidence: f64,
-    /// PDF user-space quadrilateral.
+    /// PDF user-space quadrilateral in reading-frame BL/BR/TR/TL order.
     pub quad: Quad,
     /// Only an explicit review process may set this true.
     pub reviewed: bool,

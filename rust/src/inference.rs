@@ -208,8 +208,17 @@ struct ConfirmationCrop {
     pixels: Arc<RgbImage>,
 }
 
+/// The detector polygon remains in its original corner order until every
+/// source-crop repair and confirmation has finished.
+struct PrimaryObservation {
+    line: PixelLine,
+    rotate180: bool,
+    reading_order: [usize; 4],
+}
+
 struct PrimaryRecognition {
     lines: Vec<PixelLine>,
+    reading_orders: Vec<[usize; 4]>,
     half_turns: BTreeSet<usize>,
     audit: CharacterAuditReport,
     candidates: Vec<ConfirmationCrop>,
@@ -217,7 +226,7 @@ struct PrimaryRecognition {
 
 impl PrimaryRecognition {
     fn scatter(
-        ordered: Vec<Option<(PixelLine, bool)>>,
+        ordered: Vec<Option<PrimaryObservation>>,
         mut audit: CharacterAuditReport,
         mut candidate_crops: std::collections::BTreeMap<usize, Arc<RgbImage>>,
     ) -> Self {
@@ -226,9 +235,15 @@ impl PrimaryRecognition {
             .sort_unstable_by_key(|entry| entry.detection_index);
         let mut lines = Vec::new();
         let mut candidates = Vec::new();
+        let mut reading_orders = Vec::new();
         let mut half_turns = BTreeSet::new();
         for (index, line) in ordered.into_iter().enumerate() {
-            if let Some((line, rotate180)) = line {
+            if let Some(PrimaryObservation {
+                line,
+                rotate180,
+                reading_order,
+            }) = line
+            {
                 if rotate180 {
                     half_turns.insert(lines.len());
                 }
@@ -240,10 +255,12 @@ impl PrimaryRecognition {
                     });
                 }
                 lines.push(line);
+                reading_orders.push(reading_order);
             }
         }
         Self {
             lines,
+            reading_orders,
             half_turns,
             audit,
             candidates,
@@ -373,7 +390,7 @@ impl OcrModels {
     ) -> Result<PrimaryRecognition, Error> {
         let (width, height) = (f64::from(image.width()), f64::from(image.height()));
         let (count, mut crops) = self.primary_crops(image)?;
-        let mut ordered = vec![None; count];
+        let mut ordered = (0..count).map(|_| None).collect::<Vec<_>>();
         let mut audit = CharacterAuditReport {
             orientation: self.orient_crops(&mut crops)?,
             ..Default::default()
@@ -385,7 +402,17 @@ impl OcrModels {
             let (descriptors, images): (Vec<_>, Vec<_>) = crops
                 .by_ref()
                 .take(REGION_BATCH_SIZE)
-                .map(|crop| ((crop.index, crop.bbox, crop.rotate180), crop.pixels))
+                .map(|crop| {
+                    (
+                        (
+                            crop.index,
+                            crop.bbox,
+                            crop.rotate180,
+                            crop.pixels.dimensions(),
+                        ),
+                        crop.pixels,
+                    )
+                })
                 .unzip();
             if descriptors.is_empty() {
                 break;
@@ -407,10 +434,11 @@ impl OcrModels {
             let predictions = predict_crops(&self.recognition, images, None)?;
             // The adapter preserves batch positions including empty/filtered
             // observations. Keep original detection indices until the scatter.
-            for (batch_index, ((index, bbox, rotate180), (text, confidence))) in descriptors
-                .into_iter()
-                .zip(predictions.texts.into_iter().zip(predictions.scores))
-                .enumerate()
+            for (batch_index, ((index, bbox, rotate180, dimensions), (text, confidence))) in
+                descriptors
+                    .into_iter()
+                    .zip(predictions.texts.into_iter().zip(predictions.scores))
+                    .enumerate()
             {
                 if !text.trim().is_empty() {
                     let quad = image_polygon_to_quad(&bbox.points, width, height)?;
@@ -419,6 +447,15 @@ impl OcrModels {
                         confidence: f64::from(confidence),
                         quad,
                     };
+                    let crop_geometry = if bbox.points.len() == 4 {
+                        CropGeometry::from_quad(quad, image.dimensions(), dimensions)
+                            .map(|geometry| geometry.with_half_turn(rotate180))
+                    } else {
+                        None
+                    };
+                    let reading_order = crop_geometry
+                        .and_then(|geometry| geometry.reading_order(quad))
+                        .unwrap_or([0, 1, 2, 3]);
                     let unqualified =
                         confirmation_threshold.is_some_and(|threshold| line.confidence < threshold);
                     if let Some(batch) = geometry
@@ -437,20 +474,17 @@ impl OcrModels {
                         if let Some(entry) =
                             audit.observe(index, &line, crop, batch, columns, length)
                         {
-                            if bbox.points.len() == 4 {
-                                entry.geometry = CropGeometry::from_quad(
-                                    line.quad,
-                                    image.dimensions(),
-                                    crop.dimensions(),
-                                )
-                                .map(|geometry| geometry.with_half_turn(rotate180));
-                            }
+                            entry.geometry = crop_geometry;
                             if unqualified {
                                 candidate_crops.insert(index, Arc::clone(crop));
                             }
                         }
                     }
-                    ordered[index] = Some((line, rotate180));
+                    ordered[index] = Some(PrimaryObservation {
+                        line,
+                        rotate180,
+                        reading_order,
+                    });
                 }
             }
         }
@@ -721,6 +755,11 @@ impl RecognitionBackend for OcrInference {
             RepairReport::default()
         };
         self.confirm(&mut primary);
+        // Only the final observations acquire reading-frame corner order.
+        // Raw audits and crop-repair source identities remain detector-ordered.
+        for (line, order) in primary.lines.iter_mut().zip(primary.reading_orders) {
+            line.quad = order.map(|index| line.quad[index]);
+        }
         Ok(RasterRecognition {
             lines: primary.lines,
             crop_repair,

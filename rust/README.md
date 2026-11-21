@@ -142,8 +142,12 @@ reports full-raster calls, cache hits, evictions, retained payload and additiona
 The experimental `--line-orientation pp-lcnet` option applies PP-LCNet half-turn classification
 to the actual rectified crops before either recognizer. Only a half-turn score
 of at least 0.9 triggers rotation. Revised crops and character projection retain
-the selected reading direction; the audit includes classifier evidence. Native-only
-documents still need no model session.
+the selected reading direction; the audit includes classifier evidence.
+Final OCR quadrilaterals use reading-frame baseline corner order when the actual
+crop geometry is validated, including OAR's vertical rotation and a classified
+half-turn. The same vertices are retained; raw detector and crop-repair audits
+keep the original detector ordering. Native-only documents still need no model
+session.
 
 The optional `--report audit.json` writes a separate schema-12 diagnostic
 report bound to the original PDF digest and model provenance. It includes

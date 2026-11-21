@@ -102,6 +102,31 @@ impl CropGeometry {
         self
     }
 
+    /// Preserve the exact original polygon, but order its vertices as
+    /// bottom-left, bottom-right, top-right, top-left in the recognition
+    /// frame. Return indices into the original detector polygon so a repaired
+    /// polygon retaining those vertex identities can use the same ordering.
+    ///
+    /// Unlike pixel-cell projection, this deliberately does not extrapolate
+    /// half a sample beyond a perspective crop's original corners.
+    #[must_use]
+    pub fn reading_order(self, detector: Quad) -> Option<[usize; 4]> {
+        let [tl, tr, br, bl] = self.parent_corners;
+        let mut reading = if self.rotate270 {
+            [tl, bl, br, tr]
+        } else {
+            [bl, br, tr, tl]
+        };
+        if self.rotate180 {
+            reading.rotate_left(2);
+        }
+        let mut indices = [0; 4];
+        for (out, corner) in indices.iter_mut().zip(reading) {
+            *out = detector.iter().position(|p| *p == corner)?;
+        }
+        Some(indices)
+    }
+
     /// Return a mapped ink bounding rectangle in parent RGB pixel corners.
     #[must_use]
     pub fn ink_quad(self, ink: InkBounds) -> Option<Quad> {
@@ -193,6 +218,31 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn reading_order_preserves_all_vertices_in_each_orientation() -> Result<(), crate::Error> {
+        for (right, bottom, expected) in [(50., 30., [0, 1, 2, 3]), (20., 60., [3, 0, 1, 2])] {
+            let detector = [
+                Point(10., bottom),
+                Point(right, bottom),
+                Point(right, 20.),
+                Point(10., 20.),
+            ];
+            let geometry = CropGeometry::from_quad(detector, (100, 100), (40, 10))
+                .ok_or_else(|| crate::Error::Invalid("fixture direction".into()))?;
+            for half_turn in [false, true] {
+                let mut expected = expected;
+                if half_turn {
+                    expected.rotate_left(2);
+                }
+                assert_eq!(
+                    geometry.with_half_turn(half_turn).reading_order(detector),
+                    Some(expected)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn projective_transform_hits_all_four_sample_corners() -> Result<(), crate::Error> {
         let q = [
             Point(10., 20.),
@@ -202,6 +252,8 @@ mod tests {
         ];
         let g = CropGeometry::from_quad(q, (100, 100), (50, 20))
             .ok_or_else(|| crate::Error::Invalid("fixture perspective".into()))?;
+        assert_eq!(g.reading_order(q), Some([3, 2, 1, 0]));
+        assert_eq!(g.with_half_turn(true).reading_order(q), Some([1, 0, 3, 2]));
         for (p, c) in [
             Point(0.5, 0.5),
             Point(50.5, 0.5),
