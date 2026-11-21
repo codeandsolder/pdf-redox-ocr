@@ -139,6 +139,14 @@ raster dimensions. The default LRU budget retains at most 256 entries and
 inferences are never cached. `--no-recognition-cache` disables lookup and
 retention for diagnostic comparison, and `PipelineResult.recognition`
 reports full-raster calls, cache hits, evictions, retained payload and additional crop batches, with separate leader and boundary candidate outcomes.
+
+All inference sessions explicitly register the CPU provider rather than relying
+on ONNX Runtime's implicit CPU arena. With pinned OAR 0.10.2 and ort rc13 this
+disables the per-session CPU arena; the requested thread policy, models and
+exact RGB cache are unchanged. Paired release measurements of Walsin (two
+pages), DEFOND (four pages) and Shenler (both recognizers with line orientation)
+reduced peak RSS by 41–52% with identical draft pages and at most 3.2% longer
+elapsed time. This is not a hard memory ceiling.
 The experimental `--line-orientation pp-lcnet` option applies PP-LCNet half-turn classification
 to the actual rectified crops before either recognizer. Only a half-turn score
 of at least 0.9 triggers rotation. Revised crops and character projection retain
