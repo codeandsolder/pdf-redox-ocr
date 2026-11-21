@@ -16,7 +16,8 @@ use crate::{
 /// A model observation in the original input raster's pixel-corner frame.
 ///
 /// Coordinates grow rightwards and downwards. Corners are ordered bottom-left,
-/// bottom-right, top-right, top-left relative to the detected text orientation.
+/// bottom-right, top-right, top-left relative to the observed reading direction
+/// for final observations; raw detector audits retain the detector ordering.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct PixelLine {
     pub text: String,
