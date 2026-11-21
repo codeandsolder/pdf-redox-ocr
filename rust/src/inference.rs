@@ -14,7 +14,7 @@ use num_traits::ToPrimitive;
 use oar_ocr::{
     core::{
         OCRError,
-        config::OrtSessionConfig,
+        config::{OrtExecutionProvider, OrtSessionConfig},
         traits::{
             OrtConfigurable,
             adapter::{AdapterBuilder, ModelAdapter},
@@ -156,11 +156,18 @@ impl PrimaryCrop {
     }
 }
 
-fn ort_config(threads: NonZeroUsize) -> OrtSessionConfig {
-    OrtSessionConfig::new()
-        .with_intra_threads(threads.get())
-        .with_inter_threads(1)
-        .resolve_auto()
+fn ort_config(threads: Option<NonZeroUsize>) -> OrtSessionConfig {
+    // The implicit ONNX CPU provider retains a separate high-water arena
+    // per session. OAR's explicit CPU provider disables that arena.
+    // Variable page and line dimensions otherwise compound retained memory.
+    let config = OrtSessionConfig::new().with_execution_providers(vec![OrtExecutionProvider::CPU]);
+    if let Some(threads) = threads {
+        config
+            .with_intra_threads(threads.get())
+            .with_inter_threads(1)
+    } else {
+        config
+    }
 }
 
 fn load_recognition(
@@ -172,14 +179,12 @@ fn load_recognition(
         resolve_path(DICTIONARY).map_err(|error| inference_error(&error))?,
     )?;
     let rec_path = resolve_path(model.filename()).map_err(|error| inference_error(&error))?;
-    let mut builder = TextRecognitionAdapterBuilder::new()
+    let builder = TextRecognitionAdapterBuilder::new()
         .model_input_shape(INPUT_SHAPE)
         .max_img_w(MAX_INPUT_WIDTH)
         .return_word_box(positions)
-        .character_dict(dictionary.lines().map(str::to_owned).collect());
-    if let Some(threads) = threads {
-        builder = builder.with_ort_config(ort_config(threads));
-    }
+        .character_dict(dictionary.lines().map(str::to_owned).collect())
+        .with_ort_config(ort_config(threads));
     builder
         .build(rec_path)
         .map_err(|error| inference_error(&error))
@@ -276,16 +281,13 @@ impl OcrModels {
         line_orientation: LineOrientationMode,
     ) -> Result<Self, Error> {
         let det_path = resolve_path(DETECTION_MODEL).map_err(|error| inference_error(&error))?;
-        let mut detection = TextDetectionAdapterBuilder::new().with_config(small_detector_config());
-        if let Some(threads) = threads {
-            detection = detection.with_ort_config(ort_config(threads));
-        }
+        let detection = TextDetectionAdapterBuilder::new()
+            .with_config(small_detector_config())
+            .with_ort_config(ort_config(threads));
         let orientation = if line_orientation == LineOrientationMode::PpLcnet {
             let path = resolve_path(ORIENTATION_MODEL).map_err(|error| inference_error(&error))?;
-            let mut builder = TextLineOrientationAdapterBuilder::new();
-            if let Some(threads) = threads {
-                builder = builder.with_ort_config(ort_config(threads));
-            }
+            let builder =
+                TextLineOrientationAdapterBuilder::new().with_ort_config(ort_config(threads));
             Some(
                 builder
                     .build(path)
@@ -811,9 +813,24 @@ fn image_polygon_to_quad(
 
 #[cfg(test)]
 mod tests {
-    use super::{image_polygon_to_quad, small_detector_config};
+    use super::{image_polygon_to_quad, ort_config, small_detector_config};
     use crate::geometry::{DisplayMapper, PageBox, Point, Rotation};
+    use oar_ocr::core::config::OrtExecutionProvider;
     use oar_ocr::processors::{LimitType, Point as OarPoint};
+    use std::num::NonZeroUsize;
+
+    #[test]
+    fn explicit_cpu_allocation_is_independent_of_thread_override() {
+        for threads in [None, NonZeroUsize::new(6)] {
+            let config = ort_config(threads);
+            assert_eq!(
+                config.execution_providers,
+                Some(vec![OrtExecutionProvider::CPU])
+            );
+            assert_eq!(config.intra_threads, threads.map(NonZeroUsize::get));
+            assert_eq!(config.inter_threads, threads.map(|_| 1));
+        }
+    }
 
     #[test]
     fn detector_retains_small_source_pixels_without_upscaling() {
