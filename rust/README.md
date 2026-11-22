@@ -85,6 +85,16 @@ Pages are promoted only after all image paints have been reconstructed and
 recognized. Failed geometric, compositing, resource or inference checks use
 ordinary full-page OCR rather than the independent strip shortcut. CLI knobs
 bound per-group and per-page rendered pixels, group count and native DPI.
+For mixed fallback pages, compositor-dependent image footprints can also seed
+bounded high-resolution regional recognition of the actual original page.
+Auto mode requires more than 2.25× the ordinary page pixel density by area;
+all mode requires a positive resolution gain; off mode disables this path.
+Contained lower-resolution requests are skipped and the existing mosaic
+pixel, DPI and group budgets bound regional work. Only qualified lines fully
+inside the crop, non-overlapping accepted page/source OCR and native text,
+supplement the draft. These are page observations, not independent image
+source proofs. The schema-16 regional_ocr audit records crop identity, mapping,
+observations and admission decisions.
 For fallback page OCR, a temporary Rust-generated PDF makes native searchable
 font shows invisible using mode 3 while retaining the original text-show
 operands, advances and geometry. Type3 glyphs, unresolved fonts, existing
@@ -166,7 +176,7 @@ half-turn. The same vertices are retained; raw detector and crop-repair audits
 keep the original detector ordering. Native-only documents still need no model
 session.
 
-The optional `--report audit.json` writes a separate schema-15 diagnostic
+The optional `--report audit.json` writes a separate schema-16 diagnostic
 report bound to the original PDF digest and model provenance. It includes
 the validated policy, raw native-image observations in source-pixel
 coordinates, original paint paths and native-only blockers, the per-page
@@ -428,7 +438,7 @@ At least one draft, searchable PDF or audit must be requested.
 Retaining a draft with processing requires `--optimized-pdf`, because
 its SHA and user-space geometry bind to the exact prepared PDF, not the
 original source. The optimizer report and actual configuration are recorded
-under `preparation` in schema-15 CLI audits, alongside both input hashes;
+under `preparation` in schema-16 CLI audits, alongside both input hashes;
 the existing `pdf_sha256` refers to the OCR input. Reverify the original
 and prepared source hashes before applying or publishing results.
 Processing is intentionally not lossless in every case (microstroke
@@ -516,7 +526,7 @@ retained, not invented. Failed or conflicting crops leave original
 observations unchanged. Failed repair attempts prevent caching the incomplete
 raster result; successful exact RGB reuse includes the confirmed repairs.
 
-Pipeline audit schema 15 records original pixel-space observations, sample
+Pipeline audit schema 16 records original pixel-space observations, sample
 frame, component bounds, typed crop reason, proposed quad and each actual
 prediction/decision by exact RGB SHA-256 and dimensions. Full-raster inference
 calls remain separate from recognition-only batch counters. Disable the stage
@@ -546,7 +556,7 @@ substitutions are encoded. Accepted crop geometry and model confidence
 replace the original; failures prevent exact-RGB result caching. The
 experimental flag is off by default until broader representative validation.
 All repair kinds share a 2M-pixel per-window and 16M-pixel per-raster sampling
-budget, prioritizing terminal-leader candidates, and schema-15 `crop_repairs` records the original prediction,
+budget, prioritizing terminal-leader candidates, and schema-16 `crop_repairs` records the original prediction,
 actual geometry, type-specific evidence and independent prediction/outcome.
 `recognition.crop_batches` counts actual recognition-only batches (leader and boundary batches are separate to preserve existing leader inference ordering);
 leader/boundary candidate/accepted counters are independent.
@@ -592,7 +602,7 @@ sorted detector index (not final draft index), exact rectified RGB crop
 hash/dimensions, padding geometry, raw CTC column indices, projected ink
 and alignment candidates. Component indices address the entry's component
 array. Positions and ink bounds are in the **rectified recognition-crop
-frame**. schema 15 additionally records a reconstructible projective crop
+frame**. schema 16 additionally records a reconstructible projective crop
 mapping for actual detector quadrilaterals, verified against returned crop
 dimensions and the OAR rotation contract. Full-page raster occurrences have
 explicit SHA-bound page transforms. This permits vector association without

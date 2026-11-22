@@ -724,7 +724,7 @@ fn audit_binds_raw_source_observations_paints_and_admission_to_original_pdf()
     let result = PreparedOcr::open(&pdf, None, policy)?
         .recognize(&SelectiveRecognizer::default(), |_| {})?;
     let audit = serde_json::to_value(result.audit())?;
-    assert_eq!(audit["schema_version"], 15);
+    assert_eq!(audit["schema_version"], 16);
     assert_eq!(audit["pdf_sha256"], result.draft.pdf_sha256);
     assert_eq!(audit["model"], result.draft.model);
     assert_eq!(audit["policy"]["render"]["max_side"], 600);
@@ -1155,6 +1155,105 @@ fn root_group_uses_composited_singleton_but_mixed_page_keeps_fallback()
         assert_eq!(result.stats.page_fallback_pages, 1);
         assert!(result.source_rasters.is_empty());
         assert_eq!(rejected.inputs.borrow()[0].width(), 1600);
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct MixedRegionRecognizer {
+    inputs: RefCell<Vec<(u32, u32)>>,
+}
+
+impl RecognitionBackend for MixedRegionRecognizer {
+    fn model_profile(&self) -> &'static str {
+        "composited high-detail region fixture"
+    }
+
+    fn recognize_pixels(&self, rgb: RgbImage) -> Result<RasterRecognition, Error> {
+        let (width, height) = rgb.dimensions();
+        self.inputs.borrow_mut().push((width, height));
+        let (w, h) = (f64::from(width), f64::from(height));
+        let line = |text: &str, x0: f64, y0: f64, x1: f64, y1: f64| PixelLine {
+            text: text.into(),
+            confidence: 0.99,
+            quad: [Point(x0, y1), Point(x1, y1), Point(x1, y0), Point(x0, y0)],
+        };
+        let lines = if width == 1600 {
+            // Duplicate of the first regional line (paint at [30,30] of
+            // a 240×160 page, 1600px full-page raster).
+            vec![line("BASELINE", 220., 727., 280., 760.)]
+        } else {
+            vec![
+                line("DUPLICATE", w * 0.10, h * 0.15, w * 0.30, h * 0.30),
+                line("NEW DETAIL", w * 0.50, h * 0.58, w * 0.85, h * 0.84),
+                line("TRUNCATED", 0., h * 0.2, w * 0.20, h * 0.3),
+            ]
+        };
+        Ok(lines.into())
+    }
+}
+
+#[test]
+fn mixed_composited_regions_admit_only_complete_nonoverlapping_lines()
+-> Result<(), Box<dyn std::error::Error>> {
+    use pdf_redox_ocr::{pipeline::NativeImageDecoder, region_ocr::RegionOutcome};
+    // Root-group image covers 40×20 points at 800×400 source pixels.
+    // Vector paint elsewhere prevents image-only composited replacement.
+    let bytes = support::pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 160] /Group << /S /Transparency /CS /DeviceGray >> /Resources << /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        support::stream("", b"q 40 0 0 20 30 30 cm /Im Do Q 0 g 160 20 20 20 re f"),
+        support::stream("/Type /XObject /Subtype /Image /Width 800 /Height 400 /BitsPerComponent 8 /ColorSpace /DeviceGray", &vec![0;800*400]),
+    ]);
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("mixed-root.pdf");
+    fs::write(&path, &bytes)?;
+    for mode in [RasterMode::Auto, RasterMode::All, RasterMode::Off] {
+        let engine = MixedRegionRecognizer::default();
+        let result = PreparedOcr::open(
+            &path,
+            None,
+            PipelinePolicy {
+                native_image_decoder: NativeImageDecoder::Hayro,
+                raster_mode: mode,
+                ..policy()
+            },
+        )?
+        .recognize(&engine, |_| {})?;
+        assert_eq!(result.stats.page_fallback_pages, 1);
+        assert!(result.source_rasters.is_empty());
+        assert!(result.visibility.proofs.is_empty());
+        if mode == RasterMode::Off {
+            assert!(result.regional_ocr.is_empty());
+            assert_eq!(result.draft.pages[0].lines.len(), 1);
+            assert_eq!(engine.inputs.borrow().len(), 1);
+            continue;
+        }
+        assert_eq!(result.regional_ocr.len(), 1);
+        let region = &result.regional_ocr[0];
+        assert_eq!(region.dpi, 1440);
+        let RegionOutcome::Recognized {
+            observations,
+            dimensions,
+            ..
+        } = &region.outcome
+        else {
+            return Err("regional inference failed".into());
+        };
+        assert!(dimensions.0 >= 800 && dimensions.1 >= 400);
+        assert_eq!(observations.len(), 3);
+        assert!(!observations[0].included_as_extra, "{observations:#?}");
+        assert!(observations[1].included_as_extra, "{observations:#?}");
+        assert!(!observations[2].within_crop);
+        assert_eq!(result.stats.nonoverlapping_region_lines_added, 1);
+        assert_eq!(result.draft.pages[0].lines.len(), 2);
+        assert_eq!(result.draft.pages[0].lines[1].text, "NEW DETAIL");
+        assert_eq!(engine.inputs.borrow().len(), 2);
+        for point in &result.draft.pages[0].lines[1].quad {
+            assert!((48.0..=66.0).contains(&point.0), "{point:?}");
+            assert!((32.0..=41.0).contains(&point.1), "{point:?}");
+        }
     }
     Ok(())
 }

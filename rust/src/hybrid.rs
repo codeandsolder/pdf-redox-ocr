@@ -158,6 +158,8 @@ pub struct MergeStats {
     pub original_page_lines: usize,
     /// Admitted additional source-image lines.
     pub nonoverlapping_image_lines_added: usize,
+    /// Additional nonoverlapping labels recognized from actual composited regions.
+    pub nonoverlapping_region_lines_added: usize,
     /// Image candidates rejected but kept in the audit.
     pub raster_candidates_kept_in_audit_only: usize,
 }
