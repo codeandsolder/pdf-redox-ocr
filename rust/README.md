@@ -890,3 +890,30 @@ appearances. The
 existing extraction ceiling limits attempted target pixels per page in
 the direct path, not unrelated images. It is a decoded-pixel policy, not
 a hard bound on interpreter or compressed-stream allocation.
+
+### Source fragment reconciliation research
+
+`pdf-redox-ocr-fragment-reconcile --pdf FILE --primary-ocr DRAFT --line PAGE:INDEX --report REPORT --experimental-draft RESEARCH`
+evaluates bounded source edge extensions with the Small+Medium four-stretch CTC recognizer.
+The padded RGB source is rectified once. Every expanded recognition window is an exact
+subimage of that raster, using the original observation's measured luminance normalization.
+Recognition runs are independently counted in the common raster, including how much
+original and added foreground each contains and each peer's actual foreground count.
+Conservation is checked against the connected-component audit.
+
+All added non-whitespace tokens must have a stable, ordered unique assignment to runs
+containing actual added foreground in both recognizer models. Existing tokens are
+constrained to runs containing original foreground. A consumed neighboring observation
+must have its added foreground accounted for by those bindings. A partially captured
+peer additionally requires stable independently localized literal text inside the new
+observation, and cannot have a shared component cut by the replacement boundary.
+Native-text conflicts and incomplete peer samples abstain.
+
+The report retains the original observation identity, all considered extensions,
+conditional CTC evidence, common-raster run counts, peer evidence, transactions and
+conflicts. Operations sharing observations or overlapping replacement geometry are
+blocked symmetrically. The output is a **non-importable schema 0 draft** with every
+confidence zero and no reviewed flags. This is an offline diagnostic, not automatic
+overlay admission. The combined page pixel budget covers padded source renders,
+rectification, variant crops and separately sampled peers. The ink-check budget is
+shared across component and run measurements for each original line.

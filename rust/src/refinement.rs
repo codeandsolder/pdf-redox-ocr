@@ -261,21 +261,8 @@ fn proposals_for_page(
     let mut proposals = Vec::with_capacity(indices.len());
     for &index in indices {
         let line = &page.lines[index];
-        let sampled = SourcePlan::new(line, mapper, policy).and_then(|plan| {
-            remaining = remaining.checked_sub(plan.cost).ok_or_else(|| {
-                Error::Invalid("source refinement page pixel budget exhausted".into())
-            })?;
-            plan.sample(pdf, number)
-        });
-        let outcome = match sampled {
-            Ok((image, crop)) => RefinementOutcome::Recognized {
-                crop,
-                recognition: recognize(&image)?,
-            },
-            Err(error) => RefinementOutcome::Skipped {
-                reason: error.to_string(),
-            },
-        };
+        let outcome =
+            recognize_observation(pdf, number, line, mapper, policy, &mut remaining, recognize)?;
         proposals.push(RefinementProposal {
             page: number.get(),
             line_index: index,
@@ -286,6 +273,32 @@ fn proposals_for_page(
         });
     }
     Ok((proposals, policy.max_page_pixels - remaining))
+}
+
+pub(crate) fn recognize_observation(
+    pdf: &Path,
+    number: PageNumber,
+    line: &OcrLine,
+    mapper: DisplayMapper,
+    policy: RefinementPolicy,
+    remaining: &mut u64,
+    recognize: &mut impl FnMut(&RgbImage) -> Result<Recognition, Error>,
+) -> Result<RefinementOutcome, Error> {
+    let sampled = SourcePlan::new(line, mapper, policy).and_then(|plan| {
+        *remaining = remaining.checked_sub(plan.cost).ok_or_else(|| {
+            Error::Invalid("source refinement page pixel budget exhausted".into())
+        })?;
+        plan.sample(pdf, number)
+    });
+    Ok(match sampled {
+        Ok((image, crop)) => RefinementOutcome::Recognized {
+            crop,
+            recognition: recognize(&image)?,
+        },
+        Err(error) => RefinementOutcome::Skipped {
+            reason: error.to_string(),
+        },
+    })
 }
 
 /// Primary and secondary evidence sources for a single refinement run.

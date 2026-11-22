@@ -15,7 +15,7 @@ use crate::{
     ink_polarity::Polarity,
     layout_leaders::{LeaderEdge, LeaderEvidence, detect_leaders},
     line_frame::{LineAxis, LineFrame, SampleWindow},
-    pixel_regions::{InkBounds, PixelClass, regions},
+    pixel_regions::{InkBounds, PixelClass, PixelRegion, regions},
     polygon::overlap_fraction,
     recognition::PixelLine,
 };
@@ -154,6 +154,59 @@ fn added_strip(
     window.quad(frame, bounds)
 }
 
+/// Select the geometry-supported repair independently of raster sampling.
+fn select_repair_body(
+    components: &[PixelRegion],
+    lines: &[PixelLine],
+    index: usize,
+    policy: RepairPolicy,
+    window: SampleWindow,
+    frame: LineFrame,
+) -> Option<(InkBounds, CropReason, Vec<Quad>)> {
+    let line = &lines[index];
+    let observation = window.observation(frame);
+    let all_leaders = detect_leaders(components, observation);
+    let leaders = all_leaders
+        .iter()
+        .filter(|l| policy.leaders && has_leader_text(&line.text, l.edge))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !leaders.is_empty() {
+        let mut body = observation;
+        for leader in &leaders {
+            body.left = body.left.max(leader.body.left);
+            body.right = body.right.min(leader.body.right);
+        }
+        if body.left >= body.right {
+            return None;
+        }
+        Some((body, CropReason::PeriodicLeader { leaders }, vec![]))
+    } else if policy.boundaries && all_leaders.is_empty() {
+        let resolved = detect_boundaries(components, observation, window.dimensions(frame)?.0)
+            .into_iter()
+            .filter_map(|edge| {
+                let quad = added_strip(window, frame, observation, &edge);
+                (!lines
+                    .iter()
+                    .enumerate()
+                    .any(|(i, peer)| i != index && significant_overlap(&quad, &peer.quad)))
+                .then_some((edge, quad))
+            })
+            .collect::<Vec<_>>();
+        if resolved.is_empty() {
+            return None;
+        }
+        let (edges, strips): (Vec<_>, Vec<_>) = resolved.into_iter().unzip();
+        let body = edges
+            .iter()
+            .map(|e| e.expanded)
+            .fold(observation, InkBounds::union);
+        Some((body, CropReason::BoundaryInk { edges }, strips))
+    } else {
+        None
+    }
+}
+
 fn crop_evidence(
     image: &RgbImage,
     lines: &[PixelLine],
@@ -194,50 +247,20 @@ fn crop_evidence(
     let count = u64::from(dimensions.0) * u64::from(dimensions.1);
     *budget = budget.checked_sub(count)?;
     let observation = window.observation(frame);
+    let rectified = window
+        .rectify(
+            frame,
+            image,
+            |point| point,
+            |pixel| image::Pixel::to_luma(&pixel),
+        )
+        .ok()?;
     let (normalized, _) = window
-        .normalized_ink(frame, image, |point| point, Polarity::Auto)
+        .normalize_ink(frame, &rectified, Polarity::Auto)
         .ok()?;
     let components = regions(&normalized, 192, PixelClass::Ink, observation).ok()?;
-    let all_leaders = detect_leaders(&components, observation);
-    let leaders = all_leaders
-        .iter()
-        .filter(|l| policy.leaders && has_leader_text(&line.text, l.edge))
-        .cloned()
-        .collect::<Vec<_>>();
-    let (body, reason, added_strips) = if !leaders.is_empty() {
-        let mut body = observation;
-        for leader in &leaders {
-            body.left = body.left.max(leader.body.left);
-            body.right = body.right.min(leader.body.right);
-        }
-        if body.left >= body.right {
-            return None;
-        }
-        (body, CropReason::PeriodicLeader { leaders }, vec![])
-    } else if policy.boundaries && all_leaders.is_empty() {
-        let resolved = detect_boundaries(&components, observation, dimensions.0)
-            .into_iter()
-            .filter_map(|edge| {
-                let quad = added_strip(window, frame, observation, &edge);
-                (!lines
-                    .iter()
-                    .enumerate()
-                    .any(|(i, peer)| i != index && significant_overlap(&quad, &peer.quad)))
-                .then_some((edge, quad))
-            })
-            .collect::<Vec<_>>();
-        if resolved.is_empty() {
-            return None;
-        }
-        let (edges, strips): (Vec<_>, Vec<_>) = resolved.into_iter().unzip();
-        let body = edges
-            .iter()
-            .map(|e| e.expanded)
-            .fold(observation, InkBounds::union);
-        (body, CropReason::BoundaryInk { edges }, strips)
-    } else {
-        return None;
-    };
+    let (body, reason, added_strips) =
+        select_repair_body(&components, lines, index, policy, window, frame)?;
     // The frame may swap axes for vertical lines. The recognition-only
     // predictor still has to confirm the exact body on the proved edge.
     // Restore original detector corner identity when mapping back.

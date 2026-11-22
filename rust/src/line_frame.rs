@@ -9,7 +9,7 @@ use crate::{
     ink_polarity::{Polarity, PolarityEvidence, estimate},
     rasterize::sample_whitened,
 };
-use image::{GrayImage, Pixel, RgbImage, imageops};
+use image::{GrayImage, ImageBuffer, Pixel, Rgb, RgbImage, imageops};
 use num_traits::ToPrimitive;
 
 /// Choose between undirected geometry inspection and already oriented text.
@@ -154,24 +154,38 @@ impl SampleWindow {
         [Point(l, b), Point(r, b), Point(r, t), Point(l, t)].map(|p| self.to_source(frame, p))
     }
 
-    /// Rectify the same bounded source window and normalize ink using only the original observation.
-    pub fn normalized_ink(
+    /// Rectify the exact bounded sampling window once, preserving RGB.
+    pub fn rectify<P: Pixel<Subpixel = u8>>(
         self,
         frame: LineFrame,
         image: &RgbImage,
         to_pixel: impl Fn(Point) -> Point,
-        polarity: Polarity,
-    ) -> Result<(GrayImage, PolarityEvidence), Error> {
+        convert: impl Fn(Rgb<u8>) -> P,
+    ) -> Result<ImageBuffer<P, Vec<u8>>, Error> {
         let (width, height) = self
             .dimensions(frame)
             .ok_or_else(|| Error::Invalid("unrepresentable sample window".into()))?;
-        let raster = GrayImage::from_fn(width, height, |x, y| {
+        Ok(ImageBuffer::from_fn(width, height, |x, y| {
             let source = self.to_source(frame, Point(f64::from(x) + 0.5, f64::from(y) + 0.5));
-            sample_whitened(image, to_pixel(source)).to_luma()
-        });
+            convert(sample_whitened(image, to_pixel(source)))
+        }))
+    }
+
+    /// Normalize the shared rectified raster using only the original observation.
+    pub fn normalize_ink(
+        self,
+        frame: LineFrame,
+        raster: &GrayImage,
+        polarity: Polarity,
+    ) -> Result<(GrayImage, PolarityEvidence), Error> {
+        if self.dimensions(frame) != Some(raster.dimensions()) {
+            return Err(Error::Invalid(
+                "inconsistent rectified sample dimensions".into(),
+            ));
+        }
         let observation = self.observation(frame);
         let original = imageops::crop_imm(
-            &raster,
+            raster,
             observation.left,
             observation.top,
             frame.width,
@@ -179,7 +193,7 @@ impl SampleWindow {
         )
         .to_image();
         let polarity = estimate(&original, polarity)?;
-        Ok((polarity.normalize(&raster), polarity))
+        Ok((polarity.normalize(raster), polarity))
     }
 
     fn valid(self, frame: LineFrame, inside: &impl Fn(Point) -> bool) -> bool {
