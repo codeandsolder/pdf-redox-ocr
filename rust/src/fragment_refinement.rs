@@ -148,7 +148,7 @@ impl PageContext<'_> {
             let BoundaryPeer::OcrLine { line_index } = overlap.peer else {
                 continue;
             };
-            if peers.get(&i).is_some_and(|p| p.added > 0)
+            if peers.get(&i).is_some_and(|p| p.axis_added > 0)
                 && let std::collections::btree_map::Entry::Vacant(entry) =
                     self.peers.entry(line_index)
             {
@@ -181,7 +181,7 @@ impl PageContext<'_> {
                 reason: Rejection::NoMeasuredInk,
             });
         };
-        if sample.added == 0 {
+        if sample.axis_added == 0 {
             return Ok(VariantOutcome::Skipped {
                 reason: Rejection::NoMeasuredInk,
             });
@@ -366,7 +366,7 @@ pub fn reconcile_fragments(
     source.verify_pdf(pdf)?;
     Ok((
         FragmentReport {
-            schema_version: 4,
+            schema_version: 5,
             pdf_sha256: source.pdf_sha256.clone(),
             draft_model: source.model.clone(),
             secondary_model: RefinementModel::Consensus.label(),

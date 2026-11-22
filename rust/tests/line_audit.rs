@@ -292,7 +292,7 @@ fn source_edge_extensions_report_competing_observations_across_rotations()
             ..LineAuditPolicy::default()
         },
     )?;
-    assert_eq!(report.schema_version, 11);
+    assert_eq!(report.schema_version, 12);
     for line in report.lines {
         let extension = line
             .boundary_extensions
@@ -318,11 +318,11 @@ fn source_edge_extensions_report_competing_observations_across_rotations()
         assert_eq!(peers_fully_sampled, &[true, true, true]);
         assert_eq!(peers[&0], peers[&1]);
         assert_eq!(peer_union.original, sample.original);
-        assert_eq!(peer_union.added, peers[&0].added);
+        assert_eq!(peer_union.axis_added, peers[&0].axis_added);
         assert_eq!(peer_union.outside_expansion, peers[&0].outside_expansion);
         assert_eq!(peers[&2].original, sample.original);
-        assert_eq!(peers[&2].added, 0);
-        assert!(peer_union.added > 0);
+        assert_eq!(peers[&2].axis_added, 0);
+        assert!(peer_union.axis_added > 0);
 
         assert!(
             extension
@@ -346,7 +346,7 @@ fn source_edge_extensions_report_competing_observations_across_rotations()
         assert!(original_only.strip_fraction.abs() < 1e-9);
         assert!((original_only.expanded_peer_fraction - 1.0).abs() < 1e-9);
         assert_eq!(original_only.component_indices, [] as [usize; 0]);
-        assert!((extension.added_strip[0].0 - 70.0).abs() < 1e-8);
+        assert!((extension.added_strips[0][0].0 - 70.0).abs() < 1e-8);
         assert!(extension.proposed_quad[1].0 > 85.0);
         assert_eq!(line.original_quad, quad);
     }

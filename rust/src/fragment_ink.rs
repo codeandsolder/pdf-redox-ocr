@@ -17,38 +17,70 @@ use crate::{
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct InkCounts {
     pub original: u64,
-    pub added: u64,
+    /// Newly included foreground beyond the original reading-axis edges.
+    pub axis_added: u64,
+    /// Newly included body foreground above/below the original observation.
+    pub orthogonal_added: u64,
     pub outside_expansion: u64,
 }
 
 #[derive(Clone, Copy)]
 enum Part {
     Original,
-    Added,
+    AxisAdded,
+    OrthogonalAdded,
     Outside,
+}
+
+fn classify_pixel(original: InkBounds, expanded: InkBounds, x: u32, y: u32) -> Part {
+    if original.contains(x, y) {
+        Part::Original
+    } else if !expanded.contains(x, y) {
+        Part::Outside
+    } else if (original.left..original.right).contains(&x) {
+        Part::OrthogonalAdded
+    } else {
+        Part::AxisAdded
+    }
 }
 
 impl InkCounts {
     const fn record(&mut self, part: Part) {
         match part {
             Part::Original => self.original += 1,
-            Part::Added => self.added += 1,
+            Part::AxisAdded => self.axis_added += 1,
+            Part::OrthogonalAdded => self.orthogonal_added += 1,
             Part::Outside => self.outside_expansion += 1,
         }
     }
 
     const fn add(&mut self, other: Self) {
         self.original += other.original;
-        self.added += other.added;
+        self.axis_added += other.axis_added;
+        self.orthogonal_added += other.orthogonal_added;
         self.outside_expansion += other.outside_expansion;
     }
 
+    /// Total newly included foreground, regardless of direction.
+    #[must_use]
+    pub const fn added(self) -> u64 {
+        self.axis_added + self.orthogonal_added
+    }
+
+    #[cfg(feature = "native-inference")]
+    const fn included(self) -> Self {
+        Self {
+            outside_expansion: 0,
+            ..self
+        }
+    }
+
     const fn any(self) -> bool {
-        self.original != 0 || self.added != 0 || self.outside_expansion != 0
+        self.original != 0 || self.added() != 0 || self.outside_expansion != 0
     }
 }
 
-/// Counts in three disjoint parts of the shared sampling frame.
+/// Counts in four disjoint parts of the shared sampling frame.
 #[derive(Debug, Default, Serialize)]
 pub struct ComponentInk {
     pub component_index: usize,
@@ -61,7 +93,7 @@ pub struct ComponentInk {
 
 impl ComponentInk {
     const fn relevant(&self) -> bool {
-        self.sample.original != 0 || self.sample.added != 0 || self.peer_union.any()
+        self.sample.original != 0 || self.sample.added() != 0 || self.peer_union.any()
     }
 }
 
@@ -289,11 +321,7 @@ impl Sample<'_> {
                     if self.image.get_pixel(x, y).0[0] >= self.threshold {
                         continue;
                     }
-                    let part = if observation.contains(x, y) {
-                        Part::Original
-                    } else {
-                        Part::Added
-                    };
+                    let part = classify_pixel(observation, expanded, x, y);
                     run.sample.record(part);
                     let point = self
                         .window
@@ -305,7 +333,8 @@ impl Sample<'_> {
                     }
                 }
             }
-            if run.sample.original + run.sample.added != group.run.observation_support.inside_pixels
+            if run.sample.original + run.sample.added()
+                != group.run.observation_support.inside_pixels
             {
                 return Err(Error::Invalid(
                     "recognized run differs from shared raster ink".into(),
@@ -321,11 +350,10 @@ impl Sample<'_> {
                 covered_peers.entry(peer).or_default().add(count);
             }
         }
-        if sample.original != covered.original
-            || sample.added != covered.added
+        if sample.included() != covered
             || peers.iter().any(|(peer, count)| {
                 let covered = covered_peers.get(peer).copied().unwrap_or_default();
-                covered.original != count.original || covered.added != count.added
+                covered != count.included()
             })
             || covered_peers.keys().any(|peer| !peers.contains_key(peer))
         {
@@ -359,13 +387,7 @@ impl Sample<'_> {
                     });
                 }
                 let c = &mut components[index];
-                let part = if observation.contains(x, y) {
-                    Part::Original
-                } else if expanded.contains(x, y) {
-                    Part::Added
-                } else {
-                    Part::Outside
-                };
+                let part = classify_pixel(observation, expanded, x, y);
                 c.sample.record(part);
                 let point = self
                     .window
@@ -389,7 +411,7 @@ impl Sample<'_> {
             if u64::try_from(region.area_pixels).ok()
                 != Some(
                     component.sample.original
-                        + component.sample.added
+                        + component.sample.added()
                         + component.sample.outside_expansion,
                 )
                 || region.observation_support.inside_pixels != component.sample.original
@@ -479,7 +501,8 @@ mod tests {
             sample,
             InkCounts {
                 original: 3,
-                added: 3,
+                axis_added: 3,
+                orthogonal_added: 0,
                 outside_expansion: 3
             }
         );
@@ -487,7 +510,8 @@ mod tests {
             peer_union,
             InkCounts {
                 original: 1,
-                added: 3,
+                axis_added: 3,
+                orthogonal_added: 0,
                 outside_expansion: 2
             }
         );
@@ -496,7 +520,8 @@ mod tests {
             peers[&1],
             InkCounts {
                 original: 0,
-                added: 3,
+                axis_added: 3,
+                orthogonal_added: 0,
                 outside_expansion: 2
             }
         );
@@ -562,7 +587,8 @@ mod tests {
             runs.runs[0].sample,
             InkCounts {
                 original: 2,
-                added: 0,
+                axis_added: 0,
+                orthogonal_added: 0,
                 outside_expansion: 0
             }
         );
@@ -570,7 +596,8 @@ mod tests {
             runs.runs[1].sample,
             InkCounts {
                 original: 1,
-                added: 2,
+                axis_added: 2,
+                orthogonal_added: 0,
                 outside_expansion: 0
             }
         );
@@ -579,7 +606,8 @@ mod tests {
             runs.runs[1].peers[&1],
             InkCounts {
                 original: 0,
-                added: 2,
+                axis_added: 2,
+                orthogonal_added: 0,
                 outside_expansion: 0
             }
         );
@@ -594,6 +622,67 @@ mod tests {
                 )?
                 .is_none()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn orthogonal_salvage_is_not_axis_added_foreground() -> Result<(), Error> {
+        let mut image = GrayImage::from_pixel(8, 6, Luma([255]));
+        for (x, y) in [
+            (2, 1),
+            (2, 2),
+            (2, 3),
+            (2, 4),
+            (5, 1),
+            (5, 2),
+            (5, 3),
+            (6, 4),
+            (7, 5),
+        ] {
+            image.put_pixel(x, y, Luma([0]));
+        }
+        let sample = Sample {
+            image: &image,
+            frame: LineFrame {
+                corners: rect(1., 2., 4., 4.),
+                width: 3,
+                height: 2,
+                axis_swapped: false,
+            },
+            window: SampleWindow {
+                padding: [1, 2, 4, 2],
+            },
+            threshold: 128,
+        };
+        let expanded = InkBounds {
+            left: 1,
+            top: 1,
+            right: 7,
+            bottom: 5,
+        };
+        let peers = [rect(1., 0., 4., 2.), rect(4., 0., 7., 5.)];
+        let result = sample.account(expanded, &peers, &mut 1_000_000)?;
+        let InkAccounting::Measured {
+            sample: count,
+            peers,
+            ..
+        } = result
+        else {
+            return Err(Error::Invalid("expected measured".into()));
+        };
+        assert_eq!(
+            count,
+            InkCounts {
+                original: 2,
+                axis_added: 4,
+                orthogonal_added: 2,
+                outside_expansion: 1
+            }
+        );
+        assert_eq!(peers[&0].orthogonal_added, 1);
+        assert_eq!(peers[&0].axis_added, 0);
+        assert_eq!(peers[&1].axis_added, 4);
+        assert_eq!(peers[&1].orthogonal_added, 0);
         Ok(())
     }
 
@@ -634,7 +723,7 @@ mod tests {
         let mut budget = 24;
         let result = sample.account(expanded, &[peer], &mut budget)?;
         assert!(
-            matches!(result,InkAccounting::Measured {peer_union:InkCounts {original:0,added:3,outside_expansion:3},peers_fully_sampled,..} if peers_fully_sampled == [true])
+            matches!(result,InkAccounting::Measured {peer_union:InkCounts {original:0,axis_added:3,orthogonal_added:0,outside_expansion:3},peers_fully_sampled,..} if peers_fully_sampled == [true])
         );
         Ok(())
     }

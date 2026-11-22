@@ -149,6 +149,65 @@ pub(crate) fn detect_boundaries(
         .collect()
 }
 
+/// A body component must be completely measured, glyph-sized, and have
+/// more actual support inside its original observation than outside.
+#[cfg(any(feature = "pdf-integration", test))]
+fn body_component(c: &PixelRegion, line_height: u32) -> bool {
+    !c.touches_line_edge
+        && width(c.bounds) <= line_height
+        && height(c.bounds) <= line_height
+        && c.observation_support.inside_pixels > c.observation_support.outside_pixels
+}
+
+/// Repair the orthogonal band from the complete measured bounds of the
+/// observation's own glyph components. Recompute memberships in the same
+/// raster (component indices are invariant to the observation window).
+/// Reject any newly admitted body pixel from unsupported/foreign components.
+///
+/// # Errors
+/// Rejects inconsistent raster geometry or component identities.
+#[cfg(any(feature = "pdf-integration", test))]
+pub fn measured_body_band(
+    image: &image::GrayImage,
+    threshold: u8,
+    original: InkBounds,
+    components: &[&PixelRegion],
+) -> Result<Option<(InkBounds, Vec<PixelRegion>)>, crate::Error> {
+    let h = height(original);
+    let supported = components.iter().copied().filter(|c| body_component(c, h));
+    let band = supported.fold(original, |mut b, c| {
+        b.top = b.top.min(c.bounds.top);
+        b.bottom = b.bottom.max(c.bounds.bottom);
+        b
+    });
+    if band == original {
+        return Ok(None);
+    }
+    let measured = crate::pixel_regions::regions(
+        image,
+        threshold,
+        crate::pixel_regions::PixelClass::Ink,
+        band,
+    )?;
+    if measured.len() != components.len()
+        || measured
+            .iter()
+            .zip(components)
+            .any(|(new, old)| new.bounds != old.bounds || new.area_pixels != old.area_pixels)
+    {
+        return Err(crate::Error::Invalid(
+            "inconsistent corrected-band component identity".into(),
+        ));
+    }
+    if measured.iter().zip(components).any(|(new, old)| {
+        new.observation_support.inside_pixels > old.observation_support.inside_pixels
+            && !body_component(old, h)
+    }) {
+        return Ok(None);
+    }
+    Ok(Some((band, measured)))
+}
+
 // Unlike production compact-mark repair, this research path can propose
 // entire adjacent glyphs. It reports their geometry, not their ownership or
 // text. The caller must resolve every competing observation.
@@ -486,6 +545,64 @@ mod tests {
             crossed.put_pixel(31, y, image::Luma([0]));
         }
         assert!(audit_edge_extensions(&measure(&crossed)?, observation, 60).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn measured_body_band_recovers_clipped_glyphs_but_never_foreign_ink() -> Result<(), crate::Error>
+    {
+        let observation = InkBounds {
+            left: 15,
+            top: 12,
+            right: 30,
+            bottom: 30,
+        };
+        let mut image = image::GrayImage::from_fn(60, 40, |x, y| {
+            let body = (18..26).contains(&x) && (10..25).contains(&y);
+            let next = (32..40).contains(&x) && (10..25).contains(&y);
+            image::Luma([if body || next { 0 } else { 255 }])
+        });
+        let measure = |im: &image::GrayImage| {
+            crate::pixel_regions::regions(
+                im,
+                128,
+                crate::pixel_regions::PixelClass::Ink,
+                observation,
+            )
+        };
+        let components = measure(&image)?;
+        assert!(audit_edge_extensions(&components, observation, 60).is_empty());
+        let (band, corrected) = measured_body_band(
+            &image,
+            128,
+            observation,
+            &components.iter().collect::<Vec<_>>(),
+        )?
+        .ok_or_else(|| crate::Error::Invalid("expected corrected band".into()))?;
+        assert_eq!(
+            band,
+            InkBounds {
+                top: 10,
+                ..observation
+            }
+        );
+        let candidates = audit_edge_extensions(&corrected, band, 60);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].edge, LeaderEdge::Right);
+        assert_eq!(candidates[0].expanded.top, 10);
+        // Same body support but unrelated newly included dot in the widened
+        // orthogonal band: no authorization to expand that band.
+        image.put_pixel(28, 10, image::Luma([0]));
+        let components = measure(&image)?;
+        assert!(
+            measured_body_band(
+                &image,
+                128,
+                observation,
+                &components.iter().collect::<Vec<_>>()
+            )?
+            .is_none()
+        );
         Ok(())
     }
 

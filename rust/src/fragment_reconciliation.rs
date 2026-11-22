@@ -34,7 +34,7 @@ pub struct TokenBinding {
     pub run: usize,
     /// Projection bounds in the common padded raster, not variant coordinates.
     pub sample_bounds: InkBounds,
-    pub added_pixels: u64,
+    pub axis_added_pixels: u64,
     pub views: Vec<usize>,
 }
 
@@ -59,7 +59,8 @@ pub struct Transaction {
     pub line_index: usize,
     pub extension_index: usize,
     pub evidence: BoundaryEvidence,
-    pub added_pixels: u64,
+    pub axis_added_pixels: u64,
+    pub orthogonal_added_pixels: u64,
     pub quad: Quad,
     pub text: String,
     pub bindings: Vec<TokenBinding>,
@@ -81,6 +82,7 @@ pub enum Rejection {
     NotLiteralExtension,
     UnlocalizedAddedTokens,
     NativeTextConflict,
+    OrthogonalPeerConflict,
     IncompletePeer,
     MissingPeerEvidence,
     UnboundPeerInk,
@@ -150,7 +152,7 @@ fn constrained_view(
                 .filter(|&run| {
                     ink.runs.get(run).is_some_and(|r| {
                         if added.contains(&position) {
-                            r.sample.added > 0
+                            r.sample.axis_added > 0
                         } else {
                             r.sample.original > 0
                         }
@@ -262,7 +264,7 @@ fn bind_added(
                     top: b.top.checked_add(expanded.top)?,
                     bottom: b.bottom.checked_add(expanded.top)?,
                 },
-                added_pixels: ink.runs.get(run)?.sample.added,
+                axis_added_pixels: ink.runs.get(run)?.sample.axis_added,
                 views: votes.clone(),
             })
         })
@@ -364,7 +366,7 @@ fn preserve_partial_peer(
                 && ink.runs[b.run]
                     .peers
                     .get(&peer_index)
-                    .is_some_and(|c| c.added > 0)
+                    .is_some_and(|c| c.axis_added > 0)
                 && run_quad(quad, variant, b.run).is_some_and(|q| intersection(&source, &q) > 0.0)
         });
         let b = matched.next()?;
@@ -415,13 +417,13 @@ impl ProposalContext<'_> {
             let pixels = self.ink.runs[binding.run]
                 .peers
                 .get(&peer)
-                .map_or(0, |c| c.added);
+                .map_or(0, |c| c.axis_added);
             if pixels > 0 {
                 accounted += pixels;
                 positions.push(binding.position);
             }
         }
-        if accounted != count.added {
+        if accounted != count.axis_added {
             return Err(Rejection::UnboundPeerInk);
         }
         let reason = if count.outside_expansion == 0 {
@@ -430,7 +432,7 @@ impl ProposalContext<'_> {
             if components.iter().any(|c| {
                 c.peers
                     .get(&peer)
-                    .is_some_and(|p| p.added > 0 && p.outside_expansion > 0)
+                    .is_some_and(|p| p.axis_added > 0 && p.outside_expansion > 0)
             }) {
                 return Err(Rejection::SplitPeerComponent);
             }
@@ -475,7 +477,7 @@ pub fn propose(
     else {
         return Err(Rejection::NoMeasuredInk);
     };
-    if sample.added == 0 {
+    if sample.axis_added == 0 {
         return Err(Rejection::NoMeasuredInk);
     }
     let RefinementDecision::Consensus { text, view_indices } = &variant.decision else {
@@ -504,12 +506,15 @@ pub fn propose(
     };
     let mut consumed = Vec::new();
     for (i, overlap) in extension.overlaps.iter().enumerate() {
-        if counts.get(&i).is_none_or(|c| c.added == 0) {
+        if counts.get(&i).is_none_or(|c| c.added() == 0) {
             continue;
         }
         let BoundaryPeer::OcrLine { line_index } = overlap.peer else {
             return Err(Rejection::NativeTextConflict);
         };
+        if counts.get(&i).is_some_and(|c| c.orthogonal_added > 0) {
+            return Err(Rejection::OrthogonalPeerConflict);
+        }
         let Some(RefinementOutcome::Recognized { recognition, .. }) = peers.get(&line_index) else {
             return Err(Rejection::MissingPeerEvidence);
         };
@@ -520,7 +525,8 @@ pub fn propose(
         line_index,
         extension_index,
         evidence: extension.evidence.clone(),
-        added_pixels: sample.added,
+        axis_added_pixels: sample.axis_added,
+        orthogonal_added_pixels: sample.orthogonal_added,
         quad: extension.proposed_quad,
         text: text.clone(),
         bindings,
@@ -532,7 +538,8 @@ pub fn propose(
 fn dominates(short: &Transaction, long: &Transaction) -> bool {
     if short.identity() != long.identity()
         || short.evidence.edge != long.evidence.edge
-        || short.added_pixels >= long.added_pixels
+        || short.axis_added_pixels >= long.axis_added_pixels
+        || short.orthogonal_added_pixels != long.orthogonal_added_pixels
         || short.bindings.is_empty()
         || short.bindings.len() >= long.bindings.len()
         || short.consumed.len() != long.consumed.len()
@@ -547,9 +554,9 @@ fn dominates(short: &Transaction, long: &Transaction) -> bool {
         || a.bottom != b.bottom
         || short_components.len() >= long_components.len()
         || !short_components.iter().all(|i| long_components.contains(i))
-        || [short, long]
-            .iter()
-            .any(|op| op.bindings.iter().map(|b| b.added_pixels).sum::<u64>() != op.added_pixels)
+        || [short, long].iter().any(|op| {
+            op.bindings.iter().map(|b| b.axis_added_pixels).sum::<u64>() != op.axis_added_pixels
+        })
     {
         return false;
     }
@@ -582,7 +589,7 @@ fn dominates(short: &Transaction, long: &Transaction) -> bool {
         s.position.checked_add(offset) == Some(l.position)
             && s.character == l.character
             && s.sample_bounds == l.sample_bounds
-            && s.added_pixels == l.added_pixels
+            && s.axis_added_pixels == l.axis_added_pixels
     }) && short.consumed.iter().all(|s| {
         long.consumed.iter().any(|l| {
             s.line_index == l.line_index
@@ -705,7 +712,8 @@ mod tests {
                     run,
                     sample: InkCounts {
                         original,
-                        added,
+                        axis_added: added,
+                        orthogonal_added: 0,
                         outside_expansion: 0,
                     },
                     peers: BTreeMap::new(),
@@ -729,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_added_pixels_resolve_ambiguous_punctuation_without_stealing_original_ink() {
+    fn actual_axis_added_pixels_resolve_ambiguous_punctuation_without_stealing_original_ink() {
         // A vertical drawing stroke lies between the two original digits
         // and the newly captured dot. It is a legal contextual candidate
         // before source accounting but has no new foreground membership.
@@ -818,7 +826,8 @@ mod tests {
                 },
                 body_gap_pixels: 0,
             },
-            added_pixels: 0,
+            axis_added_pixels: 0,
+            orthogonal_added_pixels: 0,
             quad: rect(x),
             text: "AB".into(),
             bindings: vec![],
@@ -861,11 +870,11 @@ mod tests {
                     top: 2,
                     bottom: 8,
                 },
-                added_pixels: 30,
+                axis_added_pixels: 30,
                 views: vec![0, 4],
             })
             .collect();
-        op.added_pixels = 30 * u64::try_from(bindings.len()).unwrap_or_default();
+        op.axis_added_pixels = 30 * u64::try_from(bindings.len()).unwrap_or_default();
         op
     }
 
@@ -891,7 +900,8 @@ mod tests {
             line_index: 4,
             ink: InkCounts {
                 original: 0,
-                added: 30,
+                axis_added: 30,
+                orthogonal_added: 0,
                 outside_expansion: 0,
             },
             reason: Consumption::AllForegroundCaptured,
@@ -906,9 +916,9 @@ mod tests {
         longer.bindings[1].sample_bounds.left += 1;
         assert!(!dominates(&left, &longer));
         longer.bindings[1].sample_bounds.left -= 1;
-        longer.added_pixels += 1;
+        longer.axis_added_pixels += 1;
         assert!(!dominates(&left, &longer));
-        longer.added_pixels -= 1;
+        longer.axis_added_pixels -= 1;
         longer.consumed[0].token_positions[0] = 0;
         assert!(!dominates(&left, &longer));
 
