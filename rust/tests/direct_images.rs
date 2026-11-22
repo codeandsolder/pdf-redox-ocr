@@ -471,3 +471,42 @@ fn divergent_content_array_programs_are_rejected_before_decode()
     assert!(actual.appearances.is_empty());
     Ok(())
 }
+
+#[test]
+fn late_page_mismatch_discards_only_its_appearance_bindings()
+-> Result<(), Box<dyn std::error::Error>> {
+    let bytes = context_fixture(false, "0000ffffffff", [0, 1], 2);
+    let doc = PdfMetadata::from_bytes(bytes)?;
+    let pages = [PageNumber::new(1)?, PageNumber::new(2)?];
+    let mut paints = enumerate_image_paints(&doc, &pages)?.placements;
+    assert_eq!(paints.len(), 4);
+    paints[3].ctm[4] += 1.;
+    let result = direct_native_images(
+        &doc,
+        &pages,
+        &BTreeSet::from(["9:0".into()]),
+        &paints,
+        NativeImageBudget::default(),
+    )?;
+    assert_eq!(result.stats.decoded_occurrences, 2);
+    assert_eq!(result.stats.accepted_appearances, 1);
+    assert_eq!(result.stats.accepted_occurrences, 2);
+    assert_eq!(
+        result.stats.rejected_pages.get(&2),
+        Some(&"unmatched_interpreter_occurrence")
+    );
+    assert!(result.appearances.get(&paints[2]).is_none());
+    assert!(result.appearances.get(&paints[3]).is_none());
+    for paint in &paints[0..2] {
+        assert_eq!(
+            result
+                .appearances
+                .get(paint)
+                .ok_or("verified first page lost")?
+                .1
+                .as_raw(),
+            &[255, 0, 0, 0, 255, 0]
+        );
+    }
+    Ok(())
+}

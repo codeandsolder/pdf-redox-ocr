@@ -765,8 +765,12 @@ mod tests {
         combine_disjoint_changes, unchanged_outside_source_masks,
     };
     use crate::{
-        PageNumber, paint_scan::enumerate_image_paints, pdf_metadata::PdfMetadata,
-        rasterize::RenderPolicy, source_ocr::SourceObservation,
+        PageNumber,
+        paint_scan::enumerate_image_paints,
+        pdf_metadata::PdfMetadata,
+        rasterize::RenderPolicy,
+        source_appearances::{AppearanceId, SourceAppearance},
+        source_ocr::SourceObservation,
     };
     use crate::{
         draft::OcrLine,
@@ -848,15 +852,43 @@ mod tests {
                 reviewed: false,
             }],
         };
-        let recognized = PaintAppearances::from_object_inventory(
-            BTreeMap::from([(scan.placements[0].source_id.clone(), source)]),
-            &scan.placements,
-        );
+        for distinct in [false, true] {
+            let mut recognized = PaintAppearances::from_object_inventory(
+                BTreeMap::from([(scan.placements[0].source_id.clone(), source.clone())]),
+                &scan.placements,
+            );
+            if distinct {
+                let mut alternative = source.clone();
+                alternative.lines[0].text = "ALTERNATE LABEL".into();
+                recognized.variants.insert(
+                    AppearanceId(1),
+                    SourceAppearance {
+                        source_id: scan.placements[0].source_id.clone(),
+                        value: alternative,
+                    },
+                );
+                for page in recognized.paint_bindings.values_mut() {
+                    *page.values_mut().next_back().ok_or("no second paint")? = AppearanceId(1);
+                }
+            }
+            check_grouped_residual(&path, &doc, &scan, &recognized, pages, distinct)?;
+        }
+        Ok(())
+    }
+
+    fn check_grouped_residual(
+        path: &std::path::Path,
+        doc: &PdfMetadata,
+        scan: &crate::paint_scan::PaintReport,
+        recognized: &PaintAppearances<SourceObservation>,
+        pages: [PageNumber; 3],
+        distinct: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut verifier = MixedVerifier::new(
-            &path,
-            &doc,
-            &scan,
-            &recognized,
+            path,
+            doc,
+            scan,
+            recognized,
             RenderPolicy {
                 max_side: 1600,
                 dpi: 72,
@@ -871,6 +903,20 @@ mod tests {
                 "{:#?}",
                 result.evidence.audited
             );
+            assert_eq!(result.evidence.audited[0].appearance_id, AppearanceId(0));
+            assert_eq!(
+                result.evidence.audited[1].appearance_id,
+                AppearanceId(usize::from(distinct))
+            );
+            assert_eq!(
+                result.evidence.proofs[1].text,
+                if distinct {
+                    "ALTERNATE LABEL"
+                } else {
+                    "CAPACITOR 47uF 16V"
+                }
+            );
+            assert_eq!(verifier.masked_cache.len(), 1 + usize::from(distinct));
             let residual = result.residual.ok_or("grouped treatment rejected")?;
             let control = result.control.ok_or("missing proof control")?;
             assert_eq!(residual.required, BTreeSet::from([0, 1]));
