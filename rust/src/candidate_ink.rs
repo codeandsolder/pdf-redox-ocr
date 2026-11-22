@@ -18,6 +18,7 @@ use crate::{
     glyph_appearance::GlyphShape,
     glyph_isolation::{InkGroup, MeasuredInk},
     ink_polarity::PolarityEvidence,
+    pixel_regions::InkBounds,
 };
 
 /// A single independent measurement of source ink, shared by all hypotheses.
@@ -185,6 +186,7 @@ impl SourceInk {
         &self,
         geometry: &ViewGeometry,
         hypothesis: &SequenceHypothesis,
+        runs: &[InkBounds],
     ) -> CandidateMapping {
         let SequenceAlignment::Measured { tokens, .. } = &hypothesis.alignment else {
             return CandidateMapping::Unavailable {
@@ -222,7 +224,7 @@ impl SourceInk {
         for index in 1..cells.len() {
             cells[index].interval[1] = cells[index].interval[1].max(cells[index - 1].interval[1]);
         }
-        let mut anchors = anchor_candidates(&cells, &self.groups);
+        let mut anchors = anchor_candidates(&cells, runs);
         let width = f64::from(self.dimensions.0);
         let mut possible_padding_claims = std::collections::BTreeSet::new();
         let mut excluded = Vec::new();
@@ -241,7 +243,7 @@ impl SourceInk {
                 excluded.push(None);
             }
         }
-        align_runs(&mut anchors, self.groups.len(), self.dimensions.0);
+        align_runs(&mut anchors, runs.len(), self.dimensions.0);
         let anchors = anchors
             .into_iter()
             .zip(cells)
@@ -273,12 +275,24 @@ impl SourceInk {
         view_dimensions: (u32, u32),
         evidence: &CtcEvidence,
     ) -> Option<ViewInkMapping> {
+        let bounds = self.groups.iter().map(|g| g.run.ink).collect::<Vec<_>>();
+        self.map_view_with_bounds(view_dimensions, evidence, &bounds)
+    }
+
+    /// Re-localize the same measured CTC paths against an independently
+    /// established ordered partition of the exact original source raster.
+    pub(crate) fn map_view_with_bounds(
+        &self,
+        view_dimensions: (u32, u32),
+        evidence: &CtcEvidence,
+        runs: &[InkBounds],
+    ) -> Option<ViewInkMapping> {
         let geometry =
             ViewGeometry::new(self.dimensions, view_dimensions, evidence.sequence_length)?;
         let hypotheses = evidence
             .hypotheses
             .iter()
-            .map(|candidate| self.map_hypothesis(&geometry, candidate))
+            .map(|candidate| self.map_hypothesis(&geometry, candidate, runs))
             .collect();
         Some(ViewInkMapping {
             geometry,
@@ -331,7 +345,8 @@ mod tests {
         assert_eq!(source.groups.len(), 2);
         let geometry = ViewGeometry::new(source.dimensions, view, 80)
             .ok_or_else(|| Error::Invalid("fixture geometry".into()))?;
-        match source.map_hypothesis(&geometry, hypothesis) {
+        let bounds = source.groups.iter().map(|g| g.run.ink).collect::<Vec<_>>();
+        match source.map_hypothesis(&geometry, hypothesis, &bounds) {
             CandidateMapping::Mapped { anchors } => Ok(anchors),
             CandidateMapping::Unavailable { reason } => Err(Error::Invalid(reason)),
         }

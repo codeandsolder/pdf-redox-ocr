@@ -206,7 +206,7 @@ pub struct AuditedLine {
     pub leaders: Vec<MappedLeader>,
     /// Candidate extensions in the original classified reading-order frame.
     pub boundary_extensions: Vec<MappedBoundaryExtension>,
-    /// Measured only by the explicit source line audit; None if not requested
+    /// Measured by source line audit or reconciliation; None if not requested
     /// or the shared membership budget is exhausted. Never a deletion decision.
     pub foreign_edge_contractions: Option<Vec<MappedEdgeContraction>>,
 }
@@ -424,7 +424,7 @@ pub(crate) fn audit_line(
 }
 
 impl SampledLine {
-    fn measure_contractions(
+    pub(crate) fn measure_contractions(
         &mut self,
         policy: &LineAuditPolicy,
         remaining_checks: &mut u64,
