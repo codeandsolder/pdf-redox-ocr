@@ -85,6 +85,7 @@ fn source_ink_topology_and_pdf_mapping_survive_all_page_rotations()
             line.groups.iter().zip([1, 2, 0]).zip([55.0, 75.0, 100.0])
         {
             assert!(!group.group.touches_line_edge);
+            assert!(group.appearance.is_some());
             assert!(
                 (group.ink_quad[0].0 - expected_left).abs() < 0.3,
                 "page {}: {:?}",
@@ -146,6 +147,11 @@ fn source_padding_recovers_clipped_stroke_across_rotations()
         assert!(group.group.run.observation_support.outside_pixels > 0);
         assert!(group.group.run.observation_support.touches_observation_edge);
         assert!(!group.group.touches_line_edge);
+        assert!(
+            group.appearance.is_none(),
+            "outside-observation ink cannot supply a matched appearance"
+        );
+        assert!(before.groups[0].appearance.is_none());
         assert_eq!(before.polarity.foreground, after.polarity.foreground);
         assert_eq!(before.polarity.class_medians, after.polarity.class_medians);
         assert_eq!(before.original_quad, after.original_quad);

@@ -564,6 +564,26 @@ mod tests {
                 .iter()
                 .all(|sample| sample.page == 3 && sample.text.matches('Ø').count() == 2)
         );
+        let donors: GroundTruth = serde_json::from_str(include_str!(
+            "../tests/fixtures/quality/defond-drawing-donors-groundtruth.json"
+        ))?;
+        assert_eq!(donors.samples.len(), 62);
+        assert_eq!(donors.source_pdf_sha256, defond.source_pdf_sha256);
+        assert_eq!(donors.coordinate_system, defond.coordinate_system);
+        assert!(
+            donors
+                .samples
+                .iter()
+                .all(|sample| [30, 31, 33, 35].contains(&sample.page))
+        );
+        assert_eq!(
+            donors
+                .samples
+                .iter()
+                .map(|sample| sample.text.matches('Ø').count())
+                .sum::<usize>(),
+            4
+        );
         assert_ne!(defond.source_pdf_sha256, walsin.source_pdf_sha256);
         assert_eq!(defond.coordinate_system, "PDF user space");
         assert_eq!(walsin.coordinate_system, "PDF user space");

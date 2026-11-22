@@ -13,6 +13,33 @@ use crate::{
     recognition::{RasterCharacterAudit, RasterCharacterMapping, RasterLocation},
 };
 
+/// Matched high-resolution visible source ink, separate from primary recognition.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SourceGlyphAppearance {
+    pub normalized_line_sha256: String,
+    pub line_dimensions: (u32, u32),
+    pub source_group_index: usize,
+    pub ink_quad: Quad,
+    pub shape: GlyphShape,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SourceSamplingFailure {
+    pub page: u32,
+    pub raster_location: RasterLocation,
+    pub detection_index: usize,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SourceSampling {
+    pub dpi: u32,
+    pub attempted_lines: usize,
+    pub sampled_lines: usize,
+    pub matched_glyphs: usize,
+    pub failures: Vec<SourceSamplingFailure>,
+}
+
 /// One independently transcribed character and the primary model's actual
 /// source-ink association. The reviewed Unicode is not an OCR vote.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -28,6 +55,7 @@ pub struct ReviewedGlyph {
     pub line_score: f64,
     pub ink_quad: Quad,
     pub shape: GlyphShape,
+    pub source_appearance: Option<SourceGlyphAppearance>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -48,6 +76,7 @@ pub struct ReviewedGlyphBank {
     pub reference_provenance: String,
     pub stats: ReviewStats,
     pub glyphs: Vec<ReviewedGlyph>,
+    pub source_sampling: Option<SourceSampling>,
 }
 
 /// Label a prediction only when every minimum-cost edit path pairs that
@@ -221,6 +250,7 @@ fn collect_glyphs(
             line_score: line.original.confidence,
             ink_quad: mapped.mapping.to_pdf(ink_quad),
             shape: shape.clone(),
+            source_appearance: None,
         });
     }
 }
@@ -281,12 +311,13 @@ impl ReviewedGlyphBank {
         }
         stats.labeled_glyphs = glyphs.len();
         Ok(Self {
-            schema_version: 2,
+            schema_version: 3,
             pdf_sha256: draft.pdf_sha256.clone(),
             model: draft.model.clone(),
             reference_provenance: reference.provenance.clone(),
             stats,
             glyphs,
+            source_sampling: None,
         })
     }
 }

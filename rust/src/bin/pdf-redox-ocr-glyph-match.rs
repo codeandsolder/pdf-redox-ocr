@@ -3,7 +3,7 @@
 use clap::Parser;
 use pdf_redox_ocr::{
     artifacts::{check_output_paths, write_atomic},
-    glyph_matching::{MatchPolicy, evaluate},
+    glyph_matching::{AppearanceMode, MatchPolicy, evaluate},
     reviewed_glyphs::ReviewedGlyphBank,
 };
 use std::{
@@ -27,6 +27,9 @@ struct Args {
     page: Vec<u32>,
     #[arg(long)]
     report: PathBuf,
+    /// Compare primary recognition ink or independently resampled source ink.
+    #[arg(long, value_enum, default_value = "primary")]
+    appearance: AppearanceMode,
     /// Maximum normalized appearance distance (not confidence).
     #[arg(long)]
     max_distance: f64,
@@ -60,6 +63,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &banks.iter().collect::<Vec<_>>(),
         &args.page.into_iter().collect::<BTreeSet<_>>(),
         MatchPolicy {
+            appearance: args.appearance,
             max_distance: args.max_distance,
             min_margin: args.min_margin,
             min_independent_crops: args.min_independent_crops,

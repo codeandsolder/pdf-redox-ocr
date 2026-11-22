@@ -6,13 +6,39 @@ use serde::Serialize;
 
 use crate::{
     Error,
+    glyph_appearance::GlyphShape,
     recognition::RasterLocation,
     reviewed_glyphs::{ReviewedGlyph, ReviewedGlyphBank},
 };
 
+/// Compare only like-for-like actual appearance measurements.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+#[serde(rename_all = "snake_case")]
+pub enum AppearanceMode {
+    #[default]
+    Primary,
+    Source,
+}
+
+impl AppearanceMode {
+    fn sample(self, glyph: &ReviewedGlyph) -> Option<(&GlyphShape, &str)> {
+        match self {
+            Self::Primary => Some((&glyph.shape, &glyph.crop_sha256)),
+            Self::Source => glyph.source_appearance.as_ref().map(|appearance| {
+                (
+                    &appearance.shape,
+                    appearance.normalized_line_sha256.as_str(),
+                )
+            }),
+        }
+    }
+}
+
 /// Distance and ambiguity policy, separate from any model confidence.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct MatchPolicy {
+    pub appearance: AppearanceMode,
     pub max_distance: f64,
     pub min_margin: f64,
     pub min_independent_crops: usize,
@@ -43,6 +69,7 @@ pub struct DonorMatch<'a> {
     pub raster_sha256: &'a str,
     pub detection_index: usize,
     pub crop_sha256: &'a str,
+    pub appearance_sha256: &'a str,
     pub character_index: usize,
 }
 
@@ -57,6 +84,7 @@ pub struct ClassMatch<'a> {
 #[serde(rename_all = "snake_case")]
 pub enum MatchDecision {
     Candidate,
+    NoQueryAppearance,
     NoExemplars,
     NoCompetitor,
     TooDistant,
@@ -71,6 +99,7 @@ pub struct GlyphMatch<'a> {
     pub raster_sha256: &'a str,
     pub detection_index: usize,
     pub crop_sha256: &'a str,
+    pub appearance_sha256: Option<&'a str>,
     pub character_index: usize,
     pub reference: char,
     pub primary_prediction: char,
@@ -84,6 +113,7 @@ pub struct GlyphMatch<'a> {
 #[derive(Debug, Default, Serialize)]
 pub struct MatchSummary {
     pub queries: usize,
+    pub query_appearances: usize,
     pub reference_class_available: usize,
     pub primary_correct: usize,
     pub candidates: usize,
@@ -99,6 +129,7 @@ pub struct MatchReport<'a> {
     pub query_pdf_sha256: &'a str,
     pub donor_pdf_sha256: Vec<&'a str>,
     pub policy: MatchPolicy,
+    pub source_dpi: Option<u32>,
     pub summary: MatchSummary,
     pub matches: Vec<GlyphMatch<'a>>,
 }
@@ -110,9 +141,9 @@ struct ClassEvidence<'a> {
 }
 
 impl<'a> ClassEvidence<'a> {
-    fn observe(&mut self, donor: DonorMatch<'a>, limit: f64) {
+    fn observe(&mut self, donor: DonorMatch<'a>, digest: &'a str, limit: f64) {
         if donor.distance <= limit {
-            self.supporting.insert(donor.crop_sha256);
+            self.supporting.insert(digest);
         }
         if self
             .nearest
@@ -161,30 +192,39 @@ fn classify<'a>(
     policy: MatchPolicy,
 ) -> GlyphMatch<'a> {
     let mut labels = BTreeMap::<char, ClassEvidence<'a>>::new();
-    for bank in banks {
-        for donor in &bank.glyphs {
-            // A whole source page is held out. Identical recognition crops
-            // on different pages or documents cannot leak into training.
-            if (bank.pdf_sha256 == query_pdf && donor.page == query.page)
-                || donor.crop_sha256 == query.crop_sha256
-            {
-                continue;
+    let query_sample = policy.appearance.sample(query);
+    if let Some((query_shape, query_digest)) = query_sample {
+        for bank in banks {
+            for donor in &bank.glyphs {
+                let Some((donor_shape, donor_digest)) = policy.appearance.sample(donor) else {
+                    continue;
+                };
+                // Entire source page and identical input crops are held out.
+                // Source matching additionally excludes identical resampled lines.
+                if (bank.pdf_sha256 == query_pdf && donor.page == query.page)
+                    || donor.crop_sha256 == query.crop_sha256
+                    || donor_digest == query_digest
+                {
+                    continue;
+                }
+                let evidence = DonorMatch {
+                    label: donor.label,
+                    distance: query_shape.distance(donor_shape),
+                    pdf_sha256: &bank.pdf_sha256,
+                    page: donor.page,
+                    raster_location: donor.raster_location,
+                    raster_sha256: &donor.raster_sha256,
+                    detection_index: donor.detection_index,
+                    crop_sha256: &donor.crop_sha256,
+                    appearance_sha256: donor_digest,
+                    character_index: donor.character_index,
+                };
+                labels.entry(donor.label).or_default().observe(
+                    evidence,
+                    donor_digest,
+                    policy.max_distance,
+                );
             }
-            let evidence = DonorMatch {
-                label: donor.label,
-                distance: query.shape.distance(&donor.shape),
-                pdf_sha256: &bank.pdf_sha256,
-                page: donor.page,
-                raster_location: donor.raster_location,
-                raster_sha256: &donor.raster_sha256,
-                detection_index: donor.detection_index,
-                crop_sha256: &donor.crop_sha256,
-                character_index: donor.character_index,
-            };
-            labels
-                .entry(donor.label)
-                .or_default()
-                .observe(evidence, policy.max_distance);
         }
     }
     let reference_class_available = labels.contains_key(&query.label);
@@ -201,13 +241,18 @@ fn classify<'a>(
     let mut classes = classes.into_iter();
     let nearest = classes.next();
     let runner_up = classes.next();
-    let decision = decide(nearest.as_ref(), runner_up.as_ref(), policy);
+    let decision = if query_sample.is_some() {
+        decide(nearest.as_ref(), runner_up.as_ref(), policy)
+    } else {
+        MatchDecision::NoQueryAppearance
+    };
     GlyphMatch {
         page: query.page,
         raster_location: query.raster_location,
         raster_sha256: &query.raster_sha256,
         detection_index: query.detection_index,
         crop_sha256: &query.crop_sha256,
+        appearance_sha256: query_sample.map(|(_, digest)| digest),
         character_index: query.character_index,
         reference: query.label,
         primary_prediction: query.prediction,
@@ -222,6 +267,7 @@ fn classify<'a>(
 impl MatchSummary {
     fn observe(&mut self, result: &GlyphMatch<'_>) {
         self.queries += 1;
+        self.query_appearances += usize::from(result.appearance_sha256.is_some());
         let primary_correct = result.primary_prediction == result.reference;
         self.primary_correct += usize::from(primary_correct);
         self.reference_class_available += usize::from(result.reference_class_available);
@@ -242,14 +288,52 @@ impl MatchSummary {
     }
 }
 
+fn validate_source_sampling(bank: &ReviewedGlyphBank) -> Result<(), Error> {
+    let mut source_lines = BTreeMap::new();
+    let mut source_groups = BTreeSet::new();
+    let mut count = 0;
+    for glyph in &bank.glyphs {
+        let Some(source) = &glyph.source_appearance else {
+            continue;
+        };
+        count += 1;
+        let key = (glyph.page, glyph.raster_location, glyph.detection_index);
+        let digest = &source.normalized_line_sha256;
+        if digest.len() != 64
+            || !digest.bytes().all(|b| b.is_ascii_hexdigit())
+            || source.line_dimensions.0 == 0
+            || source.line_dimensions.1 == 0
+            || source_lines
+                .insert(key, (digest, source.line_dimensions))
+                .is_some_and(|prior| prior != (digest, source.line_dimensions))
+            || !source_groups.insert((key, source.source_group_index))
+        {
+            return Err(Error::Invalid(
+                "invalid source appearance provenance".into(),
+            ));
+        }
+    }
+    if bank.source_sampling.as_ref().map_or(count != 0, |s| {
+        !(36..=2400).contains(&s.dpi)
+            || s.matched_glyphs != count
+            || s.sampled_lines > s.attempted_lines
+            || s.sampled_lines.checked_add(s.failures.len()) != Some(s.attempted_lines)
+            || source_lines.len() > s.sampled_lines
+    }) {
+        return Err(Error::Invalid("inconsistent source glyph sampling".into()));
+    }
+    Ok(())
+}
+
 fn validate_bank(bank: &ReviewedGlyphBank) -> Result<(), Error> {
     let digest = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
-    if bank.schema_version != 2
+    if bank.schema_version != 3
         || !digest(&bank.pdf_sha256)
         || bank.reference_provenance.trim().is_empty()
     {
         return Err(Error::Invalid("invalid glyph bank provenance".into()));
     }
+    validate_source_sampling(bank)?;
     let mut occurrences = BTreeSet::new();
     let mut rasters = BTreeMap::new();
     for glyph in &bank.glyphs {
@@ -293,6 +377,24 @@ pub fn evaluate<'a>(
     for bank in banks {
         validate_bank(bank)?;
     }
+    let source_dpi = if policy.appearance == AppearanceMode::Source {
+        let dpi = query
+            .source_sampling
+            .as_ref()
+            .ok_or_else(|| Error::Invalid("query bank has no source sampling".into()))?
+            .dpi;
+        if banks
+            .iter()
+            .any(|bank| bank.source_sampling.as_ref().map(|s| s.dpi) != Some(dpi))
+        {
+            return Err(Error::Invalid(
+                "source appearance banks require the same sampling DPI".into(),
+            ));
+        }
+        Some(dpi)
+    } else {
+        None
+    };
     if pages.contains(&0) {
         return Err(Error::Invalid("query pages start at one".into()));
     }
@@ -308,10 +410,11 @@ pub fn evaluate<'a>(
         })
         .collect();
     Ok(MatchReport {
-        schema_version: 2,
+        schema_version: 3,
         query_pdf_sha256: &query.pdf_sha256,
         donor_pdf_sha256: banks.iter().map(|b| b.pdf_sha256.as_str()).collect(),
         policy,
+        source_dpi,
         summary,
         matches,
     })
@@ -346,6 +449,7 @@ mod tests {
                 prediction: 'B',
                 line_score: 0.999,
                 ink_quad: [Point(0., 0.); 4],
+                source_appearance: None,
                 shape: GlyphShape::measure(
                     &image,
                     InkBounds {
@@ -358,12 +462,13 @@ mod tests {
             });
         }
         Ok(ReviewedGlyphBank {
-            schema_version: 2,
+            schema_version: 3,
             pdf_sha256: format!("{pdf:064x}"),
             model: "fixture".into(),
             reference_provenance: "fixture review".into(),
             stats: ReviewStats::default(),
             glyphs,
+            source_sampling: None,
         })
     }
     #[test]
@@ -375,6 +480,7 @@ mod tests {
             &[(1, 1, 'B', true), (2, 4, 'A', true), (2, 5, 'B', false)],
         )?;
         let policy = MatchPolicy {
+            appearance: AppearanceMode::Primary,
             max_distance: 0.1,
             min_margin: 0.02,
             min_independent_crops: 2,
@@ -404,6 +510,7 @@ mod tests {
             &[&other],
             &BTreeSet::new(),
             MatchPolicy {
+                appearance: AppearanceMode::Primary,
                 max_distance: 0.1,
                 min_margin: 0.0,
                 min_independent_crops: 2,
@@ -436,6 +543,63 @@ mod tests {
         validate_bank(&reviewed)?;
         reviewed.glyphs[2].raster_sha256 = "ab".repeat(32);
         assert!(validate_bank(&reviewed).is_err());
+        Ok(())
+    }
+
+    fn attach_source(bank: &mut ReviewedGlyphBank, dpi: u32, digests: &[Option<u8>]) {
+        use crate::reviewed_glyphs::{SourceGlyphAppearance, SourceSampling};
+        let matched_glyphs = digests.iter().filter(|d| d.is_some()).count();
+        for (glyph, digest) in bank.glyphs.iter_mut().zip(digests) {
+            glyph.source_appearance = digest.map(|digest| SourceGlyphAppearance {
+                normalized_line_sha256: format!("{digest:064x}"),
+                line_dimensions: (100, 20),
+                source_group_index: 0,
+                ink_quad: glyph.ink_quad,
+                shape: glyph.shape.clone(),
+            });
+        }
+        bank.source_sampling = Some(SourceSampling {
+            dpi,
+            attempted_lines: bank.glyphs.len(),
+            sampled_lines: bank.glyphs.len(),
+            matched_glyphs,
+            failures: vec![],
+        });
+    }
+
+    #[test]
+    fn source_matching_never_falls_back_or_counts_identical_source_crops() -> Result<(), Error> {
+        let mut q = bank(1, &[(1, 1, 'A', true), (1, 2, 'A', true)])?;
+        attach_source(&mut q, 600, &[Some(10), None]);
+        let mut donors = bank(
+            2,
+            &[
+                (1, 3, 'A', true),
+                (1, 4, 'A', true),
+                (1, 5, 'A', true),
+                (1, 6, 'B', false),
+            ],
+        )?;
+        attach_source(&mut donors, 600, &[Some(10), Some(11), Some(12), Some(13)]);
+        let policy = MatchPolicy {
+            appearance: AppearanceMode::Source,
+            max_distance: 0.1,
+            min_margin: 0.02,
+            min_independent_crops: 2,
+        };
+        let report = evaluate(&q, &[&donors], &BTreeSet::new(), policy)?;
+        assert_eq!(report.summary.query_appearances, 1);
+        assert_eq!(report.summary.corrected_primary_errors, 1);
+        assert_eq!(
+            report.matches[0]
+                .nearest
+                .as_ref()
+                .map(|m| m.supporting_crops),
+            Some(2)
+        );
+        assert_eq!(report.matches[1].decision, MatchDecision::NoQueryAppearance);
+        attach_source(&mut donors, 300, &[Some(10), Some(11), Some(12), Some(13)]);
+        assert!(evaluate(&q, &[&donors], &BTreeSet::new(), policy).is_err());
         Ok(())
     }
 }
