@@ -944,21 +944,23 @@ an explicit compatible ordered assignment. These text-only operations
 participate in the existing atomic conflict resolver. The output remains
 research-only and non-importable.
 
-Omissions inside the original observation are handled separately from
-crop expansion and mask correction. The exact occupied-column projection
-preselects observations in which an injective longer transcription is possible.
-Both models must support the same revised run assignment; a bounded dynamic
-program measures all ordered literal embeddings of the original non-whitespace
-tokens at geometrically compatible runs. The revised run assignment is unique,
-but equivalent old-token identities need not be. Each view reports possible
-and required insertion positions, aggregated by union and intersection across
-accepted views. Every possible inserted slot must bind to unclipped independent
-ink and is checked for peer membership; no arbitrary embedding is asserted. Explicit CTC queries measure the original sequence
-even if it is absent from the beam; the consensus winner must have higher
-exact path mass in every accepted view. Exact shared-raster peer accounting
-rejects new tokens covering another OCR observation or native text. No text
-is inferred from reference counts, and insertions enter the same atomic
-conflict resolver. Unchanged original geometry is retained.
+Nondeleting text revisions inside the original observation are handled
+separately from crop expansion and stroke removal. The exact occupied-column
+projection preselects observations in which an injective revised transcription
+is possible. Both models must support the same revised run assignment.
+A bounded ordered minimum-cost embedding consumes every original token at a
+compatible source run and every revised token in reading order. Literal
+retention and insertion have zero cost; a substitution costs one. The number
+of insertions is fixed by the revised length. This permits substitutions,
+insertions, and mixed edits without inventing deletions or arbitrary old-token
+identities. Each view records all possible and required insertion/substitution
+positions across minimum-cost complete embeddings; their union and intersection
+are retained across accepted views. Every possibly edited run must have
+unclipped independent ink, with exact peer accounting rejecting overlapping
+OCR/native text. Explicit original CTC queries score even absent beam sequences;
+the consensus winner must have higher exact mass in each accepted view.
+Every text-only correction enters the same atomic conflict resolver and keeps
+unchanged original geometry.
 
 The observation band can widen orthogonally only to fully measured,
 locally supported components with majority foreground and vertical extent
@@ -990,7 +992,7 @@ peer additionally requires stable independently localized literal text inside th
 observation, and cannot have a shared component cut by the replacement boundary.
 Native-text conflicts and incomplete peer samples abstain.
 
-The schema 14 report retains the original observation identity, all considered extensions and contractions,
+The schema 15 report retains the original observation identity, all considered extensions and contractions,
 conditional CTC evidence, common-raster run counts, peer evidence, transactions and
 conflicts. Strictly nested candidates can supersede a shorter candidate only if all added
 foreground is bound to tokens, the larger component chain and crop contain the
