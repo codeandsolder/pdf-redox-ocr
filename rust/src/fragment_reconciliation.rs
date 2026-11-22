@@ -10,6 +10,7 @@ use std::{
 use serde::Serialize;
 
 use crate::{
+    boundary_ink::BoundaryEvidence,
     candidate_ink::{CandidateAnchor, CandidateMapping},
     character_alignment::{CharacterAnchor, RunAlignment, align_runs},
     ctc_evidence::CtcOutcome,
@@ -19,6 +20,7 @@ use crate::{
     layout_leaders::LeaderEdge,
     line_audit::{BoundaryPeer, MappedBoundaryExtension},
     line_frame::LineFrame,
+    pixel_regions::InkBounds,
     polygon::{area, clip_convex},
     recognition_model::RecognitionModel,
     refinement_evidence::{Recognition, RefinementDecision, RefinementOutcome, canonical},
@@ -30,10 +32,13 @@ pub struct TokenBinding {
     pub position: usize,
     pub character: char,
     pub run: usize,
+    /// Projection bounds in the common padded raster, not variant coordinates.
+    pub sample_bounds: InkBounds,
+    pub added_pixels: u64,
     pub views: Vec<usize>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Consumption {
     AllForegroundCaptured,
@@ -53,10 +58,18 @@ pub struct Transaction {
     pub page: u32,
     pub line_index: usize,
     pub extension_index: usize,
+    pub evidence: BoundaryEvidence,
+    pub added_pixels: u64,
     pub quad: Quad,
     pub text: String,
     pub bindings: Vec<TokenBinding>,
     pub consumed: Vec<PeerClaim>,
+}
+
+impl Transaction {
+    const fn identity(&self) -> (u32, usize) {
+        (self.page, self.line_index)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -206,6 +219,7 @@ fn bind_added(
     view_indices: &[usize],
     added: Range<usize>,
     ink: &RunAccounting,
+    expanded: InkBounds,
 ) -> Option<Vec<TokenBinding>> {
     let mut votes = Vec::new();
     let mut models = BTreeSet::new();
@@ -234,17 +248,25 @@ fn bind_added(
         return None;
     }
     let characters = canonical(text).chars().collect::<Vec<_>>();
-    Some(
-        added
-            .zip(assignment?)
-            .map(|(position, run)| TokenBinding {
+    added
+        .zip(assignment?)
+        .map(|(position, run)| {
+            let b = recognition.source_ink.groups.get(run)?.run.ink;
+            Some(TokenBinding {
                 position,
                 character: characters[position],
                 run,
+                sample_bounds: InkBounds {
+                    left: b.left.checked_add(expanded.left)?,
+                    right: b.right.checked_add(expanded.left)?,
+                    top: b.top.checked_add(expanded.top)?,
+                    bottom: b.bottom.checked_add(expanded.top)?,
+                },
+                added_pixels: ink.runs.get(run)?.sample.added,
                 views: votes.clone(),
             })
-            .collect(),
-    )
+        })
+        .collect()
 }
 
 fn both_models(models: &BTreeSet<RecognitionModel>) -> bool {
@@ -465,8 +487,15 @@ pub fn propose(
     }
     let added = added_range(original, text, extension.evidence.edge)
         .ok_or(Rejection::NotLiteralExtension)?;
-    let bindings = bind_added(variant, text, view_indices, added, ink)
-        .ok_or(Rejection::UnlocalizedAddedTokens)?;
+    let bindings = bind_added(
+        variant,
+        text,
+        view_indices,
+        added,
+        ink,
+        extension.evidence.expanded,
+    )
+    .ok_or(Rejection::UnlocalizedAddedTokens)?;
     let context = ProposalContext {
         extension,
         variant,
@@ -490,6 +519,8 @@ pub fn propose(
         page: page.page,
         line_index,
         extension_index,
+        evidence: extension.evidence.clone(),
+        added_pixels: sample.added,
         quad: extension.proposed_quad,
         text: text.clone(),
         bindings,
@@ -497,13 +528,111 @@ pub fn propose(
     })
 }
 
+/// Strict dominance is an evidence relation, not a reward for longer text.
+fn dominates(short: &Transaction, long: &Transaction) -> bool {
+    if short.identity() != long.identity()
+        || short.evidence.edge != long.evidence.edge
+        || short.added_pixels >= long.added_pixels
+        || short.bindings.is_empty()
+        || short.bindings.len() >= long.bindings.len()
+        || short.consumed.len() != long.consumed.len()
+    {
+        return false;
+    }
+    let a = short.evidence.expanded;
+    let b = long.evidence.expanded;
+    let short_components = &short.evidence.component_indices;
+    let long_components = &long.evidence.component_indices;
+    if a.top != b.top
+        || a.bottom != b.bottom
+        || short_components.len() >= long_components.len()
+        || !short_components.iter().all(|i| long_components.contains(i))
+        || [short, long]
+            .iter()
+            .any(|op| op.bindings.iter().map(|b| b.added_pixels).sum::<u64>() != op.added_pixels)
+    {
+        return false;
+    }
+    let short_text = canonical(&short.text);
+    let long_text = canonical(&long.text);
+    let Some(delta) = long_text
+        .chars()
+        .count()
+        .checked_sub(short_text.chars().count())
+    else {
+        return false;
+    };
+    if delta != long.bindings.len() - short.bindings.len() {
+        return false;
+    }
+    let (offset, preserved) = match short.evidence.edge {
+        LeaderEdge::Left
+            if a.right == b.right && b.left < a.left && long_text.ends_with(&short_text) =>
+        {
+            (delta, &long.bindings[delta..])
+        }
+        LeaderEdge::Right
+            if a.left == b.left && b.right > a.right && long_text.starts_with(&short_text) =>
+        {
+            (0, &long.bindings[..short.bindings.len()])
+        }
+        _ => return false,
+    };
+    short.bindings.iter().zip(preserved).all(|(s, l)| {
+        s.position.checked_add(offset) == Some(l.position)
+            && s.character == l.character
+            && s.sample_bounds == l.sample_bounds
+            && s.added_pixels == l.added_pixels
+    }) && short.consumed.iter().all(|s| {
+        long.consumed.iter().any(|l| {
+            s.line_index == l.line_index
+                && s.reason == l.reason
+                && s.ink == l.ink
+                && s.token_positions.len() == l.token_positions.len()
+                && s.token_positions
+                    .iter()
+                    .zip(&l.token_positions)
+                    .all(|(&a, &b)| a.checked_add(offset) == Some(b))
+        })
+    })
+}
+
+/// Preserve all original candidates and their strict dominators in the report.
+/// A dominated candidate stays suppressed even if its dominator later conflicts.
+pub fn superseded(operations: &[Transaction]) -> BTreeMap<usize, Vec<usize>> {
+    let mut by_original = BTreeMap::<(u32, usize), Vec<usize>>::new();
+    for (i, op) in operations.iter().enumerate() {
+        by_original.entry(op.identity()).or_default().push(i);
+    }
+    let mut result = BTreeMap::new();
+    for indices in by_original.values() {
+        for &i in indices {
+            let dominators = indices
+                .iter()
+                .copied()
+                .filter(|&j| dominates(&operations[i], &operations[j]))
+                .collect::<Vec<_>>();
+            if !dominators.is_empty() {
+                result.insert(i, dominators);
+            }
+        }
+    }
+    result
+}
+
 /// Conflicts are symmetric, including multiple proposals for one observation
 /// and overlapping replacement geometry. No score or input order breaks ties.
-pub fn conflicts(operations: &[Transaction]) -> BTreeSet<usize> {
+pub fn conflicts(
+    operations: &[Transaction],
+    superseded: &BTreeMap<usize, Vec<usize>>,
+) -> BTreeSet<usize> {
     let mut pages = BTreeMap::<u32, Vec<usize>>::new();
     let mut identities = BTreeMap::<(u32, usize), usize>::new();
     let mut blocked = BTreeSet::new();
     for (i, op) in operations.iter().enumerate() {
+        if superseded.contains_key(&i) {
+            continue;
+        }
         for index in std::iter::once(op.line_index).chain(op.consumed.iter().map(|p| p.line_index))
         {
             if let Some(previous) = identities.insert((op.page, index), i)
@@ -539,7 +668,7 @@ pub fn experimental_draft(
         if blocked.contains(&i) {
             continue;
         }
-        replacements.insert((op.page, op.line_index), op);
+        replacements.insert(op.identity(), op);
         consumed.extend(op.consumed.iter().map(|p| (op.page, p.line_index)));
     }
     for page in &mut draft.pages {
@@ -678,6 +807,18 @@ mod tests {
             page,
             line_index,
             extension_index: 0,
+            evidence: BoundaryEvidence {
+                edge: LeaderEdge::Right,
+                component_indices: vec![],
+                expanded: InkBounds {
+                    left: 0,
+                    top: 0,
+                    right: 1,
+                    bottom: 1,
+                },
+                body_gap_pixels: 0,
+            },
+            added_pixels: 0,
             quad: rect(x),
             text: "AB".into(),
             bindings: vec![],
@@ -693,6 +834,118 @@ mod tests {
         }
     }
 
+    fn nested(
+        text: &str,
+        edge: LeaderEdge,
+        bindings: &[(usize, char, u32)],
+        components: Vec<usize>,
+        bounds: InkBounds,
+    ) -> Transaction {
+        let mut op = operation(1, 0, vec![], 0.);
+        op.text = text.into();
+        op.evidence = BoundaryEvidence {
+            edge,
+            component_indices: components,
+            expanded: bounds,
+            body_gap_pixels: 0,
+        };
+        op.bindings = bindings
+            .iter()
+            .map(|&(position, character, x)| TokenBinding {
+                position,
+                character,
+                run: position,
+                sample_bounds: InkBounds {
+                    left: x,
+                    right: x + 5,
+                    top: 2,
+                    bottom: 8,
+                },
+                added_pixels: 30,
+                views: vec![0, 4],
+            })
+            .collect();
+        op.added_pixels = 30 * u64::try_from(bindings.len()).unwrap_or_default();
+        op
+    }
+
+    #[test]
+    fn dominance_conserves_source_bound_tokens_on_both_edges() {
+        let a = InkBounds {
+            left: 20,
+            right: 80,
+            top: 0,
+            bottom: 10,
+        };
+        let mut left = nested("0 A", LeaderEdge::Left, &[(0, '0', 25)], vec![2], a);
+        let mut longer = nested(
+            "40 A",
+            LeaderEdge::Left,
+            &[(0, '4', 15), (1, '0', 25)],
+            vec![1, 2],
+            InkBounds { left: 10, ..a },
+        );
+        assert!(dominates(&left, &longer));
+        assert!(!dominates(&longer, &left));
+        let peer = PeerClaim {
+            line_index: 4,
+            ink: InkCounts {
+                original: 0,
+                added: 30,
+                outside_expansion: 0,
+            },
+            reason: Consumption::AllForegroundCaptured,
+            token_positions: vec![0],
+        };
+        left.consumed.push(peer.clone());
+        longer.consumed.push(PeerClaim {
+            token_positions: vec![1],
+            ..peer
+        });
+        assert!(dominates(&left, &longer));
+        longer.bindings[1].sample_bounds.left += 1;
+        assert!(!dominates(&left, &longer));
+        longer.bindings[1].sample_bounds.left -= 1;
+        longer.added_pixels += 1;
+        assert!(!dominates(&left, &longer));
+        longer.added_pixels -= 1;
+        longer.consumed[0].token_positions[0] = 0;
+        assert!(!dominates(&left, &longer));
+
+        let right = nested("A0", LeaderEdge::Right, &[(1, '0', 65)], vec![2], a);
+        let longer = nested(
+            "A04",
+            LeaderEdge::Right,
+            &[(1, '0', 65), (2, '4', 85)],
+            vec![2, 3],
+            InkBounds { right: 95, ..a },
+        );
+        assert!(dominates(&right, &longer));
+    }
+
+    #[test]
+    fn suppression_never_falls_back_when_dominator_conflicts() {
+        let a = InkBounds {
+            left: 20,
+            right: 80,
+            top: 0,
+            bottom: 10,
+        };
+        let short = nested("A0", LeaderEdge::Right, &[(1, '0', 65)], vec![2], a);
+        let long = nested(
+            "A04",
+            LeaderEdge::Right,
+            &[(1, '0', 65), (2, '4', 85)],
+            vec![2, 3],
+            InkBounds { right: 95, ..a },
+        );
+        let rival = operation(1, 1, vec![], 0.5);
+        let operations = [short, long, rival];
+        let suppressed = superseded(&operations);
+        assert_eq!(suppressed, BTreeMap::from([(0, vec![1])]));
+        assert_eq!(conflicts(&operations, &suppressed), BTreeSet::from([1, 2]));
+    }
+
     #[test]
     fn group_conflicts_are_symmetric_and_replacements_preserve_original_indices() {
         let operations = [
@@ -702,7 +955,7 @@ mod tests {
             operation(2, 0, vec![1], 0.),
             operation(2, 2, vec![], 2.),
         ];
-        let blocked = conflicts(&operations);
+        let blocked = conflicts(&operations, &BTreeMap::new());
         assert_eq!(blocked, BTreeSet::from([0, 1, 2]));
         let source = OcrDraft::new(
             "digest".into(),
