@@ -313,6 +313,12 @@ pub(crate) fn sample_whitened(image: &RgbImage, Point(x, y): Point) -> Rgb<u8> {
     Rgb(channels.map(|channel| num_traits::ToPrimitive::to_u8(&channel.round()).unwrap_or(255)))
 }
 
+#[cfg(feature = "pdf-integration")]
+/// Shared native and page RGB contrast criterion.
+pub(crate) fn significant_rgb_change(before: Rgb<u8>, after: Rgb<u8>) -> bool {
+    before.0.iter().zip(after.0).any(|(a, b)| a.abs_diff(b) > 8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::RenderPolicy;

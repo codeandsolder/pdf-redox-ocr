@@ -49,8 +49,33 @@ pub struct DirectImages {
     pub stats: DirectDecodeStats,
 }
 
+enum Wanted<'a> {
+    Sources(&'a BTreeSet<String>),
+    Paint(&'a ImagePaint),
+}
+
+impl Wanted<'_> {
+    fn contains(&self, paint: &ImagePaint) -> bool {
+        match self {
+            Self::Sources(ids) => ids.contains(&paint.source_id),
+            Self::Paint(target) => {
+                target.page == paint.page
+                    && target.paint_path == paint.paint_path
+                    && target.source_id == paint.source_id
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Sources(ids) => ids.len(),
+            Self::Paint(_) => 1,
+        }
+    }
+}
+
 struct Collector<'a> {
-    wanted: &'a BTreeSet<String>,
+    wanted: Wanted<'a>,
     budget: NativeImageBudget,
     result: DirectImages,
     stored_pixels: u64,
@@ -75,7 +100,7 @@ struct PageDevice<'a, 'b> {
 
 impl Collector<'_> {
     fn reject(&mut self, paint: &ImagePaint, reason: &'static str) {
-        if self.wanted.contains(&paint.source_id) {
+        if self.wanted.contains(paint) {
             self.result
                 .stats
                 .rejected_paints
@@ -349,7 +374,7 @@ impl Device<'_> for PageDevice<'_, '_> {
             self.invalid_page = Some("unmatched_interpreter_occurrence");
             return;
         };
-        if !self.collector.wanted.contains(&paint.source_id) {
+        if !self.collector.wanted.contains(paint) {
             return;
         }
         self.collector.result.stats.matched_occurrences += 1;
@@ -495,8 +520,7 @@ fn preflight_pages(
         } else if source_page.raw().contains_key(b"Group".as_slice()) {
             Some("page_transparency_group")
         } else if expected.values().any(|entry| {
-            collector.wanted.contains(&entry.paint.source_id)
-                && entry.paint.unsafe_reasons.is_empty()
+            collector.wanted.contains(entry.paint) && entry.paint.unsafe_reasons.is_empty()
         }) && !equivalent_page_program(metadata, source_page)?
         {
             Some("page_content_path_mismatch")
@@ -523,6 +547,46 @@ pub fn direct_native_images(
     paints: &[ImagePaint],
     budget: NativeImageBudget,
 ) -> Result<DirectImages, Error> {
+    decode_selected(metadata, selected, Wanted::Sources(wanted), paints, budget)
+}
+
+/// Decode exactly one matched native occurrence, not its sibling invocations.
+pub(crate) fn decode_exact_paint(
+    metadata: &PdfMetadata,
+    paints: &[ImagePaint],
+    paint: &ImagePaint,
+) -> Result<Option<RgbImage>, Error> {
+    let pixels = u64::from(paint.width) * u64::from(paint.height);
+    let budget = NativeImageBudget {
+        source_pixels: pixels,
+        total_pixels: pixels,
+        extraction_pixels: pixels,
+        sources: 1,
+    };
+    let mut result = decode_selected(
+        metadata,
+        &[PageNumber::new(paint.page)?],
+        Wanted::Paint(paint),
+        paints,
+        budget,
+    )?;
+    let Some((id, _)) = result.appearances.get(paint) else {
+        return Ok(None);
+    };
+    Ok(result
+        .appearances
+        .variants
+        .remove(&id)
+        .map(|appearance| appearance.value))
+}
+
+fn decode_selected(
+    metadata: &PdfMetadata,
+    selected: &[PageNumber],
+    wanted: Wanted<'_>,
+    paints: &[ImagePaint],
+    budget: NativeImageBudget,
+) -> Result<DirectImages, Error> {
     let mut collector = Collector {
         wanted,
         budget: budget.validate()?,
@@ -531,8 +595,8 @@ pub fn direct_native_images(
         verified_contexts: HashMap::new(),
         next_appearance: 0,
     };
-    collector.result.stats.requested_sources = wanted.len();
-    if wanted.is_empty() {
+    collector.result.stats.requested_sources = collector.wanted.len();
+    if collector.wanted.len() == 0 {
         return Ok(collector.result);
     }
     let pdf = metadata.source().syntax();
@@ -549,8 +613,7 @@ pub fn direct_native_images(
             .rejected_pages
             .contains_key(&page.get())
             || !expected.values().any(|entry| {
-                collector.wanted.contains(&entry.paint.source_id)
-                    && entry.paint.unsafe_reasons.is_empty()
+                collector.wanted.contains(entry.paint) && entry.paint.unsafe_reasons.is_empty()
             })
         {
             continue;
