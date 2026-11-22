@@ -253,3 +253,75 @@ fn periodic_source_leader_mapping_preserves_body_ink_across_rotations()
     }
     Ok(())
 }
+
+#[test]
+fn source_edge_extensions_report_competing_observations_across_rotations()
+-> Result<(), Box<dyn std::error::Error>> {
+    use pdf_redox_ocr::{layout_leaders::LeaderEdge, line_audit::BoundaryPeer};
+
+    let directory = tempfile::tempdir()?;
+    let pdf = directory.path().join("source.pdf");
+    let quad = [
+        Point(50.0, 65.0),
+        Point(70.0, 65.0),
+        Point(70.0, 91.0),
+        Point(50.0, 91.0),
+    ];
+    let peer_quad = [
+        Point(73.0, 65.0),
+        Point(94.0, 65.0),
+        Point(94.0, 91.0),
+        Point(73.0, 91.0),
+    ];
+    let (mut draft, targets) = fixture_draft(&pdf, quad, "0")?;
+    for page in &mut draft.pages {
+        page.lines.push(OcrLine {
+            text: "8".into(),
+            confidence: 0.99,
+            quad: peer_quad,
+            reviewed: false,
+        });
+        page.native_text_regions.push(peer_quad);
+    }
+    let report = audit_lines(
+        &pdf,
+        &draft,
+        &targets,
+        &LineAuditPolicy {
+            padding_pixels: 240,
+            ..LineAuditPolicy::default()
+        },
+    )?;
+    assert_eq!(report.schema_version, 7);
+    for line in report.lines {
+        let extension = line
+            .boundary_extensions
+            .iter()
+            .find(|e| {
+                e.evidence.edge == LeaderEdge::Right
+                    && e.overlaps
+                        .iter()
+                        .any(|o| matches!(o.peer, BoundaryPeer::OcrLine { line_index: 1 }))
+            })
+            .ok_or("missing adjacent glyph proposal")?;
+        assert_eq!(extension.overlaps.len(), 2);
+        assert!(
+            extension
+                .overlaps
+                .iter()
+                .any(|o| matches!(o.peer, BoundaryPeer::NativeText { region_index: 0 }))
+        );
+        for overlap in &extension.overlaps {
+            assert!(overlap.strip_fraction > 0.0 && overlap.strip_fraction <= 1.0);
+            assert!(overlap.peer_fraction > 0.0 && overlap.peer_fraction <= 1.0);
+            assert_eq!(
+                overlap.component_indices,
+                extension.evidence.component_indices
+            );
+        }
+        assert!((extension.added_strip[0].0 - 70.0).abs() < 1e-8);
+        assert!(extension.proposed_quad[1].0 > 85.0);
+        assert_eq!(line.original_quad, quad);
+    }
+    Ok(())
+}

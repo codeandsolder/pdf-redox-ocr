@@ -11,15 +11,17 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Error, PageNumber,
-    draft::{OcrDraft, OcrLine, sha256_file},
-    geometry::{DisplayMapper, PageBox, Point, Quad},
+    boundary_ink::{BoundaryEvidence, audit_edge_extensions},
+    draft::{DraftPage, OcrDraft, OcrLine, sha256_file},
+    geometry::{DisplayMapper, PageBox, Point, Quad, QuadBounds},
     glyph_appearance::GlyphShape,
     glyph_isolation::{InkBand, InkGroup, InkIsolation, InkRun, isolate_ink},
     ink_polarity::{Polarity, PolarityEvidence},
-    layout_leaders::{LeaderEvidence, detect_leaders},
-    line_frame::{LineAxis, LineFrame, SampleWindow},
+    layout_leaders::{LeaderEdge, LeaderEvidence, detect_leaders},
+    line_frame::{LineAxis, LineFrame, SampleWindow, convex},
     pdf_metadata::PdfMetadata,
     pixel_regions::{InkBounds, PixelRegion},
+    polygon::{area, clip_convex},
     rasterize::render_rgb_region,
 };
 
@@ -130,6 +132,36 @@ pub struct MappedLeader {
     pub body_quad: Quad,
 }
 
+/// Exact peer observation potentially affected by an edge extension.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BoundaryPeer {
+    OcrLine { line_index: usize },
+    NativeText { region_index: usize },
+}
+
+/// Geometric competition, not a proof of pixel ownership or text identity.
+#[derive(Debug, Serialize)]
+pub struct BoundaryOverlap {
+    pub peer: BoundaryPeer,
+    /// Intersection divided by the newly added strip area.
+    pub strip_fraction: f64,
+    /// Intersection divided by the peer's entire quad area.
+    pub peer_fraction: f64,
+    /// Candidate component bounding quads intersecting the peer in the strip.
+    pub component_indices: Vec<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MappedBoundaryExtension {
+    pub evidence: BoundaryEvidence,
+    pub proposed_quad: Quad,
+    pub added_strip: Quad,
+    /// Every overlapping OCR line and native text region. An empty list
+    /// does not establish that the new ink is a character.
+    pub overlaps: Vec<BoundaryOverlap>,
+}
+
 /// Audit an original OCR observation without assigning text to individual ink groups.
 #[derive(Debug, Serialize)]
 pub struct AuditedLine {
@@ -153,6 +185,8 @@ pub struct AuditedLine {
     pub supported_runs: Vec<MappedSupportedRun>,
     pub supported_bands: Vec<MappedInkBand>,
     pub leaders: Vec<MappedLeader>,
+    /// Candidate extensions in the oriented sampling frame.
+    pub boundary_extensions: Vec<MappedBoundaryExtension>,
 }
 
 /// Provenance-bound geometric evidence, not an OCR replacement draft.
@@ -308,7 +342,121 @@ pub(crate) fn audit_line(
         supported_runs,
         supported_bands,
         leaders,
+        boundary_extensions: Vec::new(),
     })
+}
+
+fn boundary_overlap(
+    strip: &Quad,
+    candidate_components: &[(usize, &MappedComponent)],
+    peer: BoundaryPeer,
+    peer_quad: &Quad,
+) -> Option<BoundaryOverlap> {
+    if !QuadBounds::new(strip).intersects(QuadBounds::new(peer_quad)) {
+        return None;
+    }
+    let intersection = clip_convex(strip, peer_quad);
+    let overlap = area(&intersection);
+    let strip_area = area(strip);
+    let peer_area = area(peer_quad);
+    if [overlap, strip_area, peer_area]
+        .iter()
+        .any(|a| !a.is_finite() || *a <= 1e-9)
+    {
+        return None;
+    }
+    let component_indices = candidate_components
+        .iter()
+        .filter(|(_, c)| area(&clip_convex(&intersection, &c.ink_quad)) > 1e-9)
+        .map(|(i, _)| *i)
+        .collect();
+    Some(BoundaryOverlap {
+        peer,
+        strip_fraction: (overlap / strip_area).clamp(0.0, 1.0),
+        peer_fraction: (overlap / peer_area).clamp(0.0, 1.0),
+        component_indices,
+    })
+}
+
+fn mapped_boundary_extensions(
+    line: &AuditedLine,
+    page: &DraftPage,
+) -> Result<Vec<MappedBoundaryExtension>, Error> {
+    let observation = line.observation_bounds;
+    let frame = LineFrame {
+        corners: line.oriented_quad,
+        width: observation.right - observation.left,
+        height: observation.bottom - observation.top,
+        axis_swapped: line.axis_swapped,
+    };
+    let window = SampleWindow {
+        padding: [
+            observation.left,
+            observation.top,
+            line.width - observation.right,
+            line.height - observation.bottom,
+        ],
+    };
+    let candidates = audit_edge_extensions(
+        line.components.iter().map(|c| &c.component),
+        observation,
+        line.width,
+    );
+    if !candidates.is_empty()
+        && page
+            .lines
+            .iter()
+            .map(|l| &l.quad)
+            .chain(&page.native_text_regions)
+            .any(|q| !convex(q))
+    {
+        return Err(Error::Invalid(
+            "invalid peer geometry in boundary audit".into(),
+        ));
+    }
+    Ok(candidates
+        .into_iter()
+        .map(|evidence| {
+            let strip = match evidence.edge {
+                LeaderEdge::Left => InkBounds {
+                    right: observation.left,
+                    ..evidence.expanded
+                },
+                LeaderEdge::Right => InkBounds {
+                    left: observation.right,
+                    ..evidence.expanded
+                },
+            };
+            let proposed_quad = window.quad(frame, evidence.expanded);
+            let added_strip = window.quad(frame, strip);
+            let components = evidence
+                .component_indices
+                .iter()
+                .filter_map(|&i| line.components.get(i).map(|c| (i, c)))
+                .collect::<Vec<_>>();
+            let peers = page
+                .lines
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != line.line_index)
+                .map(|(line_index, l)| (BoundaryPeer::OcrLine { line_index }, &l.quad));
+            let native = page
+                .native_text_regions
+                .iter()
+                .enumerate()
+                .map(|(region_index, quad)| (BoundaryPeer::NativeText { region_index }, quad));
+            let overlaps = peers
+                .chain(native)
+                .filter_map(|(peer, quad)| boundary_overlap(&added_strip, &components, peer, quad))
+                .collect();
+            MappedBoundaryExtension {
+                evidence,
+                proposed_quad,
+                added_strip,
+                overlaps,
+            }
+        })
+        .collect())
 }
 
 /// Inspect explicitly selected line geometry in an unchanged, SHA-bound PDF.
@@ -358,7 +506,9 @@ pub fn audit_lines(
             if line.text.trim().is_empty() || !(0.0..=1.0).contains(&line.confidence) {
                 return Err(Error::Invalid("invalid original OCR observation".into()));
             }
-            lines.push(audit_line(pdf, &metadata, page, index, line, policy)?);
+            let mut audited = audit_line(pdf, &metadata, page, index, line, policy)?;
+            audited.boundary_extensions = mapped_boundary_extensions(&audited, original)?;
+            lines.push(audited);
         }
     }
     if sha256_file(pdf)? != draft.pdf_sha256 {
@@ -367,7 +517,7 @@ pub fn audit_lines(
         ));
     }
     Ok(LineAuditReport {
-        schema_version: 6,
+        schema_version: 7,
         pdf_sha256: draft.pdf_sha256.clone(),
         draft_model: draft.model.clone(),
         dpi: policy.dpi,
