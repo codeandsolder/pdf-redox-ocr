@@ -64,6 +64,12 @@ ICC-based color spaces, without changing the original ColorSpace or Decode
 mapping. Unresolved color aliases, alpha, unsupported sample codecs and
 incomplete source data keep ordinary page OCR. A differential proof also
 requires every pixel outside the selected OCR region to remain unchanged.
+The proof denominator is significant RGB contrast measured on the original and
+replacement native image at the exact paint path in its resolved color context,
+not the numerical distance between packed sample codes. A palette index one
+step away may have high contrast; distant indices may map to the same color.
+Per-line visibility audits retain exact changed packed sample tuples, native
+and page RGB contrast counts and the projected expected page pixel count.
 For fragmented image-only pages, the Rust path now clusters actual native
 image paint invocations using scale-aware, spatially indexed connected
 components. Adjacent strips are recognized in bounded native-pitch PDF crops,
