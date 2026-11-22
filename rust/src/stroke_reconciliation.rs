@@ -9,11 +9,12 @@ use serde::Serialize;
 use crate::{
     candidate_ink::SourceInk,
     ctc_evidence::CtcOutcome,
-    fragment_reconciliation::{Operation, Rejection, Transaction, edge_difference},
+    fragment_reconciliation::{
+        Operation, Rejection, Transaction, consistent_votes, edge_difference,
+    },
     layout_leaders::LeaderEdge,
     line_audit::{AuditedLine, MappedEdgeContraction},
     pixel_regions::InkBounds,
-    recognition_model::RecognitionModel,
     refinement_evidence::{Recognition, RefinementDecision, canonical},
 };
 
@@ -306,9 +307,6 @@ pub fn propose(
             bottom: p.bounds.bottom - line.observation_bounds.top,
         })
         .collect::<Vec<_>>();
-    let mut votes = Vec::new();
-    let mut models = BTreeSet::new();
-    let mut assigned = None;
     let context = VoteContext {
         original,
         revised,
@@ -318,20 +316,8 @@ pub fn propose(
         removed: &removed,
         partition: &partition,
     };
-    for &i in view_indices {
-        let Some((runs, evidence)) = context.vote(i) else {
-            continue;
-        };
-        if assigned.as_ref().is_some_and(|a| a != &runs) {
-            return Err(Rejection::UnlocalizedRemovedTokens);
-        }
-        assigned = Some(runs);
-        models.insert(revised.views[i].model);
-        votes.push(evidence);
-    }
-    if !models.contains(&RecognitionModel::Small) || !models.contains(&RecognitionModel::Medium) {
-        return Err(Rejection::UnlocalizedRemovedTokens);
-    }
+    let (assigned, votes) = consistent_votes(revised, view_indices, |i, _| context.vote(i))
+        .ok_or(Rejection::UnlocalizedRemovedTokens)?;
     Ok(Transaction {
         page: line.page,
         line_index: line.line_index,
@@ -342,7 +328,7 @@ pub fn propose(
             removed_pixels: contraction.evidence.removed_pixels,
             retained_pixels: contraction.evidence.retained_pixels,
             partition,
-            original_token_runs: assigned.ok_or(Rejection::UnlocalizedRemovedTokens)?,
+            original_token_runs: assigned,
             votes,
         }),
         consumed: Vec::new(),

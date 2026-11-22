@@ -234,35 +234,14 @@ fn bind_added(
     ink: &RunAccounting,
     expanded: InkBounds,
 ) -> Option<Vec<TokenBinding>> {
-    let mut votes = Vec::new();
-    let mut models = BTreeSet::new();
-    let mut assignment = None;
-    for &index in view_indices {
-        let view = recognition.views.get(index)?;
-        let Some(anchors) = top_anchors(view, text) else {
-            continue;
-        };
-        let Some(runs) =
-            constrained_view(&anchors, &added, ink, recognition.source_ink.dimensions.0)
-        else {
-            continue;
-        };
-        if assignment
-            .as_ref()
-            .is_some_and(|previous| previous != &runs)
-        {
-            return None;
-        }
-        assignment = Some(runs);
-        models.insert(view.model);
-        votes.push(index);
-    }
-    if !both_models(&models) {
-        return None;
-    }
+    let (assignment, votes) = consistent_votes(recognition, view_indices, |index, view| {
+        let anchors = top_anchors(view, text)?;
+        let runs = constrained_view(&anchors, &added, ink, recognition.source_ink.dimensions.0)?;
+        Some((runs, index))
+    })?;
     let characters = canonical(text).chars().collect::<Vec<_>>();
     added
-        .zip(assignment?)
+        .zip(assignment)
         .map(|(position, run)| {
             let b = recognition.source_ink.groups.get(run)?.run.ink;
             Some(TokenBinding {
@@ -280,6 +259,39 @@ fn bind_added(
             })
         })
         .collect()
+}
+
+/// Independent view evidence must establish one stable ordered assignment
+/// and include both recognizer models. A conflicting measured assignment
+/// invalidates the whole proposal rather than turning into an abstention.
+pub fn consistent_votes<V>(
+    recognition: &Recognition,
+    view_indices: &[usize],
+    mut measure: impl FnMut(usize, &crate::refinement_evidence::ViewEvidence) -> Option<(Vec<usize>, V)>,
+) -> Option<(Vec<usize>, Vec<V>)> {
+    let mut votes = Vec::new();
+    let mut models = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    let mut assignment = None;
+    for &i in view_indices {
+        let view = recognition.views.get(i)?;
+        if !seen.insert((view.model, view.stretch_percent)) {
+            continue;
+        }
+        let Some((runs, vote)) = measure(i, view) else {
+            continue;
+        };
+        if assignment.as_ref().is_some_and(|old| old != &runs) {
+            return None;
+        }
+        assignment = Some(runs);
+        models.insert(view.model);
+        votes.push(vote);
+    }
+    if !both_models(&models) {
+        return None;
+    }
+    Some((assignment?, votes))
 }
 
 fn both_models(models: &BTreeSet<RecognitionModel>) -> bool {

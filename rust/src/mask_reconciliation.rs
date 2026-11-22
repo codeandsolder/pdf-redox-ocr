@@ -1,8 +1,6 @@
 //! Paired CTC evidence for corrections confined to foreground runs affected by
 //! independently proven drawing-stroke masks. A mask never creates ink.
 
-use std::collections::BTreeSet;
-
 use serde::Serialize;
 
 use crate::{
@@ -10,11 +8,10 @@ use crate::{
     character_alignment::RunAlignment,
     ctc_alignment::SequenceAlignment,
     ctc_evidence::{CtcOutcome, SequenceHypothesis},
-    fragment_reconciliation::{Operation, Rejection, Transaction},
+    fragment_reconciliation::{Operation, Rejection, Transaction, consistent_votes},
     line_audit::AuditedLine,
     orthogonal_mask::MaskEvidence,
     pixel_regions::InkBounds,
-    recognition_model::RecognitionModel,
     refinement_evidence::{Recognition, RefinementDecision, ViewEvidence, canonical},
 };
 
@@ -327,23 +324,8 @@ pub fn propose(
         revised: &revised,
         partition: &partition,
     };
-    let mut votes = Vec::new();
-    let mut models = BTreeSet::new();
-    let mut assigned = None;
-    for &i in view_indices {
-        let Some((runs, vote)) = comparison.vote(i) else {
-            continue;
-        };
-        if assigned.as_ref().is_some_and(|a| a != &runs) {
-            return Err(Rejection::UnlocalizedMaskChange);
-        }
-        assigned = Some(runs);
-        models.insert(masked.views[i].model);
-        votes.push(vote);
-    }
-    if !models.contains(&RecognitionModel::Small) || !models.contains(&RecognitionModel::Medium) {
-        return Err(Rejection::UnlocalizedMaskChange);
-    }
+    let (assigned, votes) = consistent_votes(masked, view_indices, |i, _| comparison.vote(i))
+        .ok_or(Rejection::UnlocalizedMaskChange)?;
     Ok(Transaction {
         page: line.page,
         line_index: line.line_index,
@@ -352,7 +334,7 @@ pub fn propose(
         operation: Operation::MaskCorrection(MaskCorrection {
             mask_sha256: mask.mask_sha256.clone(),
             partition: partition.groups,
-            revised_token_runs: assigned.ok_or(Rejection::UnlocalizedMaskChange)?,
+            revised_token_runs: assigned,
             votes,
         }),
         consumed: Vec::new(),
