@@ -13,7 +13,7 @@ use crate::{
     Error, PageNumber,
     boundary_ink::{BoundaryEvidence, audit_edge_extensions, measured_body_band, search_padding},
     draft::{DraftPage, OcrDraft, OcrLine, sha256_file},
-    foreign_ink::audit_contractions,
+    foreign_ink::audit_strokes,
     fragment_ink::Sample,
     geometry::{DisplayMapper, PageBox, Point, Quad, QuadBounds},
     glyph_appearance::GlyphShape,
@@ -27,7 +27,9 @@ use crate::{
     rasterize::{calculate_crop, render_crop},
 };
 
-pub use crate::foreign_ink::{ContractionEvidence, EdgeStroke, StripeProfile};
+pub use crate::foreign_ink::{
+    ContractionEvidence, EdgeStroke, OrthogonalEdge, OrthogonalStroke, StripeProfile,
+};
 pub use crate::fragment_ink::{ComponentInk, InkAccounting, InkCounts};
 
 /// Native source resolution and ink measurement settings.
@@ -183,6 +185,19 @@ pub struct MappedEdgeContraction {
     pub proposed_quad: Quad,
 }
 
+#[derive(Debug, Serialize)]
+pub struct MappedOrthogonalStroke {
+    #[serde(flatten)]
+    pub evidence: OrthogonalStroke,
+    pub ink_quad: Quad,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MappedStrokeAudit {
+    pub contractions: Vec<MappedEdgeContraction>,
+    pub orthogonal: Vec<MappedOrthogonalStroke>,
+}
+
 /// Audit an original OCR observation without assigning text to individual ink groups.
 #[derive(Debug, Serialize)]
 pub struct AuditedLine {
@@ -208,7 +223,7 @@ pub struct AuditedLine {
     pub boundary_extensions: Vec<MappedBoundaryExtension>,
     /// Measured by source line audit or reconciliation; None if not requested
     /// or the shared membership budget is exhausted. Never a deletion decision.
-    pub foreign_edge_contractions: Option<Vec<MappedEdgeContraction>>,
+    pub foreign_strokes: Option<MappedStrokeAudit>,
 }
 
 /// Provenance-bound geometric evidence, not an OCR replacement draft.
@@ -411,7 +426,7 @@ pub(crate) fn audit_line(
         supported_bands,
         leaders,
         boundary_extensions: Vec::new(),
-        foreign_edge_contractions: None,
+        foreign_strokes: None,
     };
     Ok(SampledLine {
         audit,
@@ -424,7 +439,7 @@ pub(crate) fn audit_line(
 }
 
 impl SampledLine {
-    pub(crate) fn measure_contractions(
+    pub(crate) fn measure_strokes(
         &mut self,
         policy: &LineAuditPolicy,
         remaining_checks: &mut u64,
@@ -435,21 +450,30 @@ impl SampledLine {
             .iter()
             .map(|c| &c.component)
             .collect::<Vec<_>>();
-        let contractions = audit_contractions(
+        let strokes = audit_strokes(
             &self.normalized,
             policy.segmentation_threshold,
             self.audit.observation_bounds,
             &components,
             remaining_checks,
         )?;
-        self.audit.foreign_edge_contractions = contractions.map(|contractions| {
-            contractions
+        self.audit.foreign_strokes = strokes.map(|audit| MappedStrokeAudit {
+            contractions: audit
+                .contractions
                 .into_iter()
                 .map(|evidence| MappedEdgeContraction {
                     proposed_quad: self.window.quad(self.frame, evidence.retained),
                     evidence,
                 })
-                .collect()
+                .collect(),
+            orthogonal: audit
+                .orthogonal
+                .into_iter()
+                .map(|evidence| MappedOrthogonalStroke {
+                    ink_quad: self.window.quad(self.frame, evidence.stroke.inside_bounds),
+                    evidence,
+                })
+                .collect(),
         });
         Ok(())
     }
@@ -694,7 +718,7 @@ pub fn audit_lines(
             let mut sampled = audit_line(pdf, &metadata, page, index, line, policy, None)?;
             let mut remaining_checks = policy.max_ink_checks;
             sampled.measure_extensions(original, policy, [0; 2], &mut remaining_checks)?;
-            sampled.measure_contractions(policy, &mut remaining_checks)?;
+            sampled.measure_strokes(policy, &mut remaining_checks)?;
             lines.push(sampled.audit);
         }
     }
@@ -704,7 +728,7 @@ pub fn audit_lines(
         ));
     }
     Ok(LineAuditReport {
-        schema_version: 14,
+        schema_version: 15,
         pdf_sha256: draft.pdf_sha256.clone(),
         draft_model: draft.model.clone(),
         dpi: policy.dpi,

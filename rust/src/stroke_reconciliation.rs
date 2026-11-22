@@ -293,9 +293,9 @@ pub fn propose(
     revised: &Recognition,
 ) -> Result<Transaction, Rejection> {
     let contraction = line
-        .foreign_edge_contractions
+        .foreign_strokes
         .as_ref()
-        .and_then(|c| c.get(contraction_index))
+        .and_then(|c| c.contractions.get(contraction_index))
         .ok_or(Rejection::NoMeasuredInk)?;
     let RefinementDecision::Consensus { text, view_indices } = &revised.decision else {
         return Err(Rejection::NoConsensus);
