@@ -7,6 +7,7 @@ use std::{cell::RefCell, fs};
 use image::RgbImage;
 use pdf_redox_ocr::{
     Error, PageNumber,
+    character_alignment::{BatchGeometry, CharacterAuditReport},
     draft::OcrLine,
     geometry::{Point, Quad},
     native_images::NativeImageBudget,
@@ -1196,7 +1197,6 @@ impl RecognitionBackend for MixedRegionRecognizer {
                 line(19, "TRUNCATED", 0., h * 0.2, w * 0.20, h * 0.3),
             ]
         };
-        use pdf_redox_ocr::character_alignment::{BatchGeometry, CharacterAuditReport};
         let crop = RgbImage::from_fn(100, 20, |x, y| {
             image::Rgb(if (4..17).contains(&y) && x % 10 < 5 {
                 [0; 3]
