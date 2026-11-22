@@ -218,6 +218,7 @@ const fn edge_margin(height: u32) -> u32 {
 /// can propose. Orthogonal padding allows fully sampling any glyph-sized
 /// component intersecting the original band.
 #[cfg(feature = "pdf-integration")]
+#[must_use]
 pub const fn search_padding(height: u32) -> [u32; 4] {
     let axis = edge_extent(height)
         .saturating_add(edge_margin(height))
