@@ -16,7 +16,7 @@ use num_traits::ToPrimitive;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineAxis {
     Longest,
-    #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+    #[cfg(feature = "pdf-integration")]
     ReadingOrder,
 }
 
