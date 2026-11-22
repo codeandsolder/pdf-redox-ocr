@@ -275,7 +275,7 @@ pdf-redox-ocr-refine --pdf input.pdf --primary-ocr observations.json \
   --report diameter-hypotheses.json --experimental-draft diameter-experimental.json
 ```
 
-The refinement report schema 3 records crop geometry, actual sample hash,
+The refinement report schema 4 records crop geometry, actual sample hash,
 render resolution and budgets, per-view recognition evidence and explicit
 abstention or skipped targets. Literal non-whitespace changes remain
 distinct (including NFKC-compatible forms such as superscripts and full-width
@@ -535,7 +535,7 @@ retained, not invented. Failed or conflicting crops leave original
 observations unchanged. Failed repair attempts prevent caching the incomplete
 raster result; successful exact RGB reuse includes the confirmed repairs.
 
-Pipeline audit schema 19 records original pixel-space observations, sample
+Pipeline audit schema 20 records original pixel-space observations, sample
 frame, component bounds, typed crop reason, proposed quad and each actual
 prediction/decision by exact RGB SHA-256 and dimensions. Full-raster inference
 calls remain separate from recognition-only batch counters. Disable the stage
@@ -611,7 +611,7 @@ sorted detector index (not final draft index), exact rectified RGB crop
 hash/dimensions, padding geometry, raw CTC column indices, projected ink
 and alignment candidates. Component indices address the entry's component
 array. Positions and ink bounds are in the **rectified recognition-crop
-frame**. Schema 19 additionally records a reconstructible projective crop
+frame**. Schema 20 additionally records a reconstructible projective crop
 mapping for actual detector quadrilaterals, verified against returned crop
 dimensions and the OAR rotation contract. The `raster_character_mappings`
 field binds whole-page, regional, native-image and reconstructed mosaic
@@ -636,8 +636,16 @@ per column plus blank. Its reported log mass is a lower bound on retained
 CTC path mass, **not** a calibrated character or sequence correctness
 probability. It never changes the greedy prediction, line confidence,
 confirmation policy or OCR admission. It also captures alternative-model
-evidence when confirmation is requested. Ordinary recognition retains
-OAR's compact output path; full CTC diagnostics temporarily allocate the
+evidence when confirmation is requested. Each retained class sequence is
+additionally aligned using the full original
+probability tensor and a log-domain forward/backward automaton. It reports
+the exact unpruned sequence mass and conditional token entry modes and 95%
+equal-tail intervals (not label correctness or glyph boxes). Refinement
+records a shared source-ink segmentation and candidate-specific geometric
+associations across all horizontal views. Ambiguous joins, clipping and
+entry intervals extending into padding are not proof of a character.
+Ordinary recognition retains OAR's compact output path; full CTC diagnostics
+temporarily allocate the
 owned class tensor and require an explicit audit output.
 
 

@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Error,
+    candidate_ink::{SourceInk, ViewInkMapping},
     ctc_evidence::{CtcEvidence, CtcOutcome},
     inference::{CharacterEvidence, RecognitionModel, RecognitionSessionModel},
 };
@@ -64,6 +65,7 @@ pub struct ViewEvidence {
     pub greedy_text: String,
     pub greedy_score: f64,
     pub ctc: CtcOutcome,
+    pub ink_mapping: Option<ViewInkMapping>,
 }
 
 /// Why a research hypothesis is (or is not) proposed.
@@ -94,6 +96,7 @@ impl RefinementDecision {
 #[derive(Debug, Serialize)]
 pub struct Recognition {
     pub views: Vec<ViewEvidence>,
+    pub source_ink: Box<SourceInk>,
     pub decision: RefinementDecision,
 }
 
@@ -196,6 +199,7 @@ impl RefinementRecognizer {
     /// or unexpected inference batch sizes.
     pub fn recognize(&mut self, image: &RgbImage) -> Result<Recognition, Error> {
         let mut views = Vec::new();
+        let source_ink = SourceInk::measure(image)?;
         for &model in self.profile.models() {
             let session = match self.sessions.entry(model) {
                 std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -237,6 +241,12 @@ impl RefinementRecognizer {
                 if !(0.0..=1.0).contains(&score) {
                     return Err(Error::Inference("invalid view score".into()));
                 }
+                let ink_mapping = match &ctc {
+                    CtcOutcome::Measured { evidence } => {
+                        source_ink.map_view(pixels.dimensions(), evidence)
+                    }
+                    CtcOutcome::Unavailable { .. } => None,
+                };
                 views.push(ViewEvidence {
                     model,
                     stretch_percent: stretch,
@@ -245,6 +255,7 @@ impl RefinementRecognizer {
                     greedy_text: text,
                     greedy_score: f64::from(score),
                     ctc,
+                    ink_mapping,
                 });
             }
         }
@@ -259,7 +270,11 @@ impl RefinementRecognizer {
                     }
                 }),
         };
-        Ok(Recognition { views, decision })
+        Ok(Recognition {
+            views,
+            decision,
+            source_ink: Box::new(source_ink),
+        })
     }
 }
 
@@ -282,6 +297,7 @@ mod tests {
             rgb_sha256: stretch_percent.to_string(),
             greedy_text: best.into(),
             greedy_score: 0.99,
+            ink_mapping: None,
             ctc: CtcOutcome::Measured {
                 evidence: CtcEvidence {
                     sequence_length: 2,
@@ -295,11 +311,17 @@ mod tests {
                             text: best.into(),
                             classes: Vec::new(),
                             log_mass_lower_bound: -0.2,
+                            alignment: crate::ctc_alignment::SequenceAlignment::Unavailable {
+                                reason: "fixture",
+                            },
                         },
                         SequenceHypothesis {
                             text: runner.into(),
                             classes: Vec::new(),
                             log_mass_lower_bound: -0.2 + ratio.ln(),
+                            alignment: crate::ctc_alignment::SequenceAlignment::Unavailable {
+                                reason: "fixture",
+                            },
                         },
                     ],
                 },

@@ -1,11 +1,12 @@
 //! Geometry-only isolation of visible ink along an OCR line.
 
-use image::{GrayImage, imageops};
+use image::{GrayImage, Pixel, RgbImage, imageops};
 use serde::Serialize;
 
 use crate::{
     Error,
     glyph_topology::{GlyphTopology, analyze},
+    ink_polarity::{Polarity, PolarityEvidence, estimate},
     pixel_regions::{InkBounds, ObservationSupport, PixelClass, PixelRegion, regions},
 };
 
@@ -48,6 +49,41 @@ pub struct InkIsolation {
     /// Orthogonal projection of source-supported components. Detached marks
     /// may occupy their own band; neither bands nor runs imply characters.
     pub supported_bands: Vec<InkBand>,
+}
+
+/// Ordinary recognition-crop ink measurement shared by greedy and candidate
+/// geometry. Shape extraction can remain lazy for individual associated runs.
+pub(crate) struct MeasuredInk {
+    pub normalized: GrayImage,
+    pub polarity: PolarityEvidence,
+    pub isolation: InkIsolation,
+}
+
+impl MeasuredInk {
+    pub(crate) fn from_rgb(image: &RgbImage) -> Result<Self, Error> {
+        let dimensions = image.dimensions();
+        let gray = GrayImage::from_fn(dimensions.0, dimensions.1, |x, y| {
+            image.get_pixel(x, y).to_luma()
+        });
+        let polarity = estimate(&gray, Polarity::Auto)?;
+        let normalized = polarity.normalize(&gray);
+        let isolation = isolate_ink(
+            &normalized,
+            InkBounds {
+                left: 0,
+                top: 0,
+                right: dimensions.0,
+                bottom: dimensions.1,
+            },
+            192,
+            &[128, 192, 224],
+        )?;
+        Ok(Self {
+            normalized,
+            polarity,
+            isolation,
+        })
+    }
 }
 
 #[derive(Clone, Copy)]

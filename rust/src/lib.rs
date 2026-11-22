@@ -5,11 +5,13 @@
 
 pub mod artifacts;
 pub mod boundary_ink;
+pub mod candidate_ink;
 #[cfg(feature = "pdf-integration")]
 pub mod catalog_evidence;
 pub mod character_alignment;
 pub mod crop_geometry;
 pub mod crop_repair;
+pub mod ctc_alignment;
 pub mod ctc_evidence;
 #[cfg(feature = "pdf-integration")]
 pub mod direct_images;
