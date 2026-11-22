@@ -152,7 +152,7 @@ pub(crate) fn detect_boundaries(
 /// A body component must be completely measured, glyph-sized, and have
 /// more actual support inside its original observation than outside.
 #[cfg(any(feature = "pdf-integration", test))]
-fn body_component(c: &PixelRegion, line_height: u32) -> bool {
+const fn body_component(c: &PixelRegion, line_height: u32) -> bool {
     !c.touches_line_edge
         && width(c.bounds) <= line_height
         && height(c.bounds) <= line_height
@@ -160,8 +160,9 @@ fn body_component(c: &PixelRegion, line_height: u32) -> bool {
 }
 
 /// Repair the orthogonal band from the complete measured bounds of the
-/// observation's own glyph components. Recompute memberships in the same
-/// raster (component indices are invariant to the observation window).
+/// observation's own glyph components.
+///
+/// Recompute memberships in the same raster (component indices are invariant to the observation window).
 /// Reject any newly admitted body pixel from unsupported/foreign components.
 ///
 /// # Errors
