@@ -136,9 +136,9 @@ fn request_region(
         (bounds.max_y + pad).min(page.y1),
     ])
     .ok()?;
-    let estimate = num_traits::ToPrimitive::to_u64(&(region.width() * scale + 4.0).ceil())?
+    let estimate = num_traits::ToPrimitive::to_u64(&region.width().mul_add(scale, 4.0).ceil())?
         .checked_mul(num_traits::ToPrimitive::to_u64(
-            &(region.height() * scale + 4.0).ceil(),
+            &region.height().mul_add(scale, 4.0).ceil(),
         )?)?;
     (estimate <= policy.mosaic_budget.group_pixels).then_some(RegionRequest {
         paint_index: paint.paint_index,
