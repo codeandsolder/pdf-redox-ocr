@@ -292,7 +292,7 @@ fn source_edge_extensions_report_competing_observations_across_rotations()
             ..LineAuditPolicy::default()
         },
     )?;
-    assert_eq!(report.schema_version, 13);
+    assert_eq!(report.schema_version, 14);
     for line in report.lines {
         let extension = line
             .boundary_extensions

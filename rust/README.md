@@ -900,6 +900,15 @@ longitudinal margin covers the maximum extension distance and its background
 margin, while each orthogonal margin covers one glyph height. An explicit
 `--padding-pixels` replaces this with a uniform diagnostic margin. Actual
 within-page sampled bounds are recorded per line.
+The explicit line-audit command also reports source-edge contraction geometry
+for a long connected stroke with predominantly external foreground. The
+entire in-observation tip must be a sustained stripe: contiguous column
+cross-sections sharing a row, contained in an equally long immediately
+adjacent exterior stripe. The cut preserves all other actual in-box
+component pixels, even at a shared half-open boundary. This refuses an
+attached genuine glyph whose cross-section deviates from the external
+stroke. These are geometry diagnostics, not automatic text deletions.
+
 The observation band can widen orthogonally only to fully measured,
 locally supported components with majority foreground and vertical extent
 inside the original band. Their measured height is not capped by the
