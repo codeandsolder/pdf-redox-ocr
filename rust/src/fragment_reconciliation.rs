@@ -66,6 +66,12 @@ pub struct Transaction {
     pub consumed: Vec<PeerClaim>,
 }
 
+impl Transaction {
+    const fn identity(&self) -> (u32, usize) {
+        (self.page, self.line_index)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Rejection {
@@ -524,7 +530,7 @@ pub fn propose(
 
 /// Strict dominance is an evidence relation, not a reward for longer text.
 fn dominates(short: &Transaction, long: &Transaction) -> bool {
-    if (short.page, short.line_index) != (long.page, long.line_index)
+    if short.identity() != long.identity()
         || short.evidence.edge != long.evidence.edge
         || short.added_pixels >= long.added_pixels
         || short.bindings.is_empty()
@@ -596,10 +602,7 @@ fn dominates(short: &Transaction, long: &Transaction) -> bool {
 pub fn superseded(operations: &[Transaction]) -> BTreeMap<usize, Vec<usize>> {
     let mut by_original = BTreeMap::<(u32, usize), Vec<usize>>::new();
     for (i, op) in operations.iter().enumerate() {
-        by_original
-            .entry((op.page, op.line_index))
-            .or_default()
-            .push(i);
+        by_original.entry(op.identity()).or_default().push(i);
     }
     let mut result = BTreeMap::new();
     for indices in by_original.values() {
@@ -665,7 +668,7 @@ pub fn experimental_draft(
         if blocked.contains(&i) {
             continue;
         }
-        replacements.insert((op.page, op.line_index), op);
+        replacements.insert(op.identity(), op);
         consumed.extend(op.consumed.iter().map(|p| (op.page, p.line_index)));
     }
     for page in &mut draft.pages {
