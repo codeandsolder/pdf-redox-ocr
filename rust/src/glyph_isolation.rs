@@ -138,6 +138,20 @@ fn projection_runs(
     runs
 }
 
+/// Count exact occupied-column intervals in a subwindow, without computing
+/// component topology, allocating a crop or recognizing anything.
+#[cfg(any(all(feature = "pdf-integration", feature = "native-inference"), test))]
+pub(crate) fn occupied_run_count(image: &GrayImage, bounds: InkBounds, threshold: u8) -> usize {
+    let mut previous = false;
+    let mut runs = 0;
+    for x in bounds.left..bounds.right {
+        let present = (bounds.top..bounds.bottom).any(|y| image.get_pixel(x, y).0[0] < threshold);
+        runs += usize::from(present && !previous);
+        previous = present;
+    }
+    runs
+}
+
 fn measure_run(image: &GrayImage, run: InkRun, thresholds: &[u8]) -> Result<InkGroup, Error> {
     let ink = run.ink;
     let crop = InkBounds {
@@ -319,6 +333,10 @@ mod tests {
             });
             let components = regions(&image, 128, PixelClass::Ink, full(&image))?;
             let runs = projection_runs(&components, 0..components.len(), Axis::Columns);
+            assert_eq!(
+                super::occupied_run_count(&image, full(&image), 128),
+                runs.len()
+            );
             let mut actual = [false; 4];
             for run in &runs {
                 for x in run.ink.left..run.ink.right {
