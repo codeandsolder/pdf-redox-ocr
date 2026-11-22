@@ -53,6 +53,8 @@ pub mod mosaic_ocr;
 pub mod native_font_mask;
 pub mod native_images;
 pub mod native_words;
+#[cfg(any(all(feature = "pdf-integration", feature = "native-inference"), test))]
+mod orthogonal_mask;
 pub mod page_selection;
 #[cfg(feature = "pdf-integration")]
 pub mod paint_isolation;

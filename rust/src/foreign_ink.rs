@@ -24,6 +24,9 @@ pub struct EdgeStroke {
     pub inside_bounds: InkBounds,
     pub inside: StripeProfile,
     pub exterior: StripeProfile,
+    /// Exact half-open cross-section for each along-axis sample of the in-box tip.
+    /// Orthogonal strokes use one source-X span per source-Y row.
+    pub inside_sections: Vec<[u32; 2]>,
 }
 
 #[derive(Debug, Serialize)]
@@ -179,11 +182,15 @@ impl ComponentColumns {
         {
             return None;
         }
+        let inside_sections = (b.left..b.right)
+            .map(|x| self.columns.get(&x).map(|c| [c.top, c.bottom]))
+            .collect::<Option<Vec<_>>>()?;
         Some(EdgeStroke {
             component_index,
             inside_bounds: b,
             inside,
             exterior,
+            inside_sections,
         })
     }
 }
