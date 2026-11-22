@@ -52,7 +52,8 @@ impl MaskSource<'_> {
 pub struct MaskMetric {
     /// OCR text whose image pixels were suppressed.
     pub text: String,
-    /// Source pixels changed inside the original OCR polygon.
+    /// Native pixels with any changed packed sample inside the OCR polygon.
+    /// This is a count, not a color-distance measurement.
     pub changed_source_pixels: u64,
     /// OCR quad in source-local coordinates, not the page placement.
     pub source_quad: Quad,

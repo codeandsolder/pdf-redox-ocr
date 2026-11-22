@@ -376,3 +376,70 @@ fn assert_isolated_contextual_masks(
     }
     Ok(())
 }
+
+#[test]
+fn adjacent_eight_bit_palette_indices_can_change_visible_ink()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut samples = vec![0u8; 96 * 32];
+    for row in samples.as_chunks_mut::<96>().0.iter_mut().skip(8).take(16) {
+        row[16..72].fill(1);
+    }
+    let bytes = support::pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 64] /Resources << /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        support::stream("", b"0.5 g 0 0 120 2 re f q 96 0 0 32 12 12 cm /Im Do Q"),
+        support::stream("/Type /XObject /Subtype /Image /Width 96 /Height 32 /BitsPerComponent 8 /ColorSpace [/Indexed /DeviceRGB 1 <ffffff000000>]", &samples),
+    ]);
+    let tmp = tempfile::tempdir()?;
+    let file = tmp.path().join("indexed.pdf");
+    fs::write(&file, &bytes)?;
+    let doc = PdfMetadata::from_bytes(bytes.clone())?;
+    let pages = [PageNumber::new(1)?];
+    let report = enumerate_image_paints(&doc, &pages)?;
+    let line = OcrLine {
+        text: "PALETTE INDEX".into(),
+        confidence: 0.99,
+        reviewed: false,
+        quad: [
+            Point(12., 6.),
+            Point(76., 6.),
+            Point(76., 26.),
+            Point(12., 26.),
+        ],
+    };
+    let masked = mask_source_text(
+        &bytes,
+        ObjectId::new(5, 0),
+        std::slice::from_ref(&line),
+        0.97,
+    )?
+    .ok_or("one-step palette index change was overlooked")?;
+    assert_eq!(masked.metrics[0].changed_source_pixels, 56 * 16);
+    let recognized = PaintAppearances::from_object_inventory(
+        BTreeMap::from([(
+            "5:0".into(),
+            SourceObservation {
+                width: 96,
+                height: 32,
+                lines: vec![line],
+            },
+        )]),
+        &report.placements,
+    );
+    let verified = prove_mixed_source_text(
+        &file,
+        &doc,
+        &report,
+        &recognized,
+        &pages,
+        RenderPolicy {
+            dpi: 72,
+            max_side: 240,
+        },
+        0.97,
+    )?;
+    assert_eq!(verified.proofs.len(), 1, "{:#?}", verified.audited);
+    assert_eq!(verified.proofs[0].text, "PALETTE INDEX");
+    Ok(())
+}

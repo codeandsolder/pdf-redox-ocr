@@ -75,15 +75,11 @@ impl PackedSamples {
         }
     }
 
-    /// Compare channel changes using the *same relative 8/255 threshold*
-    /// across packed 1/2/4/8-bit and wide 16-bit component depths.
+    /// Count changed packed sample tuples exactly. Palette indices and
+    /// non-linear color components have no universal numerical contrast scale.
+    /// The renderer, not the sample codes, establishes visible contrast.
     pub fn pixel_changed(&self, other: &Self, x: usize, y: usize) -> bool {
-        let maximum = (1_u32 << self.bpc) - 1;
-        (0..self.components).any(|channel| {
-            let left = self.get(x, y, channel);
-            let right = other.get(x, y, channel);
-            u32::from(left.abs_diff(right)) * 255 > 8 * maximum
-        })
+        (0..self.components).any(|channel| self.get(x, y, channel) != other.get(x, y, channel))
     }
 }
 
