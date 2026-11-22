@@ -481,8 +481,8 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
         )?;
         if let Some(sampling) = &bank.source_sampling {
             eprintln!(
-                "source glyphs: {} matched from {}/{} sampled lines at {} DPI",
-                sampling.matched_glyphs, sampling.sampled_lines, sampling.attempted_lines, dpi
+                "source glyphs: {} matched from {}/{} sampled lines at {dpi} DPI",
+                sampling.matched_glyphs, sampling.sampled_lines, sampling.attempted_lines
             );
         }
     }
