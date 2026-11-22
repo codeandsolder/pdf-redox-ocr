@@ -402,15 +402,22 @@ original PDF-space quadrilaterals, line-edge contact at the segmentation
 threshold, and topology at the selected cutoffs (64/128/192/224 by default).
 Topology at a higher threshold can include additional ink at the crop edge.
 
-Version-7 line reports also enumerate local, fully sampled edge-component
+Version-8 line reports enumerate local, fully sampled edge-component
 chains, including entire neighboring glyphs. Each `boundary_extensions`
 entry records the proposed quad, newly added strip, measured component
 indices, and overlapping OCR-line or native-text region identities.
 Intersection fractions refer independently to the added strip and the
-peer quad; component intersections are bounding-quad evidence, not a
+peer quad; original-only peer intersections are included with zero strip
+coverage, and full proposed-quad coverage is reported separately; component intersections are bounding-quad evidence, not a
 pixel ownership proof. Invalid peer geometry rejects the diagnostic
-rather than silently ignoring competing observations. These proposals
-do not authorize recognition, merging, or draft changes.
+rather than silently ignoring competing observations. Each proposal also
+counts actual normalized foreground sample centers in the original
+observation, added strip and remainder of the same raster. Per-component
+and per-peer counts retain exact identity; the peer union counts coinciding
+regions only once. Peers extending outside the sample are explicitly
+marked incomplete. Membership checks are bounded by the per-line
+`--max-ink-checks` budget (32M by default), with explicit budget-exceeded
+outcomes. These proposals do not authorize recognition, merging, or draft changes.
 
 This is an inspection of visible ink groups, not a character segmentation
 guarantee. It does not compare group counts with recognized strings, assign

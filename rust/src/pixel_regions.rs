@@ -157,7 +157,12 @@ impl Flood<'_> {
         }
     }
 
-    fn region(&mut self, seed: usize, observation: InkBounds) -> Result<PixelRegion, Error> {
+    fn region(
+        &mut self,
+        seed: usize,
+        observation: InkBounds,
+        mut visit: impl FnMut(u32, u32),
+    ) -> Result<PixelRegion, Error> {
         self.enqueue(seed);
         let mut bounds = InkBounds {
             left: self.image.width(),
@@ -181,6 +186,7 @@ impl Flood<'_> {
             sums[0] += f64::from(x);
             sums[1] += f64::from(y);
             support.record(x, y, observation);
+            visit(x, y);
             self.neighbors(index);
         }
         let denominator = area
@@ -202,6 +208,18 @@ pub(crate) fn regions(
     threshold: u8,
     class: PixelClass,
     observation: InkBounds,
+) -> Result<Vec<PixelRegion>, Error> {
+    regions_visit(image, threshold, class, observation, |_, _, _| {})
+}
+
+/// Visit every member pixel exactly once with its resulting component index.
+/// The index is identical to that returned by the ordinary regions traversal.
+pub(crate) fn regions_visit(
+    image: &GrayImage,
+    threshold: u8,
+    class: PixelClass,
+    observation: InkBounds,
+    mut visit: impl FnMut(usize, u32, u32),
 ) -> Result<Vec<PixelRegion>, Error> {
     let (width, height) = image.dimensions();
     let total = usize::try_from(u64::from(width) * u64::from(height))
@@ -229,7 +247,8 @@ pub(crate) fn regions(
     let mut result = Vec::new();
     for (seed, &value) in image.as_raw().iter().enumerate() {
         if !flood.visited[seed] && class.accepts(value, threshold) {
-            result.push(flood.region(seed, observation)?);
+            let index = result.len();
+            result.push(flood.region(seed, observation, |x, y| visit(index, x, y))?);
         }
     }
     Ok(result)
