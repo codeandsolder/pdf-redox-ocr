@@ -45,6 +45,20 @@ pub struct CandidateAnchor {
     pub entry_interval: [f64; 2],
 }
 
+impl CandidateAnchor {
+    /// Whether a token can occupy a run under the measured injective assignment.
+    #[must_use]
+    pub fn supports_run(&self, run: usize) -> bool {
+        match self.anchor.alignment {
+            RunAlignment::Unique { run: assigned } => assigned == run,
+            RunAlignment::Ambiguous { first, last } => {
+                (first..=last).contains(&run) && self.anchor.candidate_runs.contains(&run)
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Per-hypothesis evidence; unlocalized hypotheses remain actual model
 /// hypotheses and are never silently replaced with greedy geometry.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]

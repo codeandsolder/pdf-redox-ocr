@@ -181,6 +181,15 @@ impl RefinementRecognizer {
         Ok(result)
     }
 
+    pub(crate) fn recognize_observed(
+        &mut self,
+        crop: (&RgbImage, SourceInk),
+        primary: &str,
+    ) -> Result<Recognition, Error> {
+        let [result] = self.recognize_crops([crop], Some(primary))?;
+        Ok(result)
+    }
+
     pub(crate) fn recognize_pair(
         &mut self,
         original: (&RgbImage, SourceInk),
@@ -222,7 +231,7 @@ impl RefinementRecognizer {
                     .map(std::borrow::Cow::as_ref)
                     .collect::<Vec<_>>();
                 let prediction = if let Some(primary) = primary {
-                    session.predict_pair(&pixels, primary)?
+                    session.predict_with_primary(&pixels, primary)?
                 } else {
                     session.predict(&pixels, CharacterEvidence::Ctc)?
                 };

@@ -116,15 +116,10 @@ impl Partition {
 }
 
 fn supports(anchor: &CandidateAnchor, group: usize, affected: bool) -> bool {
-    let a = &anchor.anchor;
-    match a.alignment {
-        RunAlignment::Unique { run } => group == run,
-        RunAlignment::Ambiguous { first, last } => {
-            (first..=last).contains(&group) && a.candidate_runs.contains(&group)
-        }
-        RunAlignment::NoInjectiveAssignment => affected && a.candidate_runs.contains(&group),
-        _ => false,
-    }
+    anchor.supports_run(group)
+        || (affected
+            && anchor.anchor.alignment == RunAlignment::NoInjectiveAssignment
+            && anchor.anchor.candidate_runs.contains(&group))
 }
 
 /// Ordered dynamic program. In unaffected groups the old transcription

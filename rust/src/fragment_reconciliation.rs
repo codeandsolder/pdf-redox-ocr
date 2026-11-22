@@ -68,6 +68,7 @@ pub enum Operation {
     Expansion(Expansion),
     Contraction(crate::stroke_reconciliation::Contraction),
     MaskCorrection(crate::mask_reconciliation::MaskCorrection),
+    Insertion(crate::source_insertion::SourceInsertion),
 }
 
 #[derive(Debug, Serialize)]
@@ -108,6 +109,9 @@ pub enum Rejection {
     UnlocalizedRemovedTokens,
     ForegroundPartitionMismatch,
     UnlocalizedMaskChange,
+    NotLiteralInsertion,
+    UnlocalizedInsertedTokens,
+    InsufficientIndependentRuns,
 }
 
 /// Non-space scalar range in the longer literal edge extension.

@@ -399,34 +399,18 @@ impl CtcEvidence {
         });
     }
 
-    /// Score the same actual primary and revised sequences on both sides of
-    /// a counterfactual, even when one spelling falls outside the beam.
-    /// The probability slices are borrowed from each original inference.
+    /// Measure the supplied original observation independently of beam rank.
+    /// No requested sequence participates in recognition candidate selection.
     #[cfg(any(feature = "native-inference", test))]
-    pub(crate) fn pair_queries(
-        labels: &[char],
-        before: &mut Self,
-        before_rows: &[&[f32]],
-        after: &mut Self,
-        after_rows: &[&[f32]],
-        primary: &str,
-    ) {
+    pub(crate) fn query_primary(&mut self, labels: &[char], rows: &[&[f32]], primary: &str) {
         let key = crate::refinement_evidence::canonical(primary);
         let matches = |text: &str| crate::refinement_evidence::canonical(text) == key;
-        let Some(winner) = after.hypotheses.first() else {
-            return;
-        };
-        if matches(&winner.text) {
-            return;
-        }
-        let revised = winner.classes.clone();
-        if before.strongest_matching(matches).is_none() {
+        if self.strongest_matching(matches).is_none() {
             // Preserve the actual greedy sequence when it represents the
             // primary observation; otherwise use a uniquely encodable literal.
-            let primary_classes = if matches(&before.greedy_text) {
+            let primary_classes = if matches(&self.greedy_text) {
                 Some(
-                    before
-                        .emissions
+                    self.emissions
                         .iter()
                         .filter_map(|e| e.classes.first().map(|c| c.class_index))
                         .collect::<Vec<_>>(),
@@ -446,9 +430,33 @@ impl CtcEvidence {
                     .collect()
             };
             if let Some(classes) = primary_classes {
-                before.query(labels, before_rows, &classes);
+                self.query(labels, rows, &classes);
             }
         }
+    }
+
+    /// Score the same actual primary and revised sequences on both sides of
+    /// a counterfactual, even when one spelling falls outside the beam.
+    /// The probability slices are borrowed from each original inference.
+    #[cfg(any(feature = "native-inference", test))]
+    pub(crate) fn pair_queries(
+        labels: &[char],
+        before: &mut Self,
+        before_rows: &[&[f32]],
+        after: &mut Self,
+        after_rows: &[&[f32]],
+        primary: &str,
+    ) {
+        before.query_primary(labels, before_rows, primary);
+        let key = crate::refinement_evidence::canonical(primary);
+        let matches = |text: &str| crate::refinement_evidence::canonical(text) == key;
+        let Some(winner) = after.hypotheses.first() else {
+            return;
+        };
+        if matches(&winner.text) {
+            return;
+        }
+        let revised = winner.classes.clone();
         let Some(primary_classes) = before
             .strongest_matching(matches)
             .and_then(|r| before.sequence(r))
