@@ -221,7 +221,7 @@ impl SampleWindow {
     /// margin, while retaining the existing orthogonal and opposite margins.
     /// Bounds are in original-frame pixels, not a projected page AABB.
     #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
-    pub(crate) fn cover_peer(
+    pub fn cover_peer(
         self,
         frame: LineFrame,
         inside: &impl Fn(Point) -> bool,

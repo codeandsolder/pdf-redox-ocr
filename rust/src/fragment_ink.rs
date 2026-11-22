@@ -150,7 +150,7 @@ pub struct Sample<'a> {
 }
 
 /// Charge every raster position and every potential peer membership.
-pub(crate) fn membership_checks(width: u32, height: u32, peers: usize) -> u64 {
+pub fn membership_checks(width: u32, height: u32, peers: usize) -> u64 {
     u64::from(width)
         .saturating_mul(u64::from(height))
         .saturating_mul(u64::try_from(peers).unwrap_or(u64::MAX).saturating_add(1))
