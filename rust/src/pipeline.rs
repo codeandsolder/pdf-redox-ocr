@@ -401,7 +401,7 @@ impl PipelineResult {
     #[must_use]
     pub const fn audit(&self) -> PipelineAudit<'_> {
         PipelineAudit {
-            schema_version: 19,
+            schema_version: 20,
             preparation: None,
             pdf_sha256: self.draft.pdf_sha256.as_str(),
             model: self.draft.model.as_str(),

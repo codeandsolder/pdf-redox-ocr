@@ -9,7 +9,10 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::Error;
+use crate::{
+    Error,
+    ctc_alignment::{SequenceAlignment, align},
+};
 
 const ROW_CLASSES: usize = 8;
 const BEAM_WIDTH: usize = 12;
@@ -40,6 +43,7 @@ pub struct SequenceHypothesis {
     pub classes: Vec<usize>,
     /// Natural logarithm of retained path probability mass before normalization.
     pub log_mass_lower_bound: f64,
+    pub alignment: SequenceAlignment,
 }
 
 /// Diagnostic evidence from the same inference as the ordinary greedy output.
@@ -189,7 +193,7 @@ impl PrefixBeam {
         Ok(())
     }
 
-    fn finish(self, labels: &[char]) -> Vec<SequenceHypothesis> {
+    fn finish(self, labels: &[char], rows: &[&[f32]]) -> Vec<SequenceHypothesis> {
         let mut ranked = self.paths.into_iter().collect::<Vec<_>>();
         ranked.sort_unstable_by(|(a, x), (b, y)| {
             y.total().total_cmp(&x.total()).then_with(|| a.cmp(b))
@@ -199,6 +203,7 @@ impl PrefixBeam {
             .into_iter()
             .map(|(classes, mass)| SequenceHypothesis {
                 text: classes.iter().map(|&index| labels[index]).collect(),
+                alignment: align(rows, &classes),
                 classes,
                 log_mass_lower_bound: self.log_scale + mass.total().ln(),
             })
@@ -220,12 +225,13 @@ impl CtcEvidence {
         expected_text: &str,
         expected_columns: &[usize],
     ) -> Result<Self, Error> {
+        let rows = rows.into_iter().collect::<Vec<_>>();
         let mut beam = PrefixBeam::new();
         let mut emissions = Vec::new();
         let mut greedy_text = String::new();
         let mut previous = 0;
         let mut sequence_length = 0;
-        for (column, row) in rows.into_iter().enumerate() {
+        for (column, &row) in rows.iter().enumerate() {
             let classes = top_classes(row, labels)?;
             let winner = classes.first().ok_or_else(|| invalid("empty CTC column"))?;
             let index = winner.class_index;
@@ -257,7 +263,7 @@ impl CtcEvidence {
             beam_width: BEAM_WIDTH,
             greedy_text,
             emissions,
-            hypotheses: beam.finish(labels),
+            hypotheses: beam.finish(labels, &rows),
         })
     }
 }

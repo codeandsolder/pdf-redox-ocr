@@ -462,7 +462,7 @@ pub fn refine_draft(
         .filter(|p| matches!(p.outcome, RefinementOutcome::Recognized { .. }))
         .count();
     let report = RefinementReport {
-        schema_version: 3,
+        schema_version: 4,
         pdf_sha256: source.pdf_sha256.clone(),
         source_model: source.model.clone(),
         secondary_model: secondary_model.to_owned(),
@@ -770,6 +770,7 @@ mod tests {
             },
             |_| {
                 Ok(Recognition {
+                    source_ink: None,
                     views: Vec::new(),
                     decision: RefinementDecision::Abstained,
                 })
@@ -814,6 +815,7 @@ mod tests {
             calls += 1;
             assert!(image.width() > 2 && image.height() > 2);
             Ok(Recognition {
+                source_ink: None,
                 views: Vec::new(),
                 decision: RefinementDecision::Greedy {
                     text: "CAPAC1TOR".into(),
