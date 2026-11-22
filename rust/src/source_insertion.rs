@@ -234,11 +234,11 @@ mod tests {
         }
     }
 
-    fn positions(possible: &[usize], required: &[usize]) -> Option<InsertionPositions> {
-        Some(InsertionPositions {
+    fn positions(possible: &[usize], required: &[usize]) -> InsertionPositions {
+        InsertionPositions {
             possible: possible.to_vec(),
             required: required.to_vec(),
-        })
+        }
     }
 
     #[test]
@@ -252,7 +252,7 @@ mod tests {
                 &[0, 1, 2],
                 &[true, true, true]
             ),
-            positions(&[1], &[1])
+            Some(positions(&[1], &[1]))
         );
         assert_eq!(
             embedding(
@@ -288,20 +288,20 @@ mod tests {
         let a = anchor('A', vec![0, 1]);
         assert_eq!(
             embedding(&[&a], &['A', 'A'], &[0, 1], &[true, true]),
-            positions(&[0, 1], &[])
+            Some(positions(&[0, 1], &[]))
         );
         assert_eq!(
             embedding(&[&a], &['A', 'A'], &[0, 1], &[false, true]),
-            positions(&[1], &[1])
+            Some(positions(&[1], &[1]))
         );
         assert_eq!(
             embedding(&[&a], &['A', 'A', 'B'], &[0, 1, 2], &[true, true, true]),
-            positions(&[0, 1, 2], &[2])
+            Some(positions(&[0, 1, 2], &[2]))
         );
         let a = anchor('A', vec![0]);
         assert_eq!(
             embedding(&[&a], &['A', 'A'], &[0, 1], &[true, true]),
-            positions(&[1], &[1])
+            Some(positions(&[1], &[1]))
         );
     }
 
