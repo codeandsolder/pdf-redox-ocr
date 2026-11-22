@@ -740,7 +740,12 @@ Schema-15 `source_rasters` and `source_observations` contain a `variants` map
 keyed by document-local appearance ID (each entry holds `source_id` and
 `value`), and a `paint_bindings` map indexed by page and paint index. RGB
 SHA256 and native dimensions identify each raster; visibility audits identify
-the exact appearance. Poppler retains its object-only inventory semantics.
+the exact appearance. Each paint records its native packed-sample layout.
+Named XObject color-space aliases require actual differential visibility proof,
+since renderers may disagree on these nonstandard definitions; object-only
+Poppler extraction skips them. Counterfactual masks retain the original
+color-space reference and exact Form path, with cache identity including
+appearance and resolved sample component count.
 `direct_decode` records matched, accepted, decoded and reused occurrences,
 accepted sources and appearances, pixel counts, and per-paint/page rejections.
 The resident source count and aggregate pixel ceilings apply to distinct

@@ -940,10 +940,10 @@ impl RecognitionBackend for PaletteRecognizer {
     }
 
     fn recognize_pixels(&self, rgb: RgbImage) -> Result<RasterRecognition, Error> {
-        assert_eq!(rgb.dimensions(), (80, 40));
         let text = match rgb.get_pixel(0, 0).0 {
             [255, 0, 0] => "RED LABEL",
             [0, 0, 255] => "BLUE LABEL",
+            [255, 255, 255] => return Ok(RasterRecognition::default()),
             other => return Err(Error::Inference(format!("unexpected palette {other:?}"))),
         };
         Ok(vec![PixelLine {
@@ -961,7 +961,7 @@ impl RecognitionBackend for PaletteRecognizer {
 }
 
 #[test]
-fn distinct_appearances_are_recognized_and_projected_to_the_correct_page()
+fn distinct_appearances_are_bound_but_require_actual_renderer_visibility()
 -> Result<(), Box<dyn std::error::Error>> {
     let bytes = support::pdf(&[
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
@@ -985,11 +985,36 @@ fn distinct_appearances_are_recognized_and_projected_to_the_correct_page()
         },
     )?
     .recognize(&PaletteRecognizer, |_| {})?;
-    assert_eq!(result.stats.image_source_only_pages, 2);
+    assert_eq!(result.stats.image_source_only_pages, 0);
+    assert_eq!(result.stats.page_fallback_pages, 2);
     assert_eq!(result.source_observations.len(), 2);
     assert_eq!(result.source_rasters.len(), 2);
-    assert_eq!(result.draft.pages[0].lines[0].text, "RED LABEL");
-    assert_eq!(result.draft.pages[1].lines[0].text, "BLUE LABEL");
+    for (paint, expected) in result
+        .paints
+        .placements
+        .iter()
+        .zip(["RED LABEL", "BLUE LABEL"])
+    {
+        let (_, source) = result
+            .source_observations
+            .get(paint)
+            .ok_or("missing appearance")?;
+        assert_eq!(source.lines[0].text, expected);
+    }
+    assert!(result.draft.pages.iter().all(|page| page.lines.is_empty()));
+    assert!(result.visibility.proofs.is_empty());
+    let legacy = PreparedOcr::open(
+        &path,
+        None,
+        PipelinePolicy {
+            native_image_decoder: pdf_redox_ocr::pipeline::NativeImageDecoder::Poppler,
+            raster_mode: RasterMode::All,
+            ..policy()
+        },
+    )?
+    .recognize(&PaletteRecognizer, |_| {})?;
+    assert!(legacy.source_observations.is_empty());
+    assert!(legacy.draft.pages.iter().all(|page| page.lines.is_empty()));
     assert_eq!(fs::read(path)?, bytes);
     Ok(())
 }

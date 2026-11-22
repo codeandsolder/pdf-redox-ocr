@@ -875,6 +875,16 @@ impl PreparedOcr {
             .map(|paint| paint.source_id.as_str())
             .collect::<BTreeSet<_>>();
         source_ids.retain(|id| eligible_elsewhere.contains(id.as_str()));
+        if self.policy.native_image_decoder == NativeImageDecoder::Poppler {
+            // Object-only extraction does not preserve the resolved named
+            // color space at each actual paint. Avoid spending its budget
+            // on images without an admissible object-level binding.
+            for paint in &scanned.placements {
+                if paint.sample_layout.contextual {
+                    source_ids.remove(&paint.source_id);
+                }
+            }
+        }
         let plan = NativeSourcePlan::from_paints(source_ids, scanned)?;
         progress(format!(
             "native source extraction planned: {} sources across {} candidate pages",

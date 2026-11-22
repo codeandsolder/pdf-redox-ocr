@@ -12,7 +12,6 @@ use std::{
 };
 
 use image::RgbImage;
-use pdf_redox::ObjectId;
 use tempfile::NamedTempFile;
 
 use crate::{
@@ -25,7 +24,9 @@ use crate::{
     pdf_metadata::PdfMetadata,
     rasterize::{RenderPolicy, render_rgb_page},
     source_appearances::{AppearanceId, PaintAppearances},
-    source_mask::{MaskedSourceObject, mask_candidate, mask_source_object, mask_source_subset},
+    source_mask::{
+        MaskSource, MaskedSourceObject, mask_candidate, mask_source_object, mask_source_subset,
+    },
     source_ocr::{SourceObservation, map_observations_to_paint},
 };
 
@@ -153,7 +154,7 @@ pub(crate) struct MixedVerifier<'a> {
     recognized: &'a PaintAppearances<SourceObservation>,
     policy: RenderPolicy,
     minimum_confidence: f64,
-    masked_cache: BTreeMap<AppearanceId, Option<MaskedSourceObject>>,
+    masked_cache: BTreeMap<(AppearanceId, usize), Option<MaskedSourceObject>>,
 }
 
 impl<'a> MixedVerifier<'a> {
@@ -221,11 +222,14 @@ impl<'a> MixedVerifier<'a> {
             {
                 continue;
             }
-            let id = ObjectId::new(paint.object_number, i32::from(paint.generation));
-            if !self.masked_cache.contains_key(&appearance_id) {
+            let Some(components) = paint.sample_layout.components else {
+                continue;
+            };
+            let mask_identity = (appearance_id, components);
+            if !self.masked_cache.contains_key(&mask_identity) {
                 let masked = match mask_source_object(
                     self.document.source(),
-                    id,
+                    MaskSource::Paint(paint),
                     &source.lines,
                     self.minimum_confidence,
                 ) {
@@ -233,11 +237,11 @@ impl<'a> MixedVerifier<'a> {
                     Err(Error::Invalid(_)) => None,
                     Err(error) => return Err(error),
                 };
-                self.masked_cache.insert(appearance_id, masked);
+                self.masked_cache.insert(mask_identity, masked);
             }
             let Some(masked) = self
                 .masked_cache
-                .get(&appearance_id)
+                .get(&mask_identity)
                 .and_then(Option::as_ref)
             else {
                 continue;
@@ -267,6 +271,7 @@ impl<'a> MixedVerifier<'a> {
                     if !chosen.is_empty() {
                         let key = MaskKey {
                             appearance_id,
+                            components,
                             indices: chosen.indices.clone(),
                         };
                         if chosen.indices.len() == audit.candidate_lines {
@@ -304,6 +309,7 @@ impl<'a> MixedVerifier<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct MaskKey {
     appearance_id: AppearanceId,
+    components: usize,
     indices: Vec<usize>,
 }
 
@@ -502,10 +508,14 @@ impl PageProbe<'_> {
         let masked = variants
             .entry(key.clone())
             .or_insert_with(|| {
-                let id = ObjectId::new(paint.object_number, i32::from(paint.generation));
-                mask_source_subset(self.document.source(), id, &source.lines, &key.indices)
-                    .ok()
-                    .flatten()
+                mask_source_subset(
+                    self.document.source(),
+                    MaskSource::Paint(paint),
+                    &source.lines,
+                    &key.indices,
+                )
+                .ok()
+                .flatten()
             })
             .as_ref()?;
         let proof = self

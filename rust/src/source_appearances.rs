@@ -34,6 +34,7 @@ impl<T> Default for PaintAppearances<T> {
 
 impl<T> PaintAppearances<T> {
     /// Import an object-only raster inventory, as produced by pdfimages.
+    /// Named resource-dependent images require an actual appearance binding.
     #[must_use]
     pub fn from_object_inventory(values: BTreeMap<String, T>, paints: &[ImagePaint]) -> Self {
         let mut variants = values
@@ -50,6 +51,7 @@ impl<T> PaintAppearances<T> {
         let mut paint_bindings = BTreeMap::<u32, BTreeMap<u32, AppearanceId>>::new();
         for paint in paints {
             if paint.unsafe_reasons.is_empty()
+                && !paint.sample_layout.contextual
                 && let Some(&id) = ids.get(paint.source_id.as_str())
             {
                 paint_bindings

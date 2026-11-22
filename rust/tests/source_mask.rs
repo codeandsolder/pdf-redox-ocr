@@ -84,7 +84,7 @@ mod support;
 fn masks_preserve_exact_samples_of_neighboring_excluded_labels()
 -> Result<(), Box<dyn std::error::Error>> {
     use pdf_redox::{OwnedObject, StreamData};
-    use pdf_redox_ocr::source_mask::{mask_source_object, mask_source_subset};
+    use pdf_redox_ocr::source_mask::{MaskSource, mask_source_object, mask_source_subset};
 
     let mut samples = vec![255_u8; 96 * 32];
     for row in samples.as_chunks_mut::<96>().0.iter_mut().skip(8).take(16) {
@@ -113,7 +113,7 @@ fn masks_preserve_exact_samples_of_neighboring_excluded_labels()
         ],
         reviewed: false,
     };
-    let id = ObjectId::new(5, 0);
+    let id = MaskSource::Object(ObjectId::new(5, 0));
     let selected = line("Selected", 0.99, 10.0, 50.0);
     let low_confidence = line("Neighbor", 0.5, 49.0, 80.0);
     let thresholded = mask_source_object(&source, id, &[selected.clone(), low_confidence], 0.97)?

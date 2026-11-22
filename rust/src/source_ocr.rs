@@ -125,7 +125,8 @@ pub struct SourceOnlyResult {
 /// A recognized image is not enough: all actual painted images must be
 /// decoded/recognized, all source quads inside the native raster and known clips, there must be
 /// at least one positive text observation, and every image layer must be
-/// mutually non-overlapping.
+/// mutually non-overlapping. Named XObject color-space aliases require a
+/// separate rendered visibility proof, even if every paint decoded natively.
 ///
 /// # Errors
 /// Returns an error for invalid page numbering; unusable source observations trigger page fallback.
@@ -148,7 +149,11 @@ pub fn source_only_pages(
         let mut evidence = Vec::with_capacity(paints.len());
         for paint in paints {
             let known_source = recognized.get(paint);
-            let mut safe = paint.unsafe_reasons.is_empty() && known_source.is_some();
+            // Named XObject color spaces can be decoded by Hayro but omitted
+            // by the actual page renderer. They require a differential proof.
+            let mut safe = paint.unsafe_reasons.is_empty()
+                && !paint.sample_layout.contextual
+                && known_source.is_some();
             if safe && let Some((_, observation)) = known_source {
                 match map_observations_to_paint(observation, paint) {
                     Ok(mapped) => {
@@ -236,6 +241,7 @@ mod tests {
             generation: 0,
             width: 200,
             height: 100,
+            sample_layout: Default::default(),
             ctm: [200.0, 0.0, 0.0, 100.0, tx, 20.0],
             page_quad: [
                 Point(tx, 20.0),
@@ -301,6 +307,7 @@ mod tests {
                 generation: 0,
                 width: 200,
                 height: 100,
+                sample_layout: Default::default(),
                 ctm: [200.0, 0.0, 0.0, 100.0, 20.0, 20.0],
                 page_quad: [
                     Point(20.0, 20.0),

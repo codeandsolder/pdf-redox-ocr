@@ -59,6 +59,8 @@ pub mod recognition;
 pub mod refinement;
 pub mod reviewed_glyphs;
 #[cfg(feature = "pdf-integration")]
+pub mod sample_layout;
+#[cfg(feature = "pdf-integration")]
 pub mod source_appearances;
 #[cfg(feature = "pdf-integration")]
 pub mod source_mask;

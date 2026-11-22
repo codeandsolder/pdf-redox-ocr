@@ -170,3 +170,209 @@ fn native_formats_admit_exclusively_pixel_verified_source_labels()
     );
     Ok(())
 }
+
+mod support;
+
+fn contextual_palette_fixture() -> Vec<u8> {
+    let mut samples = vec![0u8; 12 * 32];
+    for row in samples.as_chunks_mut::<12>().0.iter_mut().skip(8).take(16) {
+        row[2..9].fill(255);
+    }
+    support::pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 64] /Resources << /XObject << /A 5 0 R /B 6 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        support::stream("", b"0.5 g 0 0 240 2 re f q 1 0 0 1 12 12 cm /A Do Q q 1 0 0 1 132 12 cm /B Do Q"),
+        support::stream("/Type /XObject /Subtype /Form /BBox [0 0 96 32] /Resources << /ColorSpace << /Local [/Indexed /DeviceRGB 1 <ffffff000000>] >> /XObject << /Im 7 0 R >> >>", b"q 96 0 0 32 0 0 cm /Im Do Q"),
+        support::stream("/Type /XObject /Subtype /Form /BBox [0 0 96 32] /Resources << /ColorSpace << /Local [/Indexed /DeviceRGB 1 <ffff000000ff>] >> /XObject << /Im 7 0 R >> >>", b"q 96 0 0 32 0 0 cm /Im Do Q"),
+        support::stream("/Type /XObject /Subtype /Image /Width 96 /Height 32 /BitsPerComponent 1 /ColorSpace /Local", &samples),
+    ])
+}
+
+#[test]
+fn contextual_palette_masks_preserve_form_appearances_without_false_visibility()
+-> Result<(), Box<dyn std::error::Error>> {
+    use pdf_redox_ocr::{direct_images::direct_native_images, native_images::NativeImageBudget};
+    use std::collections::BTreeSet;
+
+    let bytes = contextual_palette_fixture();
+    let tmp = tempfile::tempdir()?;
+    let file = tmp.path().join("context.pdf");
+    fs::write(&file, &bytes)?;
+    let doc = PdfMetadata::from_bytes(bytes)?;
+    let pages = [PageNumber::new(1)?];
+    let report = enumerate_image_paints(&doc, &pages)?;
+    assert_eq!(report.placements.len(), 2);
+    assert!(
+        report
+            .placements
+            .iter()
+            .all(|p| p.sample_layout.contextual && p.sample_layout.components == Some(1))
+    );
+    let decoded = direct_native_images(
+        &doc,
+        &pages,
+        &BTreeSet::from(["7:0".into()]),
+        &report.placements,
+        NativeImageBudget::default(),
+    )?;
+    assert_eq!(
+        decoded.stats.accepted_appearances, 2,
+        "{:#?}",
+        decoded.stats
+    );
+    let recognized = contextual_observations(&decoded.appearances);
+    let verified = prove_mixed_source_text(
+        &file,
+        &doc,
+        &report,
+        &recognized,
+        &pages,
+        RenderPolicy {
+            dpi: 72,
+            max_side: 240,
+        },
+        0.97,
+    )?;
+    // Poppler rejects nonstandard named XObject color spaces; their native
+    // decoding alone cannot prove that any page pixels are actually visible.
+    assert!(verified.proofs.is_empty(), "{:#?}", verified.audited);
+    assert_eq!(verified.audited.len(), 2);
+    assert_eq!(verified.audited[0].paint_index, 0);
+    assert_eq!(verified.audited[1].paint_index, 1);
+    assert_ne!(
+        verified.audited[0].appearance_id,
+        verified.audited[1].appearance_id
+    );
+    assert_isolated_contextual_masks(&doc, &report, &decoded.appearances, &recognized, &pages)?;
+    let unbound = PaintAppearances::from_object_inventory(
+        BTreeMap::from([(
+            "7:0".into(),
+            recognized
+                .variants
+                .values()
+                .next()
+                .ok_or("missing recognition")?
+                .value
+                .clone(),
+        )]),
+        &report.placements,
+    );
+    assert!(
+        unbound.is_empty(),
+        "object-only decoder cannot prove contextual aliases"
+    );
+    Ok(())
+}
+
+fn contextual_observations(
+    decoded: &PaintAppearances<image::RgbImage>,
+) -> PaintAppearances<SourceObservation> {
+    use pdf_redox_ocr::source_appearances::SourceAppearance;
+    PaintAppearances {
+        variants: decoded
+            .variants
+            .iter()
+            .map(|(&id, appearance)| {
+                let text = if appearance.value.get_pixel(0, 0).0 == [255, 255, 255] {
+                    "BLACK LABEL"
+                } else {
+                    "BLUE LABEL"
+                };
+                (
+                    id,
+                    SourceAppearance {
+                        source_id: appearance.source_id.clone(),
+                        value: SourceObservation {
+                            width: 96,
+                            height: 32,
+                            lines: vec![OcrLine {
+                                text: text.into(),
+                                confidence: 0.99,
+                                reviewed: false,
+                                quad: [
+                                    Point(12., 6.),
+                                    Point(76., 6.),
+                                    Point(76., 26.),
+                                    Point(12., 26.),
+                                ],
+                            }],
+                        },
+                    },
+                )
+            })
+            .collect(),
+        paint_bindings: decoded.paint_bindings.clone(),
+    }
+}
+
+fn assert_isolated_contextual_masks(
+    doc: &PdfMetadata,
+    report: &pdf_redox_ocr::paint_scan::PaintReport,
+    decoded: &PaintAppearances<image::RgbImage>,
+    recognized: &PaintAppearances<SourceObservation>,
+    pages: &[PageNumber],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use pdf_redox_ocr::{
+        direct_images::direct_native_images,
+        native_images::NativeImageBudget,
+        paint_isolation::{PaintReplacement, isolate_source_paints},
+        source_mask::{MaskSource, mask_source_object},
+    };
+    for (index, paint) in report.placements.iter().enumerate() {
+        let (_, observation) = recognized
+            .get(paint)
+            .ok_or("missing contextual observation")?;
+        let masked = mask_source_object(
+            doc.source(),
+            MaskSource::Paint(paint),
+            &observation.lines,
+            0.97,
+        )?
+        .ok_or("contextual sample mask unavailable")?;
+        assert!(masked.metrics[0].changed_source_pixels > 500);
+        let treatment = isolate_source_paints(
+            doc,
+            [PaintReplacement {
+                image: masked.object,
+                paints: vec![paint],
+            }],
+        )?;
+        let treatment = PdfMetadata::from_bytes(treatment)?;
+        let after = enumerate_image_paints(&treatment, pages)?;
+        let wanted = after
+            .placements
+            .iter()
+            .map(|p| p.source_id.clone())
+            .collect();
+        let images = direct_native_images(
+            &treatment,
+            pages,
+            &wanted,
+            &after.placements,
+            NativeImageBudget::default(),
+        )?;
+        for (i, (original, replaced)) in report.placements.iter().zip(&after.placements).enumerate()
+        {
+            let before_rgb = decoded
+                .get(original)
+                .ok_or("original appearance missing")?
+                .1;
+            let after_rgb = images
+                .appearances
+                .get(replaced)
+                .ok_or("treatment appearance missing")?
+                .1;
+            if i == index {
+                assert!(
+                    after_rgb
+                        .pixels()
+                        .all(|pixel| pixel == before_rgb.get_pixel(0, 0))
+                );
+            } else {
+                assert_eq!(before_rgb, after_rgb);
+            }
+        }
+    }
+    Ok(())
+}
