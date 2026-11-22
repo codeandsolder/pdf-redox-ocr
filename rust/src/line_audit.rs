@@ -13,6 +13,7 @@ use crate::{
     Error, PageNumber,
     boundary_ink::{BoundaryEvidence, audit_edge_extensions, measured_body_band, search_padding},
     draft::{DraftPage, OcrDraft, OcrLine, sha256_file},
+    foreign_ink::audit_contractions,
     fragment_ink::Sample,
     geometry::{DisplayMapper, PageBox, Point, Quad, QuadBounds},
     glyph_appearance::GlyphShape,
@@ -26,6 +27,7 @@ use crate::{
     rasterize::{calculate_crop, render_crop},
 };
 
+pub use crate::foreign_ink::{ContractionEvidence, EdgeStroke, StripeProfile};
 pub use crate::fragment_ink::{ComponentInk, InkAccounting, InkCounts};
 
 /// Native source resolution and ink measurement settings.
@@ -175,6 +177,12 @@ pub struct MappedBoundaryExtension {
     pub ink_accounting: InkAccounting,
 }
 
+#[derive(Debug, Serialize)]
+pub struct MappedEdgeContraction {
+    pub evidence: ContractionEvidence,
+    pub proposed_quad: Quad,
+}
+
 /// Audit an original OCR observation without assigning text to individual ink groups.
 #[derive(Debug, Serialize)]
 pub struct AuditedLine {
@@ -198,6 +206,9 @@ pub struct AuditedLine {
     pub leaders: Vec<MappedLeader>,
     /// Candidate extensions in the original classified reading-order frame.
     pub boundary_extensions: Vec<MappedBoundaryExtension>,
+    /// Measured only by the explicit source line audit; None if not requested
+    /// or the shared membership budget is exhausted. Never a deletion decision.
+    pub foreign_edge_contractions: Option<Vec<MappedEdgeContraction>>,
 }
 
 /// Provenance-bound geometric evidence, not an OCR replacement draft.
@@ -400,6 +411,7 @@ pub(crate) fn audit_line(
         supported_bands,
         leaders,
         boundary_extensions: Vec::new(),
+        foreign_edge_contractions: None,
     };
     Ok(SampledLine {
         audit,
@@ -412,6 +424,36 @@ pub(crate) fn audit_line(
 }
 
 impl SampledLine {
+    fn measure_contractions(
+        &mut self,
+        policy: &LineAuditPolicy,
+        remaining_checks: &mut u64,
+    ) -> Result<(), Error> {
+        let components = self
+            .audit
+            .components
+            .iter()
+            .map(|c| &c.component)
+            .collect::<Vec<_>>();
+        let contractions = audit_contractions(
+            &self.normalized,
+            policy.segmentation_threshold,
+            self.audit.observation_bounds,
+            &components,
+            remaining_checks,
+        )?;
+        self.audit.foreign_edge_contractions = contractions.map(|contractions| {
+            contractions
+                .into_iter()
+                .map(|evidence| MappedEdgeContraction {
+                    proposed_quad: self.window.quad(self.frame, evidence.retained),
+                    evidence,
+                })
+                .collect()
+        });
+        Ok(())
+    }
+
     pub(crate) fn measure_extensions(
         &mut self,
         page: &DraftPage,
@@ -652,6 +694,7 @@ pub fn audit_lines(
             let mut sampled = audit_line(pdf, &metadata, page, index, line, policy, None)?;
             let mut remaining_checks = policy.max_ink_checks;
             sampled.measure_extensions(original, policy, [0; 2], &mut remaining_checks)?;
+            sampled.measure_contractions(policy, &mut remaining_checks)?;
             lines.push(sampled.audit);
         }
     }
@@ -661,7 +704,7 @@ pub fn audit_lines(
         ));
     }
     Ok(LineAuditReport {
-        schema_version: 13,
+        schema_version: 14,
         pdf_sha256: draft.pdf_sha256.clone(),
         draft_model: draft.model.clone(),
         dpi: policy.dpi,

@@ -20,6 +20,8 @@ mod disjoint_set;
 pub mod draft;
 pub mod draft_compare;
 #[cfg(any(feature = "pdf-integration", test))]
+mod foreign_ink;
+#[cfg(any(feature = "pdf-integration", test))]
 mod fragment_ink;
 #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
 mod fragment_reconciliation;
