@@ -186,7 +186,7 @@ fn cached_mask<'a>(
             let masked = match mask_source_object(
                 document.source(),
                 MaskSource::Paint(paint),
-                &source.lines,
+                &source.local_lines(),
                 minimum_confidence,
             ) {
                 Ok(value) => value,
@@ -547,7 +547,7 @@ impl PageProbe<'_> {
                 mask_source_subset(
                     self.document.source(),
                     MaskSource::Paint(paint),
-                    &source.lines,
+                    &source.local_lines(),
                     &key.indices,
                 )
                 .ok()
@@ -627,7 +627,7 @@ impl PageProbe<'_> {
             .lines
             .iter()
             .enumerate()
-            .filter(|(_, line)| mask_candidate(line, self.minimum_confidence))
+            .filter(|(_, line)| mask_candidate(&line.line, self.minimum_confidence))
             .map(|(index, line)| (index, line.clone()))
             .unzip();
         if lines.is_empty() {
@@ -693,12 +693,14 @@ impl PageProbe<'_> {
                 page: self.page.get(),
                 source_id: paint.source_id.clone(),
                 paint_index: paint.paint_index,
+                detection_index: source.lines[index].detection_index,
                 line: line.clone(),
             });
             proofs.push(VisibilityProof {
                 page: self.page.get(),
                 source_id: paint.source_id.clone(),
                 paint_index: paint.paint_index,
+                detection_index: source.lines[index].detection_index,
                 text: line.text.clone(),
                 quad: line.quad,
                 visible: true,
@@ -935,16 +937,19 @@ mod tests {
         let source = SourceObservation {
             width: 1200,
             height: 300,
-            lines: vec![OcrLine {
-                text: "CAPACITOR 47uF 16V".into(),
-                confidence: 0.99,
-                quad: [
-                    Point(75.0, 120.0),
-                    Point(1060.0, 120.0),
-                    Point(1060.0, 200.0),
-                    Point(75.0, 200.0),
-                ],
-                reviewed: false,
+            lines: vec![crate::source_ocr::SourceLine {
+                detection_index: 0,
+                line: OcrLine {
+                    text: "CAPACITOR 47uF 16V".into(),
+                    confidence: 0.99,
+                    quad: [
+                        Point(75.0, 120.0),
+                        Point(1060.0, 120.0),
+                        Point(1060.0, 200.0),
+                        Point(75.0, 200.0),
+                    ],
+                    reviewed: false,
+                },
             }],
         };
         for distinct in [false, true] {
@@ -954,7 +959,7 @@ mod tests {
             );
             if distinct {
                 let mut alternative = source.clone();
-                alternative.lines[0].text = "ALTERNATE LABEL".into();
+                alternative.lines[0].line.text = "ALTERNATE LABEL".into();
                 recognized.variants.insert(
                     AppearanceId(1),
                     SourceAppearance {

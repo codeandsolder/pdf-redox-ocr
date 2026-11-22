@@ -188,7 +188,7 @@ fn complete_fragment_group_reconstructs_text_geometry_without_model_download()
             &plan,
             &report.placements,
             MosaicBudget::default(),
-            |rgb, to_pdf| {
+            |_, rgb, to_pdf| {
                 calls += 1;
                 // The caller receives only one source-native crop for all 20
                 // strips, including the true PDF paint stack alpha and clip.
@@ -351,7 +351,7 @@ fn arbitrary_source_angles_and_reflection_rectify_original_pdf_coordinates()
             &plan,
             &report.placements,
             MosaicBudget::default(),
-            |raster, to_pdf| {
+            |_, raster, to_pdf| {
                 observed += 1;
                 Ok(assert_rectified_affine_frame(
                     &raster, to_pdf, mapper, axes, number, angle, reflected,

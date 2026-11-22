@@ -607,10 +607,13 @@ mod tests {
             calls: Cell::new(0),
         };
         let mut session = RecognitionSession::new(&backend, RecognitionCacheBudget::default());
-        assert_eq!(session.recognize_pixels(image.clone())?, vec![original]);
-        let accepted = session.recognize_pixels(image.clone())?;
+        assert_eq!(
+            session.recognize_pixels(image.clone())?.lines,
+            vec![original]
+        );
+        let accepted = session.recognize_pixels(image.clone())?.lines;
         assert_eq!(accepted[0].text, "A.B");
-        assert_eq!(session.recognize_pixels(image)?, accepted);
+        assert_eq!(session.recognize_pixels(image)?.lines, accepted);
         let stats = session.stats();
         assert_eq!(stats.inference_calls, 2);
         assert_eq!(stats.cache_hits, 1);

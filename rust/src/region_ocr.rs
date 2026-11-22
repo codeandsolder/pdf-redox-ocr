@@ -6,8 +6,6 @@
 
 use std::{collections::BTreeMap, path::Path};
 
-use sha2::{Digest, Sha256};
-
 use crate::{
     Error, PageNumber,
     draft::{DraftPage, OcrDraft, OcrLine},
@@ -274,13 +272,14 @@ impl RegionPass<'_> {
         )?;
         let dimensions = crop.rgb.dimensions();
         *remaining = remaining.saturating_sub(u64::from(dimensions.0) * u64::from(dimensions.1));
-        let rgb_sha256 = hex::encode(Sha256::digest(crop.rgb.as_raw()));
         let mapper = crop.pixel_mapper();
         let (w, h) = (f64::from(dimensions.0), f64::from(dimensions.1));
         let corners = [Point(0., 0.), Point(w, 0.), Point(w, h), Point(0., h)]
             .map(|point| mapper.to_pdf(point));
         let mut observations = Vec::new();
-        for pixel in engine.recognize_pixels(crop.rgb)? {
+        let raster = engine.recognize_pixels(crop.rgb)?;
+        let rgb_sha256 = raster.rgb_sha256;
+        for pixel in raster.lines {
             let within_crop = area(&pixel.quad) > 1e-9
                 && pixel
                     .quad

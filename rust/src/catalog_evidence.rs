@@ -295,7 +295,14 @@ impl CatalogEvidence {
         let mut stats = MatchStats::default();
         let mut by_occurrence = BTreeMap::<OccurrenceId, Vec<CharacterVote>>::new();
         for mapping in mappings {
-            if !mapping.selected(residual_pages) {
+            // Native-image ink is not evidence of an overlapping vector outline.
+            // Mosaic routes are certified image-only.
+            if !matches!(
+                mapping.scope,
+                crate::recognition::RasterMappingScope::WholePage { .. }
+                    | crate::recognition::RasterMappingScope::Region { .. }
+            ) || !mapping.selected(residual_pages)
+            {
                 continue;
             }
             let Some(placements) = index.pages.get(&mapping.page) else {

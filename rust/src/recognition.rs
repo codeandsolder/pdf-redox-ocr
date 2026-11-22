@@ -85,6 +85,14 @@ pub struct RasterCharacterAudit {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RasterMappingScope {
+    NativeImage {
+        paint_index: u32,
+        admitted_detection_indices: BTreeSet<usize>,
+    },
+    Mosaic {
+        group_index: usize,
+        admitted_detection_indices: BTreeSet<usize>,
+    },
     WholePage {
         residual: bool,
     },
@@ -100,6 +108,8 @@ pub enum RasterMappingScope {
 )]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RasterLocation {
+    NativeImage { paint_index: u32 },
+    Mosaic { group_index: usize },
     WholePage { residual: bool },
     Region { seed_paint_index: u32 },
 }
@@ -109,6 +119,12 @@ impl RasterMappingScope {
     #[must_use]
     pub const fn location(&self) -> RasterLocation {
         match self {
+            Self::NativeImage { paint_index, .. } => RasterLocation::NativeImage {
+                paint_index: *paint_index,
+            },
+            Self::Mosaic { group_index, .. } => RasterLocation::Mosaic {
+                group_index: *group_index,
+            },
             Self::WholePage { residual } => RasterLocation::WholePage {
                 residual: *residual,
             },
@@ -139,7 +155,9 @@ impl RasterCharacterMapping {
             RasterMappingScope::WholePage { residual } => {
                 *residual == residual_pages.contains(&self.page)
             }
-            RasterMappingScope::Region { .. } => true,
+            RasterMappingScope::Region { .. }
+            | RasterMappingScope::NativeImage { .. }
+            | RasterMappingScope::Mosaic { .. } => true,
         }
     }
 
@@ -147,7 +165,15 @@ impl RasterCharacterMapping {
     pub(crate) fn includes_detection(&self, detection_index: usize) -> bool {
         match &self.scope {
             RasterMappingScope::WholePage { .. } => true,
-            RasterMappingScope::Region {
+            RasterMappingScope::NativeImage {
+                admitted_detection_indices,
+                ..
+            }
+            | RasterMappingScope::Mosaic {
+                admitted_detection_indices,
+                ..
+            }
+            | RasterMappingScope::Region {
                 admitted_detection_indices,
                 ..
             } => admitted_detection_indices.contains(&detection_index),
@@ -266,6 +292,13 @@ impl RasterKey {
     }
 }
 
+/// Successful pixel-space recognition with the exact identity used by the cache.
+pub struct RecognizedRaster {
+    pub dimensions: (u32, u32),
+    pub rgb_sha256: String,
+    pub lines: Vec<PixelLine>,
+}
+
 struct CacheEntry {
     key: RasterKey,
     lines: Vec<PixelLine>,
@@ -337,7 +370,7 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
     }
 
     /// Retain the exact occurrence transform for page-raster character audits.
-    /// Source-image and mosaic rasters deliberately use their own mapping paths.
+    /// Source-image and composited rasters retain separately admitted occurrence mappings.
     ///
     /// # Errors
     /// Returns model/raster errors from page recognition.
@@ -348,18 +381,20 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
         page: crate::PageNumber,
         residual: bool,
     ) -> Result<Vec<OcrLine>, Error> {
-        let key = RasterKey::new(&rgb);
-        let width = f64::from(rgb.width());
-        let height = f64::from(rgb.height());
-        let lines = self
-            .recognize_keyed(rgb, key)?
+        let raster = self.recognize_pixels(rgb)?;
+        let (width, height) = (
+            f64::from(raster.dimensions.0),
+            f64::from(raster.dimensions.1),
+        );
+        let lines = raster
+            .lines
             .into_iter()
             .map(|line| line.into_pdf(&|Point(x, y)| mapper.to_pdf(x / width, y / height)))
             .collect();
         self.record_character_mapping(RasterCharacterMapping {
             page,
-            rgb_sha256: hex::encode(key.digest),
-            dimensions: key.dimensions,
+            rgb_sha256: raster.rgb_sha256,
+            dimensions: raster.dimensions,
             scope: RasterMappingScope::WholePage { residual },
             raster_corners: [Point(0., 0.), Point(1., 0.), Point(1., 1.), Point(0., 1.)]
                 .map(|Point(u, v)| mapper.to_pdf(u, v)),
@@ -465,9 +500,14 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
     ///
     /// # Errors
     /// Returns an error for an empty raster or failed model inference.
-    pub fn recognize_pixels(&mut self, rgb: RgbImage) -> Result<Vec<PixelLine>, Error> {
+    pub fn recognize_pixels(&mut self, rgb: RgbImage) -> Result<RecognizedRaster, Error> {
         let key = RasterKey::new(&rgb);
-        self.recognize_keyed(rgb, key)
+        let lines = self.recognize_keyed(rgb, key)?;
+        Ok(RecognizedRaster {
+            dimensions: key.dimensions,
+            rgb_sha256: hex::encode(key.digest),
+            lines,
+        })
     }
 
     fn recognize_keyed(&mut self, rgb: RgbImage, key: RasterKey) -> Result<Vec<PixelLine>, Error> {
@@ -515,25 +555,10 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
     ) -> Result<Vec<OcrLine>, Error> {
         Ok(self
             .recognize_pixels(rgb)?
+            .lines
             .into_iter()
             .map(|line| line.into_pdf(mapper))
             .collect())
-    }
-
-    /// Recognize a complete raster using its normalized display mapping.
-    ///
-    /// # Errors
-    /// Returns an error for an empty raster or failed model inference.
-    pub fn recognize_page(
-        &mut self,
-        rgb: RgbImage,
-        mapper: DisplayMapper,
-    ) -> Result<Vec<OcrLine>, Error> {
-        let width = f64::from(rgb.width());
-        let height = f64::from(rgb.height());
-        self.recognize_mapped(rgb, &|point| {
-            mapper.to_pdf(point.0 / width, point.1 / height)
-        })
     }
 }
 
@@ -630,7 +655,7 @@ mod tests {
         assert!(session.recognize_pixels(image(0)).is_err());
         for value in [0, 1, 0, 2, 0, 1] {
             assert_eq!(
-                session.recognize_pixels(image(value))?,
+                session.recognize_pixels(image(value))?.lines,
                 [] as [PixelLine; 0]
             );
         }
