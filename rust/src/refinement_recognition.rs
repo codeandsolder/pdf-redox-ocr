@@ -9,9 +9,11 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Error,
-    candidate_ink::{SourceInk, ViewInkMapping},
+    candidate_ink::SourceInk,
     ctc_evidence::{CtcEvidence, CtcOutcome},
-    inference::{CharacterEvidence, RecognitionModel, RecognitionSessionModel},
+    inference::{CharacterEvidence, RecognitionSessionModel},
+    recognition_model::RecognitionModel,
+    refinement_evidence::{Recognition, RefinementDecision, ViewEvidence, canonical},
 };
 
 const STRETCHES: [u32; 4] = [85, 100, 120, 150];
@@ -53,55 +55,6 @@ impl RefinementModel {
             Self::Small | Self::Medium => &[100],
         }
     }
-}
-
-/// Measured evidence for exactly one model and horizontal resampling.
-#[derive(Debug, Serialize)]
-pub struct ViewEvidence {
-    pub model: RecognitionModel,
-    pub stretch_percent: u32,
-    pub dimensions: (u32, u32),
-    pub rgb_sha256: String,
-    pub greedy_text: String,
-    pub greedy_score: f64,
-    pub ctc: CtcOutcome,
-    pub ink_mapping: Option<ViewInkMapping>,
-}
-
-/// Why a research hypothesis is (or is not) proposed.
-#[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum RefinementDecision {
-    Greedy {
-        text: String,
-    },
-    Consensus {
-        text: String,
-        view_indices: Vec<usize>,
-    },
-    Abstained,
-}
-
-impl RefinementDecision {
-    #[must_use]
-    pub fn text(&self) -> Option<&str> {
-        match self {
-            Self::Greedy { text } | Self::Consensus { text, .. } => Some(text),
-            Self::Abstained => None,
-        }
-    }
-}
-
-/// Evidence and an optional research-only proposal, with no invented score.
-#[derive(Debug, Serialize)]
-pub struct Recognition {
-    pub views: Vec<ViewEvidence>,
-    pub source_ink: Box<SourceInk>,
-    pub decision: RefinementDecision,
-}
-
-pub(crate) fn canonical(text: &str) -> String {
-    text.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
 fn separated(evidence: &CtcEvidence) -> Option<&str> {
@@ -312,7 +265,7 @@ mod tests {
                             classes: Vec::new(),
                             log_mass_lower_bound: -0.2,
                             alignment: crate::ctc_alignment::SequenceAlignment::Unavailable {
-                                reason: "fixture",
+                                reason: "fixture".into(),
                             },
                         },
                         SequenceHypothesis {
@@ -320,7 +273,7 @@ mod tests {
                             classes: Vec::new(),
                             log_mass_lower_bound: -0.2 + ratio.ln(),
                             alignment: crate::ctc_alignment::SequenceAlignment::Unavailable {
-                                reason: "fixture",
+                                reason: "fixture".into(),
                             },
                         },
                     ],

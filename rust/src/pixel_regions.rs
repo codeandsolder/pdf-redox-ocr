@@ -2,12 +2,12 @@
 
 use image::GrayImage;
 use num_traits::ToPrimitive;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::Error;
 
 /// Half-open bounds in a source raster.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InkBounds {
     pub left: u32,
     pub top: u32,
@@ -51,7 +51,7 @@ impl InkBounds {
 }
 
 /// Pixel support inside and outside the supplied observation.
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct ObservationSupport {
     pub inside_pixels: u64,
     pub outside_pixels: u64,

@@ -14,7 +14,7 @@ use pdf_redox_ocr::{
     artifacts::{check_output_paths as check_paths, write_atomic},
     crop_repair::RepairPolicy,
     draft::OcrDraft,
-    inference::{CharacterEvidence, LineOrientationMode, OcrInference, RecognitionModel},
+    inference::{CharacterEvidence, LineOrientationMode, OcrInference},
     input_preparation::{PreparationMode, PreparedInput},
     mosaic::MosaicBudget,
     native_images::NativeImageBudget,
@@ -25,6 +25,7 @@ use pdf_redox_ocr::{
     quality_eval::GroundTruth,
     rasterize::{DEFAULT_PAGE_MAX_SIDE, RenderPolicy},
     recognition::RecognitionCacheBudget,
+    recognition_model::RecognitionModel,
     reviewed_glyphs::ReviewedGlyphBank,
 };
 

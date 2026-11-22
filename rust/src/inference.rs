@@ -47,18 +47,10 @@ use crate::{
     geometry::{Point, Quad},
     glyph_confirmation::ConfirmationPolicy,
     recognition::{PixelLine, RasterRecognition, RecognitionBackend},
+    recognition_model::RecognitionModel,
 };
 
 const DETECTION_MODEL: &str = "pp-ocrv6_small_det.onnx";
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
-pub enum RecognitionModel {
-    #[default]
-    Small,
-    Medium,
-}
-
 impl RecognitionModel {
     const fn filename(self) -> &'static str {
         match self {

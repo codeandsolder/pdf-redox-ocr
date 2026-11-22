@@ -325,7 +325,7 @@ fn validate_source_sampling(bank: &ReviewedGlyphBank) -> Result<(), Error> {
     Ok(())
 }
 
-fn validate_bank(bank: &ReviewedGlyphBank) -> Result<(), Error> {
+pub(crate) fn validate_bank(bank: &ReviewedGlyphBank) -> Result<(), Error> {
     let digest = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
     if bank.schema_version != 3
         || !digest(&bank.pdf_sha256)

@@ -5,7 +5,7 @@
 
 use image::RgbImage;
 use num_traits::ToPrimitive;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -21,7 +21,7 @@ use crate::{
 };
 
 /// A single independent measurement of source ink, shared by all hypotheses.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SourceInk {
     pub dimensions: (u32, u32),
     pub rgb_sha256: String,
@@ -34,7 +34,7 @@ pub struct SourceInk {
 
 /// Positions in the exact, unstretched source crop. The interval reflects
 /// conditional CTC entry localization, not a measured glyph bounding box.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct CandidateAnchor {
     #[serde(flatten)]
     pub anchor: CharacterAnchor,
@@ -44,14 +44,14 @@ pub struct CandidateAnchor {
 
 /// Per-hypothesis evidence; unlocalized hypotheses remain actual model
 /// hypotheses and are never silently replaced with greedy geometry.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CandidateMapping {
     Mapped { anchors: Vec<CandidateAnchor> },
-    Unavailable { reason: &'static str },
+    Unavailable { reason: String },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct ViewGeometry {
     pub tensor_width: usize,
     pub resized_width: usize,
@@ -105,7 +105,7 @@ impl ViewGeometry {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct ViewInkMapping {
     pub geometry: ViewGeometry,
     /// Same order as the measured CTC hypotheses, even on partial failure.
@@ -152,7 +152,7 @@ impl SourceInk {
     ) -> CandidateMapping {
         let SequenceAlignment::Measured { tokens, .. } = &hypothesis.alignment else {
             return CandidateMapping::Unavailable {
-                reason: "no conditional token localization",
+                reason: "no conditional token localization".into(),
             };
         };
         if hypothesis.text.chars().count() != tokens.len()
@@ -162,7 +162,7 @@ impl SourceInk {
                 .ne(hypothesis.classes.iter().copied())
         {
             return CandidateMapping::Unavailable {
-                reason: "inconsistent CTC token sequence",
+                reason: "inconsistent CTC token sequence".into(),
             };
         }
         let Some(mut cells) = hypothesis
@@ -173,7 +173,7 @@ impl SourceInk {
             .collect::<Option<Vec<_>>>()
         else {
             return CandidateMapping::Unavailable {
-                reason: "invalid CTC token interval",
+                reason: "invalid CTC token interval".into(),
             };
         };
         // First-entry quantiles are monotone on complete paths, but the
@@ -297,7 +297,7 @@ mod tests {
             .ok_or_else(|| Error::Invalid("fixture geometry".into()))?;
         match source.map_hypothesis(&geometry, hypothesis) {
             CandidateMapping::Mapped { anchors } => Ok(anchors),
-            CandidateMapping::Unavailable { reason } => Err(Error::Invalid(reason.into())),
+            CandidateMapping::Unavailable { reason } => Err(Error::Invalid(reason)),
         }
     }
 

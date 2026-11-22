@@ -284,6 +284,47 @@ confidence to zero and reviewed=false, including unchanged lines. This
 research command never changes production OCR admission or overwrites the
 input PDF/draft. No model is loaded when no eligible region is sampled.
 
+### Offline topology comparison of saved candidates
+
+The model-free executable `pdf-redox-ocr-candidate-rank` consumes a schema 4
+refinement report and independently transcribed schema 3 source glyph banks
+at the same sampling DPI. Build it with
+`cargo build --release --no-default-features --features cli --bin pdf-redox-ocr-candidate-rank`.
+It requires neither a PDF rendering backend nor ONNX Runtime.
+
+```sh
+pdf-redox-ocr-candidate-rank --pdf input.pdf --primary-ocr observations.json \
+  --refinement-report refinement.json --donor reviewed-a.json \
+  --donor reviewed-b.json --report ranking.json \
+  --experimental-draft topology-draft.json
+```
+
+The report and draft must describe the same original observations (page,
+line index, literal text, binary64 confidence and quad coordinates). Each
+candidate binding is recomputed from conditional entry intervals and the
+shared, unstretched source ink. Only actual retained alternatives are eligible:
+every differing scalar must uniquely bind the same visible, unclipped ink
+run in both hypotheses, with support from both recognizers. Whitespace
+aliases do not contribute extra votes.
+
+The shape rule counts enclosed background regions of at least three
+normalized pixels at six fixed coverage thresholds. A count is stable only
+if at least four thresholds agree. The alternative label needs at least
+two distinct independently transcribed source-line hashes with the observed
+count. The incumbent label also needs two independent donors, none with
+the observed count. The query page and an identical normalized query crop
+are excluded from all donor evidence. This is empirical compatibility with
+a finite donor bank, not a universal assertion about character shapes.
+
+Only one eligible entire alternative may win. Insertions, deletions,
+unresolved geometry and conflicting alternatives abstain. The rank report
+contains donor identities, measured counts, view indices, selected changes
+and hashes of the artifacts used. Exact PDF provenance and consistent saved
+metadata are checked; the saved report is not a cryptographic proof of OCR.
+The output is another research-only draft, preserving source geometry but
+clearing **all** confidence and review flags. No PDF or production admission
+decision changes.
+
 ## Source-bound manual OCR quality evaluation
 
 The native `pdf-redox-ocr-eval` command evaluates an unchanged v3 OCR draft

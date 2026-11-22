@@ -6,6 +6,7 @@
 pub mod artifacts;
 pub mod boundary_ink;
 pub mod candidate_ink;
+pub mod candidate_ranking;
 #[cfg(feature = "pdf-integration")]
 pub mod catalog_evidence;
 pub mod character_alignment;
@@ -60,8 +61,10 @@ pub mod polygon;
 pub mod quality_eval;
 pub mod rasterize;
 pub mod recognition;
+pub mod recognition_model;
 #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
 pub mod refinement;
+pub mod refinement_evidence;
 #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
 pub mod refinement_recognition;
 #[cfg(feature = "pdf-integration")]

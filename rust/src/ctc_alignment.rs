@@ -5,12 +5,12 @@
 //! path. Forward/backward path sums therefore give its conditional first-
 //! emission distribution, without treating a model timestep as a glyph box.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const MAX_CELLS: usize = 2_000_000;
 const LOG_ZERO: f64 = f64::NEG_INFINITY;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TokenLocalization {
     pub class_index: usize,
     /// Modal first-emission column, conditional on the complete class sequence.
@@ -21,7 +21,7 @@ pub struct TokenLocalization {
     pub interval: [usize; 2],
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum SequenceAlignment {
     Measured {
@@ -30,7 +30,7 @@ pub enum SequenceAlignment {
         tokens: Vec<TokenLocalization>,
     },
     Unavailable {
-        reason: &'static str,
+        reason: String,
     },
 }
 
@@ -203,14 +203,14 @@ fn summarize(class_index: usize, entries: &[f64]) -> Option<TokenLocalization> {
 pub(crate) fn align(rows: &[&[f32]], tokens: &[usize]) -> SequenceAlignment {
     let Some(lattice) = Lattice::new(rows, tokens) else {
         return SequenceAlignment::Unavailable {
-            reason: "invalid or oversized CTC alignment lattice",
+            reason: "invalid or oversized CTC alignment lattice".into(),
         };
     };
     let forward = lattice.forward();
     let log_mass = lattice.final_mass(&forward);
     if !log_mass.is_finite() {
         return SequenceAlignment::Unavailable {
-            reason: "no complete CTC path",
+            reason: "no complete CTC path".into(),
         };
     }
     let distributions = lattice.entry_distributions(&forward, log_mass);
@@ -221,7 +221,7 @@ pub(crate) fn align(rows: &[&[f32]], tokens: &[usize]) -> SequenceAlignment {
         .collect::<Option<Vec<_>>>()
     else {
         return SequenceAlignment::Unavailable {
-            reason: "invalid conditional CTC entry distribution",
+            reason: "invalid conditional CTC entry distribution".into(),
         };
     };
     SequenceAlignment::Measured { log_mass, tokens }

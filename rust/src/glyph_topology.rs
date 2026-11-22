@@ -4,7 +4,7 @@
 //! structural evidence but never assigns Unicode or rewrites recognized text.
 
 use image::GrayImage;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     Error,
@@ -12,7 +12,7 @@ use crate::{
 };
 
 /// One enclosed 4-connected background region of a dark glyph.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EnclosedRegion {
     /// Number of background pixels within the region.
     pub area_pixels: usize,
@@ -23,7 +23,7 @@ pub struct EnclosedRegion {
 }
 
 /// Topology of a thresholded glyph crop, without any character interpretation.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GlyphTopology {
     pub width: u32,
     pub height: u32,
