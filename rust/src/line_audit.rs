@@ -181,13 +181,11 @@ pub struct AuditedLine {
     pub original_text: String,
     pub original_confidence: f64,
     pub original_quad: Quad,
-    pub oriented_quad: Quad,
     /// Sampling quad, including actual within-page source padding.
     pub sample_quad: Quad,
     pub observation_bounds: InkBounds,
     pub width: u32,
     pub height: u32,
-    pub axis_swapped: bool,
     pub polarity: PolarityEvidence,
     /// SHA-256 of the actual rectified luminance raster after polarity normalization.
     pub normalized_sha256: String,
@@ -196,7 +194,7 @@ pub struct AuditedLine {
     pub supported_runs: Vec<MappedSupportedRun>,
     pub supported_bands: Vec<MappedInkBand>,
     pub leaders: Vec<MappedLeader>,
-    /// Candidate extensions in the oriented sampling frame.
+    /// Candidate extensions in the original classified reading-order frame.
     pub boundary_extensions: Vec<MappedBoundaryExtension>,
 }
 
@@ -273,7 +271,7 @@ pub(crate) fn audit_line(
         line.quad,
         |points| points * f64::from(policy.dpi) / 72.0,
         policy.max_pixels,
-        LineAxis::Longest,
+        LineAxis::ReadingOrder,
     )?;
     let display = metadata.mapper(page)?;
     let window = SampleWindow::new(
@@ -348,12 +346,10 @@ pub(crate) fn audit_line(
         original_text: line.text.clone(),
         original_confidence: line.confidence,
         original_quad: line.quad,
-        oriented_quad: frame.corners,
         sample_quad,
         observation_bounds: observation,
         width,
         height,
-        axis_swapped: frame.axis_swapped,
         polarity,
         normalized_sha256: hex::encode(Sha256::digest(normalized.as_raw())),
         groups,
@@ -560,7 +556,7 @@ pub fn audit_lines(
         ));
     }
     Ok(LineAuditReport {
-        schema_version: 8,
+        schema_version: 9,
         pdf_sha256: draft.pdf_sha256.clone(),
         draft_model: draft.model.clone(),
         dpi: policy.dpi,

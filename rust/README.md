@@ -362,8 +362,9 @@ pdf-redox-ocr-line-audit --pdf source.pdf --primary-ocr draft.json \
 
 The command checks the original PDF digest, renders only the specified line's
 bounding region (600 DPI by default), and rectifies its ordered quadrilateral
-into an oriented grayscale raster. An elongated vertical observation uses
-the longer axis; this does not determine reading direction. The original
+into the original OCR observation's classified reading-order grayscale frame.
+A tall singleton retains its actual reading axis, just like recognition;
+the physical page rotation and aspect ratio do not reclassify the text. The original
 observation's luminance histogram is partitioned using Otsu's method. The
 background class is estimated from unique perimeter pixels (overall class
 occupancy breaks ties). The measured background is mapped to white after
@@ -402,7 +403,7 @@ original PDF-space quadrilaterals, line-edge contact at the segmentation
 threshold, and topology at the selected cutoffs (64/128/192/224 by default).
 Topology at a higher threshold can include additional ink at the crop edge.
 
-Version-8 line reports enumerate local, fully sampled edge-component
+Version-9 line reports enumerate local, fully sampled edge-component
 chains, including entire neighboring glyphs. Each `boundary_extensions`
 entry records the proposed quad, newly added strip, measured component
 indices, and overlapping OCR-line or native-text region identities.
@@ -423,7 +424,7 @@ This is an inspection of visible ink groups, not a character segmentation
 guarantee. It does not compare group counts with recognized strings, assign
 Unicode, exclude unrelated diagram strokes, or edit the input draft. The
 renderer and rectified image are independently bounded by `--max-pixels`.
-The report records both original and oriented line geometry.
+The report records the original reading-order quad and measured padded sample geometry.
 
 ## Correctness policy
 

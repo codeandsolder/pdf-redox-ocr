@@ -292,7 +292,7 @@ fn source_edge_extensions_report_competing_observations_across_rotations()
             ..LineAuditPolicy::default()
         },
     )?;
-    assert_eq!(report.schema_version, 8);
+    assert_eq!(report.schema_version, 9);
     for line in report.lines {
         let extension = line
             .boundary_extensions
@@ -348,6 +348,79 @@ fn source_edge_extensions_report_competing_observations_across_rotations()
         assert_eq!(original_only.component_indices, [] as [usize; 0]);
         assert!((extension.added_strip[0].0 - 70.0).abs() < 1e-8);
         assert!(extension.proposed_quad[1].0 > 85.0);
+        assert_eq!(line.original_quad, quad);
+    }
+    Ok(())
+}
+
+#[test]
+fn tall_single_glyph_preserves_classified_reading_axis_across_page_rotations()
+-> Result<(), Box<dyn std::error::Error>> {
+    use pdf_redox_ocr::layout_leaders::LeaderEdge;
+    let directory = tempfile::tempdir()?;
+    let pdf = directory.path().join("tall.pdf");
+    // Two narrow tall glyph-like components. Reading order is explicitly
+    // horizontal even though the first glyph box is twice as tall as wide.
+    let content = b"0 g 42 42 4 18 re f 52 42 5 18 re f";
+    fs::write(
+        &pdf,
+        support::pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R] /Count 4 /MediaBox [0 0 100 100] >>"
+                .to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R /Rotate 90 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R /Rotate 180 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R /Rotate 270 >>".to_vec(),
+            support::stream("", content),
+        ]),
+    )?;
+    let quad = [
+        Point(40., 40.),
+        Point(48., 40.),
+        Point(48., 62.),
+        Point(40., 62.),
+    ];
+    let draft = OcrDraft::new(
+        sha256_file(&pdf)?,
+        "classified singleton".into(),
+        (1..=4)
+            .map(|page| DraftPage {
+                page,
+                native_text_regions: vec![],
+                lines: vec![OcrLine {
+                    text: "1".into(),
+                    confidence: 0.99,
+                    quad,
+                    reviewed: false,
+                }],
+            })
+            .collect(),
+    );
+    let targets = (1..=4)
+        .map(|page| Ok((PageNumber::new(page)?, BTreeSet::from([0]))))
+        .collect::<Result<Targets, pdf_redox_ocr::Error>>()?;
+    let report = audit_lines(
+        &pdf,
+        &draft,
+        &targets,
+        &LineAuditPolicy {
+            padding_pixels: 100,
+            ..LineAuditPolicy::default()
+        },
+    )?;
+    for line in report.lines {
+        let obs = line.observation_bounds;
+        assert_eq!(obs.right - obs.left, 67);
+        assert_eq!(obs.bottom - obs.top, 184);
+        let extension = line
+            .boundary_extensions
+            .iter()
+            .find(|e| e.evidence.edge == LeaderEdge::Right)
+            .ok_or("missing right-side glyph from tall classified observation")?;
+        assert!((extension.proposed_quad[0].0 - 40.).abs() < 1e-8);
+        assert!(extension.proposed_quad[1].0 > 57.);
+        assert!((extension.proposed_quad[2].1 - 62.).abs() < 1e-8);
         assert_eq!(line.original_quad, quad);
     }
     Ok(())
