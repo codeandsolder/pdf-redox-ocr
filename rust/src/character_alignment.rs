@@ -435,7 +435,7 @@ impl CharacterLineAudit {
             }
         }
         Ok(Self {
-            detection_index: 0,
+            detection_index: original.detection_index,
             original,
             crop_sha256: hex::encode(Sha256::digest(crop.as_raw())),
             crop_dimensions: dimensions,
@@ -457,7 +457,6 @@ impl CharacterAuditReport {
     /// The immutable observation and exact crop are retained as metadata only.
     pub fn observe(
         &mut self,
-        detection_index: usize,
         original: &PixelLine,
         crop: &RgbImage,
         batch: BatchGeometry,
@@ -470,10 +469,9 @@ impl CharacterAuditReport {
             return None;
         }
         self.sampled_pixels += pixels;
-        if let Ok(mut entry) =
+        if let Ok(entry) =
             CharacterLineAudit::measure(original.clone(), crop, batch, columns, sequence_length)
         {
-            entry.detection_index = detection_index;
             self.lines.push(entry);
             self.lines.last_mut()
         } else {
@@ -501,6 +499,7 @@ mod tests {
             }
         });
         let observation = PixelLine {
+            detection_index: 0,
             text: "A B".into(),
             confidence: 0.99,
             quad: [

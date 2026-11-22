@@ -1,6 +1,9 @@
 //! Pixel-space OCR independent of the source's document geometry.
 
-use std::{collections::VecDeque, mem::size_of};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    mem::size_of,
+};
 
 use image::RgbImage;
 use sha2::{Digest, Sha256};
@@ -20,6 +23,9 @@ use crate::{
 /// for final observations; raw detector audits retain the detector ordering.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct PixelLine {
+    /// Stable original detector identity within this RGB raster.
+    #[serde(skip)]
+    pub detection_index: usize,
     pub text: String,
     pub confidence: f64,
     pub quad: Quad,
@@ -75,22 +81,71 @@ pub struct RasterCharacterAudit {
     pub report: CharacterAuditReport,
 }
 
-/// Identifies a full-page raster occurrence, including a reused RGB result.
+/// Which accepted raster observations may contribute character evidence.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RasterMappingScope {
+    WholePage {
+        residual: bool,
+    },
+    Region {
+        seed_paint_index: u32,
+        admitted_detection_indices: BTreeSet<usize>,
+    },
+}
+
+/// Identifies an actual page-space raster occurrence, including cached results.
 #[derive(Clone, Debug, serde::Serialize)]
-pub struct PageCharacterMapping {
+pub struct RasterCharacterMapping {
     pub page: crate::PageNumber,
     pub rgb_sha256: String,
     pub dimensions: (u32, u32),
-    pub residual: bool,
+    pub scope: RasterMappingScope,
     /// PDF corners of the actual raster extent in TL,TR,BR,BL order.
-    pub page_corners: Quad,
+    pub raster_corners: Quad,
 }
 
-impl PageCharacterMapping {
+impl RasterCharacterMapping {
+    /// Whether this mapping belongs to the final accepted page route.
+    #[cfg(feature = "pdf-integration")]
+    pub(crate) fn selected(&self, residual_pages: &BTreeSet<crate::PageNumber>) -> bool {
+        match &self.scope {
+            RasterMappingScope::WholePage { residual } => {
+                *residual == residual_pages.contains(&self.page)
+            }
+            RasterMappingScope::Region { .. } => true,
+        }
+    }
+
+    /// Restrict supplemental raster evidence to explicitly admitted detections.
+    #[cfg(feature = "pdf-integration")]
+    pub(crate) fn includes_detection(&self, detection_index: usize) -> bool {
+        match &self.scope {
+            RasterMappingScope::WholePage { .. } => true,
+            RasterMappingScope::Region {
+                admitted_detection_indices,
+                ..
+            } => admitted_detection_indices.contains(&detection_index),
+        }
+    }
+
+    /// Reject ambiguous repeated executions of the same raster before matching.
+    #[cfg(feature = "pdf-integration")]
+    pub(crate) fn unique_audit<'a>(
+        &self,
+        audits: &'a [RasterCharacterAudit],
+    ) -> Option<&'a RasterCharacterAudit> {
+        let mut matching = audits
+            .iter()
+            .filter(|a| a.rgb_sha256 == self.rgb_sha256 && a.dimensions == self.dimensions);
+        let first = matching.next()?;
+        matching.next().is_none().then_some(first)
+    }
+
     /// Map actual raster pixel corners to PDF space with the occurrence affine transform.
     #[must_use]
     pub fn to_pdf(&self, quad: Quad) -> Quad {
-        let [top_left, top_right, _, bottom_left] = self.page_corners;
+        let [top_left, top_right, _, bottom_left] = self.raster_corners;
         quad.map(|Point(x, y)| {
             let (u, v) = (
                 x / f64::from(self.dimensions.0),
@@ -205,7 +260,7 @@ pub struct RecognitionSession<'a, B> {
     stats: RecognitionStats,
     repair_audits: Vec<RasterRepairAudit>,
     character_audits: Vec<RasterCharacterAudit>,
-    page_character_mappings: Vec<PageCharacterMapping>,
+    raster_character_mappings: Vec<RasterCharacterMapping>,
 }
 
 impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
@@ -217,7 +272,7 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
             entries: VecDeque::new(),
             repair_audits: Vec::new(),
             character_audits: Vec::new(),
-            page_character_mappings: Vec::new(),
+            raster_character_mappings: Vec::new(),
             stats: RecognitionStats {
                 inference_calls: 0,
                 cache_hits: 0,
@@ -253,8 +308,8 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
         std::mem::take(&mut self.character_audits)
     }
 
-    pub fn take_page_character_mappings(&mut self) -> Vec<PageCharacterMapping> {
-        std::mem::take(&mut self.page_character_mappings)
+    pub fn take_raster_character_mappings(&mut self) -> Vec<RasterCharacterMapping> {
+        std::mem::take(&mut self.raster_character_mappings)
     }
 
     /// Retain the exact occurrence transform for page-raster character audits.
@@ -277,22 +332,24 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
             .into_iter()
             .map(|line| line.into_pdf(&|Point(x, y)| mapper.to_pdf(x / width, y / height)))
             .collect();
-        let digest = hex::encode(key.digest);
-        if self
-            .character_audits
-            .iter()
-            .any(|audit| audit.rgb_sha256 == digest && audit.dimensions == key.dimensions)
-        {
-            self.page_character_mappings.push(PageCharacterMapping {
-                page,
-                rgb_sha256: digest,
-                dimensions: key.dimensions,
-                residual,
-                page_corners: [Point(0., 0.), Point(1., 0.), Point(1., 1.), Point(0., 1.)]
-                    .map(|Point(u, v)| mapper.to_pdf(u, v)),
-            });
-        }
+        self.record_character_mapping(RasterCharacterMapping {
+            page,
+            rgb_sha256: hex::encode(key.digest),
+            dimensions: key.dimensions,
+            scope: RasterMappingScope::WholePage { residual },
+            raster_corners: [Point(0., 0.), Point(1., 0.), Point(1., 1.), Point(0., 1.)]
+                .map(|Point(u, v)| mapper.to_pdf(u, v)),
+        });
         Ok(lines)
+    }
+
+    /// Record an occurrence only when actual character evidence exists.
+    pub(crate) fn record_character_mapping(&mut self, mapping: RasterCharacterMapping) {
+        if self.character_audits.iter().any(|audit| {
+            audit.rgb_sha256 == mapping.rgb_sha256 && audit.dimensions == mapping.dimensions
+        }) {
+            self.raster_character_mappings.push(mapping);
+        }
     }
 
     fn record_characters(&mut self, key: RasterKey, report: CharacterAuditReport) -> bool {
@@ -408,6 +465,13 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
             crop_repair,
             character_audit,
         } = self.backend.recognize_pixels(rgb)?;
+        let mut detections = BTreeSet::new();
+        if lines
+            .iter()
+            .any(|line| !detections.insert(line.detection_index))
+        {
+            return Err(Error::Invalid("duplicate raster detection identity".into()));
+        }
         let complete_characters = self.record_characters(key, character_audit);
         let complete = self.record_repairs(key, crop_repair) && complete_characters;
         if self.budget.enabled() && complete {
@@ -480,6 +544,7 @@ mod tests {
                 vec![]
             } else {
                 vec![PixelLine {
+                    detection_index: 0,
                     text: "source text".into(),
                     confidence: 0.99,
                     quad: [

@@ -474,6 +474,7 @@ mod tests {
         (
             image,
             PixelLine {
+                detection_index: 0,
                 text: "A.B ..".into(),
                 confidence: 0.98,
                 quad: [
@@ -636,6 +637,7 @@ mod tests {
             }
         }
         PixelLine {
+            detection_index: 0,
             text: "ABC".into(),
             confidence: 0.99,
             quad: [
@@ -678,6 +680,7 @@ mod tests {
             assert_eq!(lines[0].text, if ok { text } else { "ABC" });
         }
         let peer = PixelLine {
+            detection_index: 1,
             text: "*".into(),
             confidence: 0.99,
             quad: [

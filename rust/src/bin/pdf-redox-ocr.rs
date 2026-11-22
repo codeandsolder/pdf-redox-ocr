@@ -462,7 +462,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
                 reference,
                 &result.draft,
                 &result.character_audits,
-                &result.page_character_mappings,
+                &result.raster_character_mappings,
                 &result.residual_pages,
             )
         })
