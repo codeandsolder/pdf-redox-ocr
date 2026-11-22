@@ -506,10 +506,10 @@ pub fn conflicts(operations: &[Transaction]) -> BTreeSet<usize> {
     for (i, op) in operations.iter().enumerate() {
         for index in std::iter::once(op.line_index).chain(op.consumed.iter().map(|p| p.line_index))
         {
-            if let Some(previous) = identities.insert((op.page, index), i) {
-                if previous != i {
-                    blocked.extend([previous, i]);
-                }
+            if let Some(previous) = identities.insert((op.page, index), i)
+                && previous != i
+            {
+                blocked.extend([previous, i]);
             }
         }
         let earlier = pages.entry(op.page).or_default();

@@ -252,6 +252,31 @@ fn mapped_groups(
         .collect()
 }
 
+fn mapped_run(run: InkRun, window: SampleWindow, frame: LineFrame) -> MappedSupportedRun {
+    MappedSupportedRun {
+        ink_quad: window.quad(frame, run.ink),
+        run,
+    }
+}
+fn mapped_runs(
+    runs: Vec<InkRun>,
+    window: SampleWindow,
+    frame: LineFrame,
+) -> Vec<MappedSupportedRun> {
+    runs.into_iter()
+        .map(|run| mapped_run(run, window, frame))
+        .collect()
+}
+fn mapped_bands(bands: Vec<InkBand>, window: SampleWindow, frame: LineFrame) -> Vec<MappedInkBand> {
+    bands
+        .into_iter()
+        .map(|InkBand { run, column_runs }| MappedInkBand {
+            band: mapped_run(run, window, frame),
+            column_runs: mapped_runs(column_runs, window, frame),
+        })
+        .collect()
+}
+
 pub(crate) struct SampledLine {
     pub audit: AuditedLine,
     pub(crate) normalized: image::GrayImage,
@@ -351,18 +376,8 @@ pub(crate) fn audit_line(
             component,
         })
         .collect();
-    let map_run = |run: InkRun| MappedSupportedRun {
-        ink_quad: window.quad(frame, run.ink),
-        run,
-    };
-    let supported_runs = supported_runs.into_iter().map(map_run).collect();
-    let supported_bands = supported_bands
-        .into_iter()
-        .map(|InkBand { run, column_runs }| MappedInkBand {
-            band: map_run(run),
-            column_runs: column_runs.into_iter().map(map_run).collect(),
-        })
-        .collect();
+    let supported_runs = mapped_runs(supported_runs, window, frame);
+    let supported_bands = mapped_bands(supported_bands, window, frame);
     let audit = AuditedLine {
         page: page.get(),
         line_index: index,
