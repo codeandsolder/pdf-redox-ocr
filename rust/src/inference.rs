@@ -50,7 +50,8 @@ use crate::{
 };
 
 const DETECTION_MODEL: &str = "pp-ocrv6_small_det.onnx";
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum RecognitionModel {
     #[default]
@@ -195,18 +196,21 @@ fn ort_config(threads: Option<NonZeroUsize>) -> OrtSessionConfig {
 
 // The same CRNN model supplies compact greedy output or full diagnostic
 // distributions. No duplicate session, preprocessing, or model invocation.
-struct RecognitionSessionModel {
+pub(crate) struct RecognitionSessionModel {
     model: CRNNModel,
     vocabulary: Vec<char>,
 }
 
-struct CropPredictions {
-    output: CRNNModelOutput,
-    ctc: Vec<Option<CtcOutcome>>,
+pub(crate) struct CropPredictions {
+    pub(crate) output: CRNNModelOutput,
+    pub(crate) ctc: Vec<Option<CtcOutcome>>,
 }
 
 impl RecognitionSessionModel {
-    fn load(model: RecognitionModel, threads: Option<NonZeroUsize>) -> Result<Self, Error> {
+    pub(crate) fn load(
+        model: RecognitionModel,
+        threads: Option<NonZeroUsize>,
+    ) -> Result<Self, Error> {
         let dictionary = std::fs::read_to_string(
             resolve_path(DICTIONARY).map_err(|error| inference_error(&error))?,
         )?;
@@ -226,7 +230,7 @@ impl RecognitionSessionModel {
         Ok(Self { model, vocabulary })
     }
 
-    fn predict(
+    pub(crate) fn predict(
         &self,
         images: &[&RgbImage],
         mode: CharacterEvidence,

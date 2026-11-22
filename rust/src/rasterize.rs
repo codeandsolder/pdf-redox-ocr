@@ -146,14 +146,15 @@ impl RenderedCrop {
     }
 }
 
-struct CropRequest {
+pub(crate) struct CropRequest {
+    dpi: u32,
     width: u32,
     height: u32,
     mapper: CropPixelMapper,
 }
 
 /// Calculate a bounded device-space rectangle before invoking Poppler.
-fn calculate_crop(
+pub(crate) fn calculate_crop(
     mapper: DisplayMapper,
     region: PageBox,
     dpi: u32,
@@ -212,6 +213,7 @@ fn calculate_crop(
         ));
     }
     Ok(CropRequest {
+        dpi,
         width,
         height,
         mapper: CropPixelMapper {
@@ -240,12 +242,30 @@ pub fn render_rgb_region(
     dpi: u32,
     max_pixels: u64,
 ) -> Result<RenderedCrop, Error> {
-    let crop = calculate_crop(mapper, region, dpi, max_pixels)?;
+    render_crop(pdf, page, &calculate_crop(mapper, region, dpi, max_pixels)?)
+}
+
+impl CropRequest {
+    pub(crate) fn pixels(&self) -> u64 {
+        u64::from(self.width) * u64::from(self.height)
+    }
+}
+
+pub(crate) fn render_crop(
+    pdf: &Path,
+    page: PageNumber,
+    crop: &CropRequest,
+) -> Result<RenderedCrop, Error> {
+    let pixels = crop.pixels();
+    let CropRequest {
+        dpi,
+        width,
+        height,
+        mapper,
+    } = *crop;
     let CropPixelMapper {
         origin_x, origin_y, ..
-    } = crop.mapper;
-    let (width, height) = (crop.width, crop.height);
-    let pixels = u64::from(width) * u64::from(height);
+    } = mapper;
     let output = Command::new("pdftoppm")
         .args(["-f", &page.get().to_string()])
         .args(["-l", &page.get().to_string()])
@@ -279,10 +299,7 @@ pub fn render_rgb_region(
             "Poppler returned wrong native crop dimensions".into(),
         ));
     }
-    Ok(RenderedCrop {
-        rgb,
-        mapper: crop.mapper,
-    })
+    Ok(RenderedCrop { rgb, mapper })
 }
 
 /// Sample pixel-center RGB coordinates with a white exterior.

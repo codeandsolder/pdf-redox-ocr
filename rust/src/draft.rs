@@ -118,6 +118,18 @@ mod tests {
     use crate::geometry::Point;
 
     #[test]
+    fn draft_coordinates_roundtrip_to_identical_f64_bits() -> Result<(), serde_json::Error> {
+        // A real source quad coordinate that the default fast JSON parser
+        // previously rounded one ULP down when loading a saved draft.
+        let point = Point(368.986_683_687_943_24, 668.412_680_729_166_6);
+        let encoded = serde_json::to_string(&point)?;
+        let decoded: Point = serde_json::from_str(&encoded)?;
+        assert_eq!(point.0.to_bits(), decoded.0.to_bits());
+        assert_eq!(point.1.to_bits(), decoded.1.to_bits());
+        Ok(())
+    }
+
+    #[test]
     fn produces_exact_v3_importer_shape() -> Result<(), serde_json::Error> {
         let draft = OcrDraft::new(
             "01".repeat(32),

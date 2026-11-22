@@ -12,6 +12,14 @@ use crate::{
 use image::{GrayImage, Pixel, RgbImage, imageops};
 use num_traits::ToPrimitive;
 
+/// Choose between undirected geometry inspection and already oriented text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineAxis {
+    Longest,
+    #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+    ReadingOrder,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct LineFrame {
     pub corners: Quad,
@@ -49,6 +57,7 @@ impl LineFrame {
         mut corners: Quad,
         scale: impl Fn(f64) -> f64,
         max_pixels: u64,
+        axis: LineAxis,
     ) -> Result<Self, Error> {
         if !convex(&corners) {
             return Err(Error::Invalid(
@@ -66,7 +75,7 @@ impl LineFrame {
             distance(corners[0], corners[3]),
             distance(corners[1], corners[2]),
         );
-        let axis_swapped = vertical > 1.5 * horizontal;
+        let axis_swapped = axis == LineAxis::Longest && vertical > 1.5 * horizontal;
         let (w, h) = if axis_swapped {
             corners.rotate_left(1);
             (vertical, horizontal)
