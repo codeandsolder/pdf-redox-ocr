@@ -948,9 +948,12 @@ Omissions inside the original observation are handled separately from
 crop expansion and mask correction. The exact occupied-column projection
 preselects observations in which an injective longer transcription is possible.
 Both models must support the same revised run assignment; a bounded dynamic
-program requires a unique literal embedding of every original non-whitespace
-token at geometrically compatible runs, and all inserted slots must bind to
-unclipped independent ink. Explicit CTC queries measure the original sequence
+program measures all ordered literal embeddings of the original non-whitespace
+tokens at geometrically compatible runs. The revised run assignment is unique,
+but equivalent old-token identities need not be. Each view reports possible
+and required insertion positions, aggregated by union and intersection across
+accepted views. Every possible inserted slot must bind to unclipped independent
+ink and is checked for peer membership; no arbitrary embedding is asserted. Explicit CTC queries measure the original sequence
 even if it is absent from the beam; the consensus winner must have higher
 exact path mass in every accepted view. Exact shared-raster peer accounting
 rejects new tokens covering another OCR observation or native text. No text
@@ -987,7 +990,7 @@ peer additionally requires stable independently localized literal text inside th
 observation, and cannot have a shared component cut by the replacement boundary.
 Native-text conflicts and incomplete peer samples abstain.
 
-The schema 13 report retains the original observation identity, all considered extensions and contractions,
+The schema 14 report retains the original observation identity, all considered extensions and contractions,
 conditional CTC evidence, common-raster run counts, peer evidence, transactions and
 conflicts. Strictly nested candidates can supersede a shorter candidate only if all added
 foreground is bound to tokens, the larger component chain and crop contain the
