@@ -237,43 +237,52 @@ source-resolution mosaics and stale source rejection.
 
 ## Native Rust recognition-only refinement
 
-The independent second pass is provided by `pdf-redox-ocr-refine`. It consumes
-an exact-PDF-bound v3 draft, selects uncertain lines, perspective-crops only
-those quads from the original page raster, and runs the PP-OCRv6 medium
-recognition model without re-detecting lines. The OAR text-line orientation
-classifier corrects upside-down crops by default (disable with `--no-cls`).
-Models and dictionary default to OAR's verified cache; explicit ONNX,
-orientation-model and dictionary paths are supported.
+The independent research pass is provided by `pdf-redox-ocr-refine`. It
+consumes an exact-PDF-bound v3 draft and samples only the requested original
+visible source line regions at 600 DPI by default. It uses the original
+BL/BR/TR/TL reading-order quad, rectified with bilinear RGB sampling, and
+never re-detects lines, invokes an orientation classifier, or masks native
+fonts. The complete page paint stack is respected. Both outer render pixels
+and rectified pixels are charged to the line and page budgets before rendering
+(defaults 2M and 32M). Geometry or budget failures are explicitly retained
+as skipped targets rather than substituted with another recognition crop.
+The source PDF hash is verified before and after refinement.
 
 ```sh
 pdf-redox-ocr-refine --pdf input.pdf --primary-ocr observations.json \
   --report medium-comparison.json --experimental-draft medium-hypotheses.json \
-  --max-primary-score 0.97 --pages 8,10
+  --max-primary-score 0.97 --pages 8,10 --ocr-threads 6
 ```
 
-Output is a comparison report and a distinct experimental v3 draft, never an
-automatic rewrite of the primary PDF. The experimental draft has every line
-unreviewed with confidence **zero**, including unchanged lines. Unicode NFKC
-and whitespace differences are recorded as equivalent, but altered case,
-digits, punctuation, and units remain distinct. No second model is loaded if
-nothing qualifies for refinement. For **high-confidence errors**, pass exact
-original-draft indices with repeatable `--line PAGE:INDEX` instead of editing a
-reduced copy of the OCR observations; these line numbers are zero-based and are
-validated against the unchanged source draft, bypassing only confidence and
-minimum-length selection:
+Use `--recognizer small` or `--recognizer medium` (default) for greedy
+hypotheses from the same official recognition model path as production.
+The experimental `--recognizer consensus` records both models at
+85%, 100%, 120%, and 150% horizontal source-crop width. Each separate
+inference records its actual RGB digest, dimensions, greedy prediction
+and CTC sequence evidence. The fixed research rule requires at least five
+distinct model-and-RGB views, both models represented, and a unique winning text; each
+vote must have a distinct runner-up with retained path weight at most
+25% of the top hypothesis. Whitespace differences alone are ignored.
+The selected literal text comes from an actual winning view, preferring
+the unstretched crop. Sequence weights are bounded-search evidence,
+not calibrated probabilities of correctness.
+
+For high-confidence errors, target exact original draft indices:
 
 ```sh
 pdf-redox-ocr-refine --pdf input.pdf --primary-ocr observations.json \
-  --line 28:2 --line 28:11 --report diameter-hypotheses.json \
-  --experimental-draft diameter-experimental.json
+  --line 28:2 --line 28:11 --recognizer consensus \
+  --report diameter-hypotheses.json --experimental-draft diameter-experimental.json
 ```
 
-The second-pass report schema 2 identifies `selection_mode` as `confidence`
-or `explicit-lines`, and emits null selection thresholds in explicit mode.
-Every experimental draft line remains unreviewed with confidence zero regardless
-of selection. When searchable native fonts overlap selected pages, an ephemeral
-render-only font mask is used as in primary OCR. Both CLIs share strict
-page-selection and atomic output handling.
+The refinement report schema 3 records crop geometry, actual sample hash,
+render resolution and budgets, per-view recognition evidence and explicit
+abstention or skipped targets. Literal non-whitespace changes remain
+distinct (including NFKC-compatible forms such as superscripts and full-width
+punctuation). The separate experimental v3 draft sets **every** line
+confidence to zero and reviewed=false, including unchanged lines. This
+research command never changes production OCR admission or overwrites the
+input PDF/draft. No model is loaded when no eligible region is sampled.
 
 ## Source-bound manual OCR quality evaluation
 

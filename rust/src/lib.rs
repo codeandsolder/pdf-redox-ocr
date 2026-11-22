@@ -58,6 +58,8 @@ pub mod rasterize;
 pub mod recognition;
 #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
 pub mod refinement;
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+pub mod refinement_recognition;
 #[cfg(feature = "pdf-integration")]
 pub mod region_ocr;
 pub mod reviewed_glyphs;

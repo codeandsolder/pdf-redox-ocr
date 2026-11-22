@@ -14,7 +14,7 @@ use crate::{
     geometry::{Point, Quad, QuadBounds},
     ink_polarity::Polarity,
     layout_leaders::{LeaderEdge, LeaderEvidence, detect_leaders},
-    line_frame::{LineFrame, SampleWindow},
+    line_frame::{LineAxis, LineFrame, SampleWindow},
     pixel_regions::{InkBounds, PixelClass, regions},
     polygon::overlap_fraction,
     recognition::PixelLine,
@@ -166,7 +166,13 @@ fn crop_evidence(
     if !policy.boundaries && !leader_candidate(line, policy) {
         return None;
     }
-    let mut frame = LineFrame::new(line.quad, |points| points, MAX_LINE_PIXELS).ok()?;
+    let mut frame = LineFrame::new(
+        line.quad,
+        |points| points,
+        MAX_LINE_PIXELS,
+        LineAxis::Longest,
+    )
+    .ok()?;
     // OAR rotates tall crops counterclockwise, so their reading axis grows
     // along the original downward image axis. The diagnostic frame alone
     // has no reading-direction contract.

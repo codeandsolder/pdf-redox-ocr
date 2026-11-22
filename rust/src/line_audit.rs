@@ -17,7 +17,7 @@ use crate::{
     glyph_isolation::{InkBand, InkGroup, InkIsolation, InkRun, isolate_ink},
     ink_polarity::{Polarity, PolarityEvidence},
     layout_leaders::{LeaderEvidence, detect_leaders},
-    line_frame::{LineFrame, SampleWindow},
+    line_frame::{LineAxis, LineFrame, SampleWindow},
     pdf_metadata::PdfMetadata,
     pixel_regions::{InkBounds, PixelRegion},
     rasterize::render_rgb_region,
@@ -220,6 +220,7 @@ pub(crate) fn audit_line(
         line.quad,
         |points| points * f64::from(policy.dpi) / 72.0,
         policy.max_pixels,
+        LineAxis::Longest,
     )?;
     let display = metadata.mapper(page)?;
     let window = SampleWindow::new(
@@ -380,7 +381,7 @@ pub fn audit_lines(
 
 #[cfg(test)]
 mod tests {
-    use super::{LineAuditPolicy, LineFrame, SampleWindow, inside_page};
+    use super::{LineAuditPolicy, LineAxis, LineFrame, SampleWindow, inside_page};
     use crate::{
         geometry::{DisplayMapper, PageBox, Point, Rotation},
         pixel_regions::InkBounds,
@@ -394,7 +395,12 @@ mod tests {
             Point(28.0, 31.0),
             Point(8.0, 26.0),
         ];
-        let frame = LineFrame::new(corners, |points| points * 600.0 / 72.0, 2_000_000)?;
+        let frame = LineFrame::new(
+            corners,
+            |points| points * 600.0 / 72.0,
+            2_000_000,
+            LineAxis::Longest,
+        )?;
         let bounds = InkBounds {
             left: 0,
             top: 0,
@@ -413,8 +419,24 @@ mod tests {
         assert!((center.1 - 25.5).abs() < 1e-10);
         let mut bad = corners;
         bad.swap(1, 2);
-        assert!(LineFrame::new(bad, |points| points * 600.0 / 72.0, 2_000_000).is_err());
-        assert!(LineFrame::new(corners, |points| points * 600.0 / 72.0, 1).is_err());
+        assert!(
+            LineFrame::new(
+                bad,
+                |points| points * 600.0 / 72.0,
+                2_000_000,
+                LineAxis::Longest
+            )
+            .is_err()
+        );
+        assert!(
+            LineFrame::new(
+                corners,
+                |points| points * 600.0 / 72.0,
+                1,
+                LineAxis::Longest
+            )
+            .is_err()
+        );
         Ok(())
     }
 
@@ -432,6 +454,7 @@ mod tests {
             corners,
             |points| points * f64::from(policy.dpi) / 72.0,
             policy.max_pixels,
+            LineAxis::Longest,
         )?;
         let page = PageBox::new([30.0, 40.0, 190.0, 160.0])?;
         for rotation in [
@@ -462,7 +485,12 @@ mod tests {
             Point(4.0, 20.0),
             Point(0.0, 20.0),
         ];
-        let frame = LineFrame::new(corners, |points| points * 600.0 / 72.0, 2_000_000)?;
+        let frame = LineFrame::new(
+            corners,
+            |points| points * 600.0 / 72.0,
+            2_000_000,
+            LineAxis::Longest,
+        )?;
         assert!(frame.axis_swapped);
         assert!(frame.width > frame.height);
         assert_eq!(
