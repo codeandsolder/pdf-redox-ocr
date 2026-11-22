@@ -3,7 +3,7 @@
 //! All horizontal views use one segmentation of the unmodified
 //! reading-order crop, so alternative hypotheses cannot create new pixels.
 
-use image::{Pixel, RgbImage};
+use image::RgbImage;
 use num_traits::ToPrimitive;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -16,9 +16,8 @@ use crate::{
     ctc_alignment::{SequenceAlignment, TokenLocalization},
     ctc_evidence::{CtcEvidence, SequenceHypothesis},
     glyph_appearance::GlyphShape,
-    glyph_isolation::{InkGroup, isolate_ink},
-    ink_polarity::{Polarity, PolarityEvidence, estimate},
-    pixel_regions::InkBounds,
+    glyph_isolation::{InkGroup, MeasuredInk},
+    ink_polarity::PolarityEvidence,
 };
 
 /// A single independent measurement of source ink, shared by all hypotheses.
@@ -120,23 +119,12 @@ impl SourceInk {
     /// Rejects empty or invalid source crops.
     pub fn measure(image: &RgbImage) -> Result<Self, Error> {
         let dimensions = image.dimensions();
-        let gray = image::GrayImage::from_fn(dimensions.0, dimensions.1, |x, y| {
-            image.get_pixel(x, y).to_luma()
-        });
-        let polarity = estimate(&gray, Polarity::Auto)?;
-        let normalized = polarity.normalize(&gray);
-        let groups = isolate_ink(
-            &normalized,
-            InkBounds {
-                left: 0,
-                top: 0,
-                right: dimensions.0,
-                bottom: dimensions.1,
-            },
-            192,
-            &[128, 192, 224],
-        )?
-        .groups;
+        let MeasuredInk {
+            normalized,
+            polarity,
+            isolation,
+        } = MeasuredInk::from_rgb(image)?;
+        let groups = isolation.groups;
         let appearances = groups
             .iter()
             .map(|group| {
@@ -299,18 +287,26 @@ mod tests {
         }
     }
 
-    #[test]
-    fn alternate_labels_share_exact_source_ink_without_resampling() -> Result<(), Error> {
+    fn mapped_fixture(
+        view: (u32, u32),
+        hypothesis: &SequenceHypothesis,
+    ) -> Result<Vec<CandidateAnchor>, Error> {
         let source = source()?;
         assert_eq!(source.groups.len(), 2);
-        let geometry = ViewGeometry::new((100, 20), (150, 20), 80)
+        let geometry = ViewGeometry::new(source.dimensions, view, 80)
             .ok_or_else(|| Error::Invalid("fixture geometry".into()))?;
+        match source.map_hypothesis(&geometry, hypothesis) {
+            CandidateMapping::Mapped { anchors } => Ok(anchors),
+            CandidateMapping::Unavailable { reason } => Err(Error::Invalid(reason.into())),
+        }
+    }
+
+    #[test]
+    fn alternate_labels_share_exact_source_ink_without_resampling() -> Result<(), Error> {
         let a = hypothesis("AB", vec![token(1, 13, [12, 14]), token(2, 57, [56, 58])]);
         let b = hypothesis("XB", vec![token(3, 14, [12, 15]), token(2, 57, [56, 58])]);
         for h in [&a, &b] {
-            let CandidateMapping::Mapped { anchors } = source.map_hypothesis(&geometry, h) else {
-                return Err(Error::Invalid("fixture mapping".into()));
-            };
+            let anchors = mapped_fixture((150, 20), h)?;
             assert_eq!(anchors[0].anchor.alignment, RunAlignment::Unique { run: 0 });
             assert_eq!(anchors[1].anchor.alignment, RunAlignment::Unique { run: 1 });
         }
@@ -319,22 +315,14 @@ mod tests {
 
     #[test]
     fn intervals_that_extend_into_padding_do_not_bind_a_glyph() -> Result<(), Error> {
-        let source = source()?;
-        let geometry = ViewGeometry::new((100, 20), (85, 20), 80)
-            .ok_or_else(|| Error::Invalid("fixture geometry".into()))?;
         let h = hypothesis("A", vec![token(1, 40, [39, 60])]);
-        let CandidateMapping::Mapped { anchors } = source.map_hypothesis(&geometry, &h) else {
-            return Err(Error::Invalid("fixture mapping".into()));
-        };
+        let anchors = mapped_fixture((85, 20), &h)?;
         assert_eq!(anchors[0].anchor.alignment, RunAlignment::Padding);
         Ok(())
     }
 
     #[test]
     fn partially_padded_token_does_not_prove_or_steal_neighbor_ink() -> Result<(), Error> {
-        let source = source()?;
-        let geometry = ViewGeometry::new((100, 20), (100, 20), 80)
-            .ok_or_else(|| Error::Invalid("fixture geometry".into()))?;
         let h = hypothesis(
             "ABC",
             vec![
@@ -343,9 +331,7 @@ mod tests {
                 token(3, 65, [45, 70]),
             ],
         );
-        let CandidateMapping::Mapped { anchors } = source.map_hypothesis(&geometry, &h) else {
-            return Err(Error::Invalid("fixture mapping".into()));
-        };
+        let anchors = mapped_fixture((100, 20), &h)?;
         assert_eq!(anchors[0].anchor.alignment, RunAlignment::Unique { run: 0 });
         assert_eq!(anchors[1].anchor.alignment, RunAlignment::UncertainNeighbor);
         assert_eq!(anchors[2].anchor.alignment, RunAlignment::Padding);
@@ -355,9 +341,6 @@ mod tests {
 
     #[test]
     fn uncertain_entries_cannot_split_one_visible_run() -> Result<(), Error> {
-        let source = source()?;
-        let geometry = ViewGeometry::new((100, 20), (100, 20), 80)
-            .ok_or_else(|| Error::Invalid("fixture geometry".into()))?;
         let h = hypothesis(
             "AAB",
             vec![
@@ -366,9 +349,7 @@ mod tests {
                 token(2, 46, [45, 47]),
             ],
         );
-        let CandidateMapping::Mapped { anchors } = source.map_hypothesis(&geometry, &h) else {
-            return Err(Error::Invalid("fixture mapping".into()));
-        };
+        let anchors = mapped_fixture((100, 20), &h)?;
         assert_ne!(anchors[0].anchor.alignment, RunAlignment::Unique { run: 0 });
         assert_eq!(anchors[2].anchor.alignment, RunAlignment::Unique { run: 1 });
         Ok(())

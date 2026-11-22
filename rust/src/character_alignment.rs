@@ -12,12 +12,12 @@ use crate::{
     disjoint_set::DisjointSet,
     glyph_appearance::GlyphShape,
     glyph_confirmation::{ConfirmationDecision, ConfirmationPolicy},
-    glyph_isolation::{InkGroup, isolate_ink},
-    ink_polarity::{Polarity, PolarityEvidence, estimate},
-    pixel_regions::{InkBounds, PixelRegion},
+    glyph_isolation::{InkGroup, MeasuredInk},
+    ink_polarity::PolarityEvidence,
+    pixel_regions::PixelRegion,
     recognition::PixelLine,
 };
-use image::{Pixel, RgbImage};
+use image::RgbImage;
 use num_traits::ToPrimitive;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -425,22 +425,11 @@ impl CharacterLineAudit {
     ) -> Result<Self, Error> {
         let dimensions = crop.dimensions();
         let resized_width = batch.resized_width(dimensions)?;
-        let gray = image::GrayImage::from_fn(dimensions.0, dimensions.1, |x, y| {
-            crop.get_pixel(x, y).to_luma()
-        });
-        let polarity = estimate(&gray, Polarity::Auto)?;
-        let normalized = polarity.normalize(&gray);
-        let isolation = isolate_ink(
-            &normalized,
-            InkBounds {
-                left: 0,
-                top: 0,
-                right: dimensions.0,
-                bottom: dimensions.1,
-            },
-            192,
-            &[128, 192, 224],
-        )?;
+        let MeasuredInk {
+            normalized,
+            polarity,
+            isolation,
+        } = MeasuredInk::from_rgb(crop)?;
         let anchors = prediction_anchors(
             &original.text,
             dimensions,
