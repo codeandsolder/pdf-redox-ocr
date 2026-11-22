@@ -16,16 +16,18 @@ use tempfile::NamedTempFile;
 
 use crate::{
     Error, PageNumber,
+    direct_images::decode_exact_paint,
     draft::OcrLine,
     geometry::{DisplayMapper, Point, Quad},
     hybrid::{ImageObservation, SourceAdmission, VisibilityProof},
     paint_isolation::{PaintReplacement, isolate_source_paints},
-    paint_scan::{ImagePaint, PaintReport, PdfMatrix},
+    paint_scan::{ImagePaint, PaintReport, PdfMatrix, enumerate_image_paints},
     pdf_metadata::PdfMetadata,
-    rasterize::{RenderPolicy, render_rgb_page},
+    rasterize::{RenderPolicy, render_rgb_page, significant_rgb_change},
     source_appearances::{AppearanceId, PaintAppearances},
     source_mask::{
         MaskSource, MaskedSourceObject, mask_candidate, mask_source_object, mask_source_subset,
+        native_rgb_change_count,
     },
     source_ocr::{SourceObservation, map_observations_to_paint},
 };
@@ -45,6 +47,18 @@ pub struct SourceVisibilityAudit {
     pub candidate_lines: usize,
     /// Number of source labels proven visible by differential rendering.
     pub visible_lines: usize,
+    /// Actual native and page contrast counts per candidate.
+    pub contrast: Vec<LineContrast>,
+}
+
+/// Distinguish exact sample mutations from significant decoded RGB changes.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LineContrast {
+    pub text: String,
+    pub changed_samples: u64,
+    pub native_rgb_pixels: u64,
+    pub page_rgb_pixels: usize,
+    pub expected_page_pixels: f64,
 }
 
 /// Verified extra OCR observations plus the matching proof records.
@@ -154,6 +168,7 @@ pub(crate) struct MixedVerifier<'a> {
     recognized: &'a PaintAppearances<SourceObservation>,
     policy: RenderPolicy,
     minimum_confidence: f64,
+    painted: &'a PaintReport,
     masked_cache: BTreeMap<(AppearanceId, usize), Option<MaskedSourceObject>>,
 }
 
@@ -214,6 +229,7 @@ impl<'a> MixedVerifier<'a> {
             recognized,
             policy,
             minimum_confidence,
+            painted,
             masked_cache: BTreeMap::new(),
         })
     }
@@ -233,6 +249,7 @@ impl<'a> MixedVerifier<'a> {
             page,
             minimum_confidence: self.minimum_confidence,
             control: &control,
+            paints: &self.painted.placements,
         };
         let mut evidence = MixedVisibility::default();
         let mut residual = ResidualBuilder::default();
@@ -465,6 +482,7 @@ struct ProbedSource {
 struct PageProbe<'a> {
     document: &'a PdfMetadata,
     control: &'a RgbImage,
+    paints: &'a [ImagePaint],
     page: PageNumber,
     policy: RenderPolicy,
     minimum_confidence: f64,
@@ -546,6 +564,32 @@ impl PageProbe<'_> {
         Some((&masked.object, proof.treatment))
     }
 
+    fn native_treatment(
+        &self,
+        paint: &ImagePaint,
+        bytes: Vec<u8>,
+    ) -> Result<Option<(RgbImage, RgbImage)>, Error> {
+        let Some(before) = decode_exact_paint(self.document, self.paints, paint)? else {
+            return Ok(None);
+        };
+        let treated_doc = PdfMetadata::from_bytes(bytes)?;
+        let treated_paints = enumerate_image_paints(&treated_doc, &[self.page])?;
+        let Some(target) = treated_paints.placements.iter().find(|candidate| {
+            candidate.paint_path == paint.paint_path
+                && candidate.page == paint.page
+                && candidate.ctm == paint.ctm
+                && candidate.width == paint.width
+                && candidate.height == paint.height
+        }) else {
+            return Ok(None);
+        };
+        let Some(after) = decode_exact_paint(&treated_doc, &treated_paints.placements, target)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some((before, after)))
+    }
+
     fn examine(
         &self,
         paint: &ImagePaint,
@@ -566,10 +610,16 @@ impl PageProbe<'_> {
         if lines.is_empty() {
             return Ok(None);
         }
-        let treatment = self.render_treatment([PaintReplacement {
-            image: masked.object.clone(),
-            paints: vec![paint],
-        }])?;
+        let bytes = isolate_source_paints(
+            self.document,
+            [PaintReplacement {
+                image: masked.object.clone(),
+                paints: vec![paint],
+            }],
+        )?;
+        let temp = NamedTempFile::new()?;
+        fs::write(temp.path(), &bytes)?;
+        let treatment = render_rgb_page(temp.path(), self.page, self.policy)?;
         if treatment.dimensions() != self.control.dimensions() {
             return Err(Error::Invalid(
                 "counterfactual changed page raster size".into(),
@@ -598,23 +648,35 @@ impl PageProbe<'_> {
         ) {
             return Ok(None);
         }
+        let Some((before, after)) = self.native_treatment(paint, bytes)? else {
+            return Ok(None);
+        };
         let source_pdf_to_pixel = pixel_density(self.control, self.document, self.page)?;
         let expected_scale = PdfMatrix(paint.ctm).area_scale() * source_pdf_to_pixel
             / (f64::from(source.width) * f64::from(source.height));
         let mut observations = Vec::new();
         let mut proofs = Vec::new();
         let mut source_indices = Vec::new();
+        let mut contrast = Vec::new();
         for ((line, metric), index) in projections.iter().zip(&masked.metrics).zip(indices) {
             if !paint.wholly_visible_in_clip(&line.quad) {
                 continue;
             }
             let changed_pixels =
                 changed_raster_pixels(self.control, &treatment, &line.quad, display_mapper);
-            let expected = num_traits::ToPrimitive::to_f64(&metric.changed_source_pixels)
+            let native_rgb_pixels = native_rgb_change_count(&before, &after, &metric.source_quad)?;
+            let expected = num_traits::ToPrimitive::to_f64(&native_rgb_pixels)
                 .unwrap_or(f64::INFINITY)
                 * expected_scale;
             let observed = num_traits::ToPrimitive::to_f64(&changed_pixels).unwrap_or(0.0);
-            if metric.changed_source_pixels < 10 || observed < (expected * 0.35).max(8.0) {
+            contrast.push(LineContrast {
+                text: metric.text.clone(),
+                changed_samples: metric.changed_source_pixels,
+                native_rgb_pixels,
+                page_rgb_pixels: changed_pixels,
+                expected_page_pixels: expected,
+            });
+            if native_rgb_pixels < 10 || observed < (expected * 0.35).max(8.0) {
                 continue;
             }
             source_indices.push(index);
@@ -640,6 +702,7 @@ impl PageProbe<'_> {
             paint_index: paint.paint_index,
             candidate_lines: projection.lines.len(),
             visible_lines: proofs.len(),
+            contrast,
         };
         Ok(Some(ProbedSource {
             observations,
@@ -750,12 +813,7 @@ fn changed_raster_pixels(
             }
             let control = before.get_pixel(x, y);
             let treatment = after.get_pixel(x, y);
-            if control
-                .0
-                .iter()
-                .zip(treatment.0)
-                .any(|(old, new)| old.abs_diff(new) > 8)
-            {
+            if significant_rgb_change(control, treatment) {
                 changed += 1;
             }
         }

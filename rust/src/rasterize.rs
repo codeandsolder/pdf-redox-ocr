@@ -338,3 +338,8 @@ mod tests {
         );
     }
 }
+
+/// Shared native and page RGB contrast criterion.
+pub(crate) fn significant_rgb_change(before: &Rgb<u8>, after: &Rgb<u8>) -> bool {
+    before.0.iter().zip(after.0).any(|(a, b)| a.abs_diff(b) > 8)
+}

@@ -441,5 +441,7 @@ fn adjacent_eight_bit_palette_indices_can_change_visible_ink()
     )?;
     assert_eq!(verified.proofs.len(), 1, "{:#?}", verified.audited);
     assert_eq!(verified.proofs[0].text, "PALETTE INDEX");
+    assert_eq!(verified.audited[0].contrast[0].native_rgb_pixels, 896);
+    assert_eq!(verified.audited[0].contrast[0].changed_samples, 896);
     Ok(())
 }

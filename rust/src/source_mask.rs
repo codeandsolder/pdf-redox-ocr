@@ -443,11 +443,45 @@ fn cover_text(image: &mut PackedSamples, polygon: &Quad, padding: u32) {
 }
 
 fn changed_in_polygon(before: &PackedSamples, after: &PackedSamples, quad: &Quad) -> u64 {
-    let (x0, y0, x1, y1) = extent(quad, before.width, before.height, 0.0);
-    let mut count = 0_u64;
+    count_in_polygon(before.width, before.height, quad, |x, y| {
+        before.pixel_changed(after, x, y)
+    })
+}
+
+/// Significant contrast in actual decoded RGB, not in packed sample codes.
+pub(crate) fn native_rgb_change_count(
+    before: &image::RgbImage,
+    after: &image::RgbImage,
+    source_quad: &Quad,
+) -> Result<u64, Error> {
+    if before.dimensions() != after.dimensions() {
+        return Err(Error::Invalid("native contrast dimensions changed".into()));
+    }
+    let quad = to_top_left(source_quad, before.width(), before.height())?;
+    Ok(count_in_polygon(
+        before.width() as usize,
+        before.height() as usize,
+        &quad,
+        |x, y| {
+            let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) else {
+                return false;
+            };
+            crate::rasterize::significant_rgb_change(before.get_pixel(x, y), after.get_pixel(x, y))
+        },
+    ))
+}
+
+fn count_in_polygon(
+    width: usize,
+    height: usize,
+    quad: &Quad,
+    mut changed: impl FnMut(usize, usize) -> bool,
+) -> u64 {
+    let (x0, y0, x1, y1) = extent(quad, width, height, 0.0);
+    let mut count = 0;
     for y in y0..y1 {
         for x in x0..x1 {
-            if within_quad(quad, pixel_center(x, y), 0.0) && before.pixel_changed(after, x, y) {
+            if within_quad(quad, pixel_center(x, y), 0.0) && changed(x, y) {
                 count += 1;
             }
         }
