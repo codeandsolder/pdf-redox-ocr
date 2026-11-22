@@ -70,10 +70,13 @@ not the numerical distance between packed sample codes. A palette index one
 step away may have high contrast; distant indices may map to the same color.
 Per-line visibility audits retain exact changed packed sample tuples, native
 and page RGB contrast counts and the projected expected page pixel count.
-For fragmented image-only pages, the Rust path now clusters actual native
+For fragmented or compositor-dependent image-only pages, the Rust path clusters actual native
 image paint invocations using scale-aware, spatially indexed connected
 components. Adjacent strips are recognized in bounded native-pitch PDF crops,
-not as isolated text fragments. Poppler renders the final paint stack, so soft
+not as isolated text fragments. The same path handles independent singleton
+groups when native RGB would omit compositing or resource color overrides.
+Root page transparency groups forbid standalone raster admission for either
+source decoder; mixed pages retain ordinary page OCR. Poppler renders the final paint stack, so soft
 masks, ICC color, clipping and nested Form paints use the genuine PDF
 compositor. Group-specific clip masks, exact affine source-axes rectification (including
 arbitrary rotations, reflection and modest source shear), and one shared

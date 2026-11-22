@@ -476,7 +476,12 @@ fn index_expected_paints<'a>(
             continue;
         }
         if !paint.unsafe_reasons.is_empty() {
-            collector.reject(paint, "unsafe_scanned_occurrence");
+            let reason = if paint.unsafe_reasons.contains(&"page_transparency_group") {
+                "page_transparency_group"
+            } else {
+                "unsafe_scanned_occurrence"
+            };
+            collector.reject(paint, reason);
         }
         let expected = expected_pages.entry(page).or_default();
         if !indices.insert((page, paint.paint_index)) {

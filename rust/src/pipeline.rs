@@ -21,8 +21,8 @@ use crate::{
     input_preparation::PreparationAudit,
     mixed_visibility::{MixedVerifier, MixedVisibility, PageVerification},
     mosaic::{
-        MosaicBudget, MosaicPlan, contains_native_fragments, mosaic_page_eligible,
-        plan_raster_mosaics,
+        MosaicBudget, MosaicPlan, mosaic_page_eligible, plan_raster_mosaics,
+        requires_composited_recognition,
     },
     mosaic_ocr::reconstruct_native_mosaics,
     native_font_mask::mask_native_fonts,
@@ -50,12 +50,12 @@ use crate::{
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 #[serde(rename_all = "snake_case")]
 pub enum RasterMode {
-    /// Select high-detail sources and reconstruct native fragment pages.
+    /// Select high-detail sources and reconstruct compositor-dependent image pages.
     #[default]
     Auto,
     /// Consider every independently safe source within the configured budget.
     All,
-    /// Disable native image and fragment OCR; retain native-text-only bypass.
+    /// Disable native image and mosaic OCR; retain native-text-only bypass.
     Off,
 }
 
@@ -458,7 +458,7 @@ struct FallbackRecognition {
     attempt: Option<ResidualAttempt>,
 }
 
-type FragmentPlans = (BTreeSet<PageNumber>, BTreeMap<PageNumber, MosaicPlan>);
+type CompositedPlans = (BTreeSet<PageNumber>, BTreeMap<PageNumber, MosaicPlan>);
 
 /// Extract only from pages known to paint a wanted source. Keep all such
 /// occurrences in document order: a later repetition can still decode when
@@ -809,10 +809,10 @@ impl PreparedOcr {
         })
     }
 
-    fn plan_native_fragment_pages(&self, scanned: &PaintReport) -> Result<FragmentPlans, Error> {
+    fn plan_composited_pages(&self, scanned: &PaintReport) -> Result<CompositedPlans, Error> {
         let doc = &self.doc;
         let budget = self.policy.mosaic_budget;
-        let mut fragmented = BTreeSet::new();
+        let mut composited = BTreeSet::new();
         let mut plans = BTreeMap::new();
         for summary in &scanned.pages {
             let page = PageNumber::new(summary.page)?;
@@ -830,23 +830,23 @@ impl PreparedOcr {
                 .get(&page)
                 .ok_or_else(|| Error::Invalid("selected page missing MediaBox".into()))?;
             let mapper = doc.mapper(page)?;
-            if !contains_native_fragments(&paints, box_, mapper) {
+            if !requires_composited_recognition(&paints, box_, mapper) {
                 continue;
             }
-            fragmented.insert(page);
+            composited.insert(page);
             if summary.native_searchable_shows == 0
                 && let Some(plan) = plan_raster_mosaics(page, &paints, box_, mapper, budget)?
             {
                 plans.insert(page, plan);
             }
         }
-        Ok((fragmented, plans))
+        Ok((composited, plans))
     }
 
     fn plan_native_sources(
         &self,
         scanned: &PaintReport,
-        fragmented: &BTreeSet<PageNumber>,
+        composited: &BTreeSet<PageNumber>,
         progress: &mut dyn FnMut(String),
     ) -> Result<NativeSourcePlan, Error> {
         let source_budget = self.policy.source_budget;
@@ -866,12 +866,15 @@ impl PreparedOcr {
                 .collect(),
             RasterMode::Auto => self.auto_source_candidates(scanned, progress)?,
         };
-        // Native source OCR is insufficient on a page where a text line can cross
-        // neighboring fragments; recognize the complete native-pitch group instead.
+        // Prefer the actual composited native-pitch group when standalone
+        // rasters would omit page context or join fragmented labels.
         let eligible_elsewhere = scanned
             .placements
             .iter()
-            .filter(|paint| !fragmented.iter().any(|page| page.get() == paint.page))
+            .filter(|paint| {
+                paint.unsafe_reasons.is_empty()
+                    && !composited.iter().any(|page| page.get() == paint.page)
+            })
             .map(|paint| paint.source_id.as_str())
             .collect::<BTreeSet<_>>();
         source_ids.retain(|id| eligible_elsewhere.contains(id.as_str()));
@@ -1083,7 +1086,7 @@ impl PreparedOcr {
         Ok(count)
     }
 
-    /// Decode and recognize original source images, source-resolution fragment
+    /// Decode and recognize original source images, composited native-resolution
     /// mosaics, and verify exact mixed-page source paint visibility.
     fn prepare_native_sources(
         &self,
@@ -1091,25 +1094,25 @@ impl PreparedOcr {
         progress: &mut dyn FnMut(String),
     ) -> Result<NativePreparation, Error> {
         let scanned = enumerate_image_paints(&self.doc, &self.selected)?;
-        let (fragmented, plans) = if self.policy.raster_mode == RasterMode::Off {
+        let (composited, plans) = if self.policy.raster_mode == RasterMode::Off {
             (BTreeSet::new(), BTreeMap::new())
         } else {
-            self.plan_native_fragment_pages(&scanned)?
+            self.plan_composited_pages(&scanned)?
         };
-        let source_plan = self.plan_native_sources(&scanned, &fragmented, progress)?;
+        let source_plan = self.plan_native_sources(&scanned, &composited, progress)?;
         let (decoded, direct_decode) = self.decode_native_sources(&source_plan, &scanned, progress);
         let source_rasters = decoded.map_values(SourceRasterIdentity::measure);
         let recognized = Self::recognize_native_sources(engine, decoded, progress)?;
         let mut source_only = source_only_pages(&scanned, &recognized)?;
-        for &page in &fragmented {
+        for &page in &composited {
             source_only.approved_pages.remove(&page);
             source_only.pages.remove(&page);
         }
         let mosaics =
             self.add_reconstructed_mosaics(engine, &scanned, &plans, &mut source_only, progress)?;
         progress(format!(
-            "native mosaics: {} fragment pages, {mosaics} reconstructed",
-            fragmented.len()
+            "native mosaics: {} compositor-required pages, {mosaics} reconstructed",
+            composited.len()
         ));
         progress(format!(
             "source-only fast path approved {} of {} selected pages",

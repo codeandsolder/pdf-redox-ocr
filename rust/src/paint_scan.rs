@@ -188,6 +188,8 @@ pub enum NativeOnlyBlocker {
 pub struct PagePaintSummary {
     /// One-based page number.
     pub page: u32,
+    /// Page-level transparency group requires the actual compositor.
+    pub root_group: bool,
     /// Total actual Image `XObject` paints.
     pub image_paints: usize,
     /// Image paints requiring full page fallback.
@@ -872,6 +874,9 @@ impl ScanContext<'_> {
             return Ok(());
         };
         let mut unsafe_reasons = Vec::new();
+        if self.summary.root_group {
+            unsafe_reasons.push("page_transparency_group");
+        }
         if width == 0 || height == 0 || width > 100_000 || height > 100_000 {
             unsafe_reasons.push("invalid_source_dimensions");
         }
@@ -1266,10 +1271,10 @@ pub fn enumerate_image_paints(
             do_path: Vec::new(),
         };
         let page_object = source.materialize(id)?;
-        if page_object
+        ctx.summary.root_group = page_object
             .as_dictionary()
-            .is_none_or(|dict| dict.contains_key(b"Group".as_slice()))
-        {
+            .is_none_or(|dict| dict.contains_key(b"Group".as_slice()));
+        if ctx.summary.root_group {
             ctx.summary
                 .native_only_blockers
                 .insert(NativeOnlyBlocker::PageContext);
