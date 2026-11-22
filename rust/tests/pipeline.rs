@@ -1018,3 +1018,137 @@ fn distinct_appearances_are_bound_but_require_actual_renderer_visibility()
     assert_eq!(fs::read(path)?, bytes);
     Ok(())
 }
+
+#[derive(Default)]
+struct CompositedRecognizer {
+    inputs: RefCell<Vec<RgbImage>>,
+}
+
+impl RecognitionBackend for CompositedRecognizer {
+    fn model_profile(&self) -> &'static str {
+        "composited image fixture"
+    }
+
+    fn recognize_pixels(&self, rgb: RgbImage) -> Result<RasterRecognition, Error> {
+        let (width, height) = rgb.dimensions();
+        self.inputs.borrow_mut().push(rgb);
+        let (w, h) = (f64::from(width), f64::from(height));
+        Ok(vec![PixelLine {
+            text: "COMPOSITED LABEL".into(),
+            confidence: 0.99,
+            quad: [
+                Point(w * 0.25, h * 0.75),
+                Point(w * 0.75, h * 0.75),
+                Point(w * 0.75, h * 0.25),
+                Point(w * 0.25, h * 0.25),
+            ],
+        }]
+        .into())
+    }
+}
+
+fn root_group_image_fixture() -> Vec<u8> {
+    let mut samples = vec![255_u8; 400 * 200 * 3];
+    for row in samples.chunks_exact_mut(400 * 3).skip(50).take(100) {
+        for pixel in row.chunks_exact_mut(3).skip(100).take(200) {
+            pixel.copy_from_slice(&[255, 0, 0]);
+        }
+    }
+    support::pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 240 160] /Resources << /XObject << /Im 7 0 R >> >> >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Group << /S /Transparency /CS /DeviceGray >> /Contents 5 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Group << /S /Transparency /CS /DeviceGray >> /Contents 6 0 R >>".to_vec(),
+        support::stream("", b"q 100 0 0 50 30 30 cm /Im Do Q"),
+        support::stream("", b"q 100 0 0 50 30 30 cm /Im Do Q 0 g 160 20 20 20 re f"),
+        support::stream("/Type /XObject /Subtype /Image /Width 400 /Height 200 /BitsPerComponent 8 /ColorSpace /DeviceRGB", &samples),
+    ])
+}
+
+#[test]
+fn root_group_uses_composited_singleton_but_mixed_page_keeps_fallback()
+-> Result<(), Box<dyn std::error::Error>> {
+    use pdf_redox_ocr::{
+        geometry::PageBox, mosaic::MosaicBudget, pipeline::NativeImageDecoder,
+        rasterize::render_rgb_region,
+    };
+
+    let bytes = root_group_image_fixture();
+    let temp = tempfile::tempdir()?;
+    let pdf = temp.path().join("root-group.pdf");
+    fs::write(&pdf, &bytes)?;
+    let doc = PdfMetadata::from_bytes(bytes)?;
+    let selected = [PageNumber::new(1)?, PageNumber::new(2)?];
+    let report = enumerate_image_paints(&doc, &selected)?;
+    assert!(
+        report
+            .pages
+            .iter()
+            .all(|page| page.root_group && !page.image_only_after_native)
+    );
+    assert!(
+        report
+            .placements
+            .iter()
+            .all(|paint| paint.unsafe_reasons.contains(&"page_transparency_group"))
+    );
+    let control = render_rgb_region(
+        &pdf,
+        selected[0],
+        doc.mapper(selected[0])?,
+        PageBox::new([30., 30., 130., 80.])?,
+        288,
+        100_000,
+    )?;
+    for native_image_decoder in [NativeImageDecoder::Poppler, NativeImageDecoder::Hayro] {
+        let recognizer = CompositedRecognizer::default();
+        let result = PreparedOcr::open(
+            &pdf,
+            None,
+            PipelinePolicy {
+                native_image_decoder,
+                raster_mode: RasterMode::All,
+                ..policy()
+            },
+        )?
+        .recognize(&recognizer, |_| {})?;
+        assert_eq!(result.stats.image_source_only_pages, 1);
+        assert_eq!(result.stats.page_fallback_pages, 1);
+        assert!(
+            result.source_rasters.is_empty(),
+            "root-group paints must never bind independent RGB"
+        );
+        assert!(result.visibility.proofs.is_empty());
+        let inputs = recognizer.inputs.borrow();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].dimensions(), (404, 204));
+        assert_eq!(
+            inputs[0].get_pixel(202, 102),
+            control.rgb.get_pixel(200, 100)
+        );
+        for point in &result.draft.pages[0].lines[0].quad {
+            assert!((54.0..=106.0).contains(&point.0), "{point:?}");
+            assert!((41.0..=69.0).contains(&point.1), "{point:?}");
+        }
+        let rejected = CompositedRecognizer::default();
+        let result = PreparedOcr::open(
+            &pdf,
+            Some("1"),
+            PipelinePolicy {
+                native_image_decoder,
+                raster_mode: RasterMode::All,
+                mosaic_budget: MosaicBudget {
+                    group_pixels: 100,
+                    ..MosaicBudget::default()
+                },
+                ..policy()
+            },
+        )?
+        .recognize(&rejected, |_| {})?;
+        assert_eq!(result.stats.image_source_only_pages, 0);
+        assert_eq!(result.stats.page_fallback_pages, 1);
+        assert!(result.source_rasters.is_empty());
+        assert_eq!(rejected.inputs.borrow()[0].width(), 1600);
+    }
+    Ok(())
+}

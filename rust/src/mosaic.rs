@@ -163,6 +163,8 @@ fn compositor_handles_reason(reason: &str) -> bool {
             | "nonrectangular_or_untracked_clip"
             | "unsupported_transparency_or_graphics_state"
             | "image_stencil_mask"
+            | "page_transparency_group"
+            | "resource_default_color_space_requires_resolution"
     )
 }
 
@@ -362,14 +364,18 @@ fn group_region(items: &[Item], page: PageBox, pitch: f64) -> Option<PageBox> {
     .ok()
 }
 
-/// A geometrically adjacent source pair needs mosaic reconstruction
-/// even if the page later fails a budget, clipping, or orientation gate.
+/// Image-only pages need actual compositing when paints cannot be interpreted
+/// independently or native text can span adjacent image fragments. This holds
+/// even if the subsequent crop plan fails a budget or geometry gate.
 #[must_use]
-pub fn contains_native_fragments(
+pub fn requires_composited_recognition(
     paints: &[ImagePaint],
     page: PageBox,
     mapper: DisplayMapper,
 ) -> bool {
+    if paints.iter().any(|paint| !paint.unsafe_reasons.is_empty()) {
+        return true;
+    }
     let items = paints
         .iter()
         .filter_map(|paint| clipped_item(paint, page, mapper))
@@ -382,7 +388,8 @@ pub fn contains_native_fragments(
 /// Partition every image invocation into source-scale connected mosaics.
 ///
 /// A page is eligible only if every image paint has sane, compatible
-/// geometry and at least one actual multi-paint fragment cluster exists.
+/// geometry, with either a fragment cluster or an independent-compositing
+/// blocker. Singleton groups then share the same rendered-pixel path.
 /// Returns None when rendering would exceed either independent pixel budget
 /// or when source text orientations differ within a connected component.
 ///
@@ -407,7 +414,10 @@ pub fn plan_raster_mosaics(
         return Ok(None);
     };
     let components = connected_components(&items, box_);
-    if !components.values().any(|group| group.len() >= 2) || components.len() > budget.groups {
+    let requires_compositing = paints.iter().any(|paint| !paint.unsafe_reasons.is_empty());
+    if (!requires_compositing && !components.values().any(|group| group.len() >= 2))
+        || components.len() > budget.groups
+    {
         return Ok(None);
     }
     let mut groups = Vec::with_capacity(components.len());
