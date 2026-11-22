@@ -13,6 +13,7 @@ use crate::{
     Error, PageNumber,
     boundary_ink::{BoundaryEvidence, audit_edge_extensions},
     draft::{DraftPage, OcrDraft, OcrLine, sha256_file},
+    fragment_ink::Sample,
     geometry::{DisplayMapper, PageBox, Point, Quad, QuadBounds},
     glyph_appearance::GlyphShape,
     glyph_isolation::{InkBand, InkGroup, InkIsolation, InkRun, isolate_ink},
@@ -25,11 +26,15 @@ use crate::{
     rasterize::render_rgb_region,
 };
 
+pub use crate::fragment_ink::{ComponentInk, InkAccounting, InkCounts};
+
 /// Native source resolution and ink measurement settings.
 #[derive(Clone, Debug)]
 pub struct LineAuditPolicy {
     pub dpi: u32,
     pub max_pixels: u64,
+    /// Total raster-pixel/region membership checks per audited line.
+    pub max_ink_checks: u64,
     pub segmentation_threshold: u8,
     pub topology_thresholds: Vec<u8>,
     pub polarity: Polarity,
@@ -41,6 +46,7 @@ impl Default for LineAuditPolicy {
         Self {
             dpi: 600,
             max_pixels: 2_000_000,
+            max_ink_checks: 32_000_000,
             segmentation_threshold: 192,
             topology_thresholds: vec![64, 128, 192, 224],
             polarity: Polarity::Auto,
@@ -148,6 +154,8 @@ pub struct BoundaryOverlap {
     pub strip_fraction: f64,
     /// Intersection divided by the peer's entire quad area.
     pub peer_fraction: f64,
+    /// Fraction of the peer quad covered by the entire proposed observation.
+    pub expanded_peer_fraction: f64,
     /// Candidate component bounding quads intersecting the peer in the strip.
     pub component_indices: Vec<usize>,
 }
@@ -157,9 +165,12 @@ pub struct MappedBoundaryExtension {
     pub evidence: BoundaryEvidence,
     pub proposed_quad: Quad,
     pub added_strip: Quad,
-    /// Every overlapping OCR line and native text region. An empty list
+    /// Every peer overlapping the expanded observation, including original-only
+    /// overlaps. An empty list
     /// does not establish that the new ink is a character.
     pub overlaps: Vec<BoundaryOverlap>,
+    /// Actual connected foreground samples, indexed by the overlaps array.
+    pub ink_accounting: InkAccounting,
 }
 
 /// Audit an original OCR observation without assigning text to individual ink groups.
@@ -200,6 +211,7 @@ pub struct LineAuditReport {
     pub topology_thresholds: Vec<u8>,
     pub requested_polarity: Polarity,
     pub requested_padding_pixels: u32,
+    pub max_ink_checks: u64,
     pub lines: Vec<AuditedLine>,
 }
 
@@ -242,6 +254,13 @@ fn mapped_groups(
         .collect()
 }
 
+pub(crate) struct SampledLine {
+    pub audit: AuditedLine,
+    normalized: image::GrayImage,
+    frame: LineFrame,
+    window: SampleWindow,
+}
+
 pub(crate) fn audit_line(
     pdf: &Path,
     metadata: &PdfMetadata,
@@ -249,7 +268,7 @@ pub(crate) fn audit_line(
     index: usize,
     line: &OcrLine,
     policy: &LineAuditPolicy,
-) -> Result<AuditedLine, Error> {
+) -> Result<SampledLine, Error> {
     let frame = LineFrame::new(
         line.quad,
         |points| points * f64::from(policy.dpi) / 72.0,
@@ -323,7 +342,7 @@ pub(crate) fn audit_line(
             column_runs: column_runs.into_iter().map(map_run).collect(),
         })
         .collect();
-    Ok(AuditedLine {
+    let audit = AuditedLine {
         page: page.get(),
         line_index: index,
         original_text: line.text.clone(),
@@ -343,25 +362,37 @@ pub(crate) fn audit_line(
         supported_bands,
         leaders,
         boundary_extensions: Vec::new(),
+    };
+    Ok(SampledLine {
+        audit,
+        normalized,
+        frame,
+        window,
     })
 }
 
 fn boundary_overlap(
+    expanded: &Quad,
     strip: &Quad,
     candidate_components: &[(usize, &MappedComponent)],
     peer: BoundaryPeer,
     peer_quad: &Quad,
 ) -> Option<BoundaryOverlap> {
-    if !QuadBounds::new(strip).intersects(QuadBounds::new(peer_quad)) {
+    if !QuadBounds::new(expanded).intersects(QuadBounds::new(peer_quad)) {
+        return None;
+    }
+    let expanded_overlap = area(&clip_convex(expanded, peer_quad));
+    if !expanded_overlap.is_finite() || expanded_overlap <= 1e-9 {
         return None;
     }
     let intersection = clip_convex(strip, peer_quad);
     let overlap = area(&intersection);
     let strip_area = area(strip);
     let peer_area = area(peer_quad);
-    if [overlap, strip_area, peer_area]
-        .iter()
-        .any(|a| !a.is_finite() || *a <= 1e-9)
+    if !overlap.is_finite()
+        || [strip_area, peer_area]
+            .iter()
+            .any(|a| !a.is_finite() || *a <= 1e-9)
     {
         return None;
     }
@@ -374,6 +405,7 @@ fn boundary_overlap(
         peer,
         strip_fraction: (overlap / strip_area).clamp(0.0, 1.0),
         peer_fraction: (overlap / peer_area).clamp(0.0, 1.0),
+        expanded_peer_fraction: (expanded_overlap / peer_area).clamp(0.0, 1.0),
         component_indices,
     })
 }
@@ -381,22 +413,12 @@ fn boundary_overlap(
 fn mapped_boundary_extensions(
     line: &AuditedLine,
     page: &DraftPage,
+    sample: &Sample<'_>,
+    mut remaining_checks: u64,
 ) -> Result<Vec<MappedBoundaryExtension>, Error> {
     let observation = line.observation_bounds;
-    let frame = LineFrame {
-        corners: line.oriented_quad,
-        width: observation.right - observation.left,
-        height: observation.bottom - observation.top,
-        axis_swapped: line.axis_swapped,
-    };
-    let window = SampleWindow {
-        padding: [
-            observation.left,
-            observation.top,
-            line.width - observation.right,
-            line.height - observation.bottom,
-        ],
-    };
+    let frame = sample.frame;
+    let window = sample.window;
     let candidates = audit_edge_extensions(
         line.components.iter().map(|c| &c.component),
         observation,
@@ -414,7 +436,7 @@ fn mapped_boundary_extensions(
             "invalid peer geometry in boundary audit".into(),
         ));
     }
-    Ok(candidates
+    candidates
         .into_iter()
         .map(|evidence| {
             let strip = match evidence.edge {
@@ -445,18 +467,24 @@ fn mapped_boundary_extensions(
                 .iter()
                 .enumerate()
                 .map(|(region_index, quad)| (BoundaryPeer::NativeText { region_index }, quad));
-            let overlaps = peers
+            let (overlaps, peer_quads): (Vec<_>, Vec<_>) = peers
                 .chain(native)
-                .filter_map(|(peer, quad)| boundary_overlap(&added_strip, &components, peer, quad))
-                .collect();
-            MappedBoundaryExtension {
+                .filter_map(|(peer, quad)| {
+                    boundary_overlap(&proposed_quad, &added_strip, &components, peer, quad)
+                        .map(|overlap| (overlap, *quad))
+                })
+                .unzip();
+            let ink_accounting =
+                sample.account(evidence.expanded, &peer_quads, &mut remaining_checks)?;
+            Ok(MappedBoundaryExtension {
                 evidence,
                 proposed_quad,
                 added_strip,
                 overlaps,
-            }
+                ink_accounting,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Inspect explicitly selected line geometry in an unchanged, SHA-bound PDF.
@@ -506,9 +534,24 @@ pub fn audit_lines(
             if line.text.trim().is_empty() || !(0.0..=1.0).contains(&line.confidence) {
                 return Err(Error::Invalid("invalid original OCR observation".into()));
             }
-            let mut audited = audit_line(pdf, &metadata, page, index, line, policy)?;
-            audited.boundary_extensions = mapped_boundary_extensions(&audited, original)?;
-            lines.push(audited);
+            let SampledLine {
+                mut audit,
+                normalized,
+                frame,
+                window,
+            } = audit_line(pdf, &metadata, page, index, line, policy)?;
+            audit.boundary_extensions = mapped_boundary_extensions(
+                &audit,
+                original,
+                &Sample {
+                    image: &normalized,
+                    frame,
+                    window,
+                    threshold: policy.segmentation_threshold,
+                },
+                policy.max_ink_checks,
+            )?;
+            lines.push(audit);
         }
     }
     if sha256_file(pdf)? != draft.pdf_sha256 {
@@ -517,7 +560,7 @@ pub fn audit_lines(
         ));
     }
     Ok(LineAuditReport {
-        schema_version: 7,
+        schema_version: 8,
         pdf_sha256: draft.pdf_sha256.clone(),
         draft_model: draft.model.clone(),
         dpi: policy.dpi,
@@ -525,6 +568,7 @@ pub fn audit_lines(
         topology_thresholds: policy.topology_thresholds.clone(),
         requested_polarity: policy.polarity,
         requested_padding_pixels: policy.padding_pixels,
+        max_ink_checks: policy.max_ink_checks,
         lines,
     })
 }

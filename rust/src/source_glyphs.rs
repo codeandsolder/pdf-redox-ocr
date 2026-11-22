@@ -102,7 +102,8 @@ impl SampleContext<'_> {
             line.detection_index,
             &original,
             &self.policy,
-        )?;
+        )?
+        .audit;
         if sampled.axis_swapped {
             return Err(Error::Invalid(
                 "source sampling would rotate the primary reading frame".into(),

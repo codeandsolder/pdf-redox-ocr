@@ -18,6 +18,8 @@ pub mod direct_images;
 mod disjoint_set;
 pub mod draft;
 pub mod draft_compare;
+#[cfg(any(feature = "pdf-integration", test))]
+mod fragment_ink;
 pub mod geometry;
 pub mod glyph_appearance;
 pub mod glyph_confirmation;
