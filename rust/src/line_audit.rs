@@ -23,7 +23,7 @@ use crate::{
     pdf_metadata::PdfMetadata,
     pixel_regions::{InkBounds, PixelRegion},
     polygon::{area, clip_convex},
-    rasterize::render_rgb_region,
+    rasterize::{calculate_crop, render_crop},
 };
 
 pub use crate::fragment_ink::{ComponentInk, InkAccounting, InkCounts};
@@ -254,9 +254,27 @@ fn mapped_groups(
 
 pub(crate) struct SampledLine {
     pub audit: AuditedLine,
-    normalized: image::GrayImage,
-    frame: LineFrame,
-    window: SampleWindow,
+    pub(crate) normalized: image::GrayImage,
+    #[cfg(feature = "native-inference")]
+    pub(crate) rgb: image::RgbImage,
+    pub(crate) frame: LineFrame,
+    pub(crate) window: SampleWindow,
+}
+
+fn charge_sample_pixels(
+    remaining: Option<&mut u64>,
+    rendered: u64,
+    (width, height): (u32, u32),
+) -> Result<(), Error> {
+    if let Some(remaining) = remaining {
+        let cost = rendered
+            .checked_add(u64::from(width) * u64::from(height))
+            .ok_or_else(|| Error::Invalid("line audit pixel cost overflow".into()))?;
+        *remaining = remaining
+            .checked_sub(cost)
+            .ok_or_else(|| Error::Invalid("fragment audit page pixel budget exhausted".into()))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn audit_line(
@@ -266,6 +284,7 @@ pub(crate) fn audit_line(
     index: usize,
     line: &OcrLine,
     policy: &LineAuditPolicy,
+    remaining_pixels: Option<&mut u64>,
 ) -> Result<SampledLine, Error> {
     let frame = LineFrame::new(
         line.quad,
@@ -293,21 +312,25 @@ pub(crate) fn audit_line(
             bottom: height,
         },
     );
-    let crop = render_rgb_region(
-        pdf,
-        page,
+    let request = calculate_crop(
         display,
         envelope(&sample_quad)?,
         policy.dpi,
         policy.max_pixels,
     )?;
+    charge_sample_pixels(remaining_pixels, request.pixels(), (width, height))?;
+    let crop = render_crop(pdf, page, &request)?;
     let mapper = crop.pixel_mapper();
-    let (normalized, polarity) = window.normalized_ink(
+    let rgb = window.rectify(
         frame,
         &crop.rgb,
         |point| mapper.to_raster(point),
-        policy.polarity,
+        std::convert::identity,
     )?;
+    let gray = image::GrayImage::from_fn(rgb.width(), rgb.height(), |x, y| {
+        image::Pixel::to_luma(rgb.get_pixel(x, y))
+    });
+    let (normalized, polarity) = window.normalize_ink(frame, &gray, policy.polarity)?;
     let InkIsolation {
         components,
         groups,
@@ -362,9 +385,32 @@ pub(crate) fn audit_line(
     Ok(SampledLine {
         audit,
         normalized,
+        #[cfg(feature = "native-inference")]
+        rgb,
         frame,
         window,
     })
+}
+
+impl SampledLine {
+    pub(crate) fn measure_extensions(
+        &mut self,
+        page: &DraftPage,
+        policy: &LineAuditPolicy,
+    ) -> Result<(), Error> {
+        self.audit.boundary_extensions = mapped_boundary_extensions(
+            &self.audit,
+            page,
+            &Sample {
+                image: &self.normalized,
+                frame: self.frame,
+                window: self.window,
+                threshold: policy.segmentation_threshold,
+            },
+            policy.max_ink_checks,
+        )?;
+        Ok(())
+    }
 }
 
 fn boundary_overlap(
@@ -530,24 +576,9 @@ pub fn audit_lines(
             if line.text.trim().is_empty() || !(0.0..=1.0).contains(&line.confidence) {
                 return Err(Error::Invalid("invalid original OCR observation".into()));
             }
-            let SampledLine {
-                mut audit,
-                normalized,
-                frame,
-                window,
-            } = audit_line(pdf, &metadata, page, index, line, policy)?;
-            audit.boundary_extensions = mapped_boundary_extensions(
-                &audit,
-                original,
-                &Sample {
-                    image: &normalized,
-                    frame,
-                    window,
-                    threshold: policy.segmentation_threshold,
-                },
-                policy.max_ink_checks,
-            )?;
-            lines.push(audit);
+            let mut sampled = audit_line(pdf, &metadata, page, index, line, policy, None)?;
+            sampled.measure_extensions(original, policy)?;
+            lines.push(sampled.audit);
         }
     }
     if sha256_file(pdf)? != draft.pdf_sha256 {

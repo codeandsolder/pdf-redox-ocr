@@ -85,6 +85,22 @@ pub enum InkAccounting {
     },
 }
 
+/// Exact pixel membership of one run in the recognized expanded crop.
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+#[derive(Debug, Default, Serialize)]
+pub struct RunInk {
+    pub run: usize,
+    pub sample: InkCounts,
+    pub peers: BTreeMap<usize, InkCounts>,
+}
+
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+#[derive(Debug, Serialize)]
+pub struct RunAccounting {
+    pub runs: Vec<RunInk>,
+    pub charged_checks: u64,
+}
+
 struct ConvexQuad {
     corners: Quad,
     positive: bool,
@@ -213,6 +229,114 @@ impl Sample<'_> {
             components: accounting.components,
             charged_checks: required_checks,
         })
+    }
+
+    /// Measure recognized projection runs in the *same* thresholded raster
+    /// as the boundary extension. Their coordinates are relative to expanded.
+    #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+    pub(crate) fn account_runs(
+        &self,
+        expanded: InkBounds,
+        groups: &[crate::glyph_isolation::InkGroup],
+        peer_quads: &[Quad],
+        accounting: &InkAccounting,
+        remaining_checks: &mut u64,
+    ) -> Result<Option<RunAccounting>, Error> {
+        let InkAccounting::Measured { sample, peers, .. } = accounting else {
+            return Ok(None);
+        };
+        let width = expanded.right - expanded.left;
+        let height = expanded.bottom - expanded.top;
+        let charged_checks = u64::from(width)
+            .saturating_mul(u64::from(height))
+            .saturating_mul(
+                u64::try_from(peer_quads.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(1),
+            );
+        let Some(remaining) = remaining_checks.checked_sub(charged_checks) else {
+            return Ok(None);
+        };
+        *remaining_checks = remaining;
+        let peer_quads = peer_quads
+            .iter()
+            .copied()
+            .map(ConvexQuad::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        let observation = self.window.observation(self.frame);
+        let mut previous_right = 0;
+        let mut runs = Vec::with_capacity(groups.len());
+        for (index, group) in groups.iter().enumerate() {
+            let bounds = group.run.ink;
+            if bounds.left < previous_right
+                || bounds.left >= bounds.right
+                || bounds.top >= bounds.bottom
+                || bounds.right > width
+                || bounds.bottom > height
+            {
+                return Err(Error::Invalid(
+                    "invalid shared recognition run bounds".into(),
+                ));
+            }
+            previous_right = bounds.right;
+            let mut run = RunInk {
+                run: index,
+                ..RunInk::default()
+            };
+            for y in bounds.top..bounds.bottom {
+                for x in bounds.left..bounds.right {
+                    let (x, y) = (x + expanded.left, y + expanded.top);
+                    if self.image.get_pixel(x, y).0[0] >= self.threshold {
+                        continue;
+                    }
+                    let part = if observation.contains(x, y) {
+                        Part::Original
+                    } else {
+                        Part::Added
+                    };
+                    run.sample.record(part);
+                    let point = self
+                        .window
+                        .to_source(self.frame, Point(f64::from(x) + 0.5, f64::from(y) + 0.5));
+                    for (peer, quad) in peer_quads.iter().enumerate() {
+                        if quad.contains(point) {
+                            run.peers.entry(peer).or_default().record(part);
+                        }
+                    }
+                }
+            }
+            if run.sample.original + run.sample.added != group.run.observation_support.inside_pixels
+            {
+                return Err(Error::Invalid(
+                    "recognized run differs from shared raster ink".into(),
+                ));
+            }
+            runs.push(run);
+        }
+        let mut covered = InkCounts::default();
+        let mut covered_peers = BTreeMap::<usize, InkCounts>::new();
+        for run in &runs {
+            covered.add(run.sample);
+            for (&peer, &count) in &run.peers {
+                covered_peers.entry(peer).or_default().add(count);
+            }
+        }
+        if sample.original != covered.original
+            || sample.added != covered.added
+            || peers.iter().any(|(peer, count)| {
+                let covered = covered_peers.get(peer).copied().unwrap_or_default();
+                covered.original != count.original || covered.added != count.added
+            })
+            || covered_peers.keys().any(|peer| !peers.contains_key(peer))
+        {
+            return Err(Error::Invalid(
+                "recognition runs do not conserve measured source ink".into(),
+            ));
+        }
+        Ok(Some(RunAccounting {
+            runs,
+            charged_checks,
+        }))
     }
 
     fn measure(
@@ -378,6 +502,98 @@ mod tests {
         );
         assert_eq!(components.len(), 1);
         assert_eq!(components[0].component_index, 0);
+        Ok(())
+    }
+
+    #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+    #[test]
+    fn exact_recognition_run_partition_conserves_shared_peer_ink() -> Result<(), Error> {
+        let mut image = GrayImage::from_pixel(9, 5, Luma([255]));
+        for (x, y) in [(1, 1), (2, 1), (4, 2), (5, 2), (6, 2), (8, 4)] {
+            image.put_pixel(x, y, Luma([0]));
+        }
+        let sample = Sample {
+            image: &image,
+            frame: LineFrame {
+                corners: rect(1., 0., 5., 5.),
+                width: 4,
+                height: 5,
+                axis_swapped: false,
+            },
+            window: SampleWindow {
+                padding: [1, 0, 4, 0],
+            },
+            threshold: 128,
+        };
+        let expanded = InkBounds {
+            left: 1,
+            top: 0,
+            right: 7,
+            bottom: 5,
+        };
+        let peers = [rect(4., 0., 7., 5.), rect(5., 0., 9., 5.)];
+        let mut budget = 135 + 90;
+        let accounting = sample.account(expanded, &peers, &mut budget)?;
+        let crop = image::imageops::crop_imm(&image, 1, 0, 6, 5).to_image();
+        let isolation = crate::glyph_isolation::isolate_ink(
+            &crop,
+            InkBounds {
+                left: 0,
+                top: 0,
+                right: 6,
+                bottom: 5,
+            },
+            128,
+            &[128],
+        )?;
+        let runs = sample
+            .account_runs(
+                expanded,
+                &isolation.groups,
+                &peers,
+                &accounting,
+                &mut budget,
+            )?
+            .ok_or_else(|| Error::Invalid("expected full run accounting".into()))?;
+        assert_eq!(budget, 0);
+        assert_eq!(runs.charged_checks, 90);
+        assert_eq!(runs.runs.len(), 2);
+        assert_eq!(
+            runs.runs[0].sample,
+            InkCounts {
+                original: 2,
+                added: 0,
+                outside_expansion: 0
+            }
+        );
+        assert_eq!(
+            runs.runs[1].sample,
+            InkCounts {
+                original: 1,
+                added: 2,
+                outside_expansion: 0
+            }
+        );
+        assert_eq!(runs.runs[1].peers[&0], runs.runs[1].sample);
+        assert_eq!(
+            runs.runs[1].peers[&1],
+            InkCounts {
+                original: 0,
+                added: 2,
+                outside_expansion: 0
+            }
+        );
+        assert!(
+            sample
+                .account_runs(
+                    expanded,
+                    &isolation.groups,
+                    &peers,
+                    &accounting,
+                    &mut budget
+                )?
+                .is_none()
+        );
         Ok(())
     }
 

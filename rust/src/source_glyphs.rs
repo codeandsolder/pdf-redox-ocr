@@ -102,6 +102,7 @@ impl SampleContext<'_> {
             line.detection_index,
             &original,
             &self.policy,
+            None,
         )?
         .audit;
         Ok(sampled)

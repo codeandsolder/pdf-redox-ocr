@@ -118,20 +118,56 @@ impl SourceInk {
     /// # Errors
     /// Rejects empty or invalid source crops.
     pub fn measure(image: &RgbImage) -> Result<Self, Error> {
-        let dimensions = image.dimensions();
         let MeasuredInk {
             normalized,
             polarity,
             isolation,
         } = MeasuredInk::from_rgb(image)?;
-        let groups = isolation.groups;
+        Self::from_groups(image, &normalized, polarity, isolation.groups)
+    }
+
+    #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+    pub(crate) fn from_shared_raster(
+        image: &RgbImage,
+        normalized: &image::GrayImage,
+        polarity: PolarityEvidence,
+        threshold: u8,
+        topology_thresholds: &[u8],
+    ) -> Result<Self, Error> {
+        let (width, height) = image.dimensions();
+        if normalized.dimensions() != (width, height) {
+            return Err(Error::Invalid(
+                "inconsistent recognition raster dimensions".into(),
+            ));
+        }
+        let isolation = crate::glyph_isolation::isolate_ink(
+            normalized,
+            crate::pixel_regions::InkBounds {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            },
+            threshold,
+            topology_thresholds,
+        )?;
+        Self::from_groups(image, normalized, polarity, isolation.groups)
+    }
+
+    fn from_groups(
+        image: &RgbImage,
+        normalized: &image::GrayImage,
+        polarity: PolarityEvidence,
+        groups: Vec<InkGroup>,
+    ) -> Result<Self, Error> {
+        let dimensions = image.dimensions();
         let appearances = groups
             .iter()
             .map(|group| {
                 if group.touches_line_edge {
                     Ok(None)
                 } else {
-                    GlyphShape::measure(&normalized, group.run.ink).map(Some)
+                    GlyphShape::measure(normalized, group.run.ink).map(Some)
                 }
             })
             .collect::<Result<Vec<_>, Error>>()?;

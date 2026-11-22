@@ -194,8 +194,16 @@ fn crop_evidence(
     let count = u64::from(dimensions.0) * u64::from(dimensions.1);
     *budget = budget.checked_sub(count)?;
     let observation = window.observation(frame);
+    let rectified = window
+        .rectify(
+            frame,
+            image,
+            |point| point,
+            |pixel| image::Pixel::to_luma(&pixel),
+        )
+        .ok()?;
     let (normalized, _) = window
-        .normalized_ink(frame, image, |point| point, Polarity::Auto)
+        .normalize_ink(frame, &rectified, Polarity::Auto)
         .ok()?;
     let components = regions(&normalized, 192, PixelClass::Ink, observation).ok()?;
     let all_leaders = detect_leaders(&components, observation);

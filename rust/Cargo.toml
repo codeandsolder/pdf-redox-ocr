@@ -94,3 +94,8 @@ required-features = ["cli"]
 name = "pdf-redox-ocr-candidate-rank"
 path = "src/bin/pdf-redox-ocr-candidate-rank.rs"
 required-features = ["cli"]
+
+[[bin]]
+name = "pdf-redox-ocr-fragment-reconcile"
+path = "src/bin/pdf-redox-ocr-fragment-reconcile.rs"
+required-features = ["native-inference", "pdf-integration", "cli"]

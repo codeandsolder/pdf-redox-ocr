@@ -151,8 +151,22 @@ impl RefinementRecognizer {
     /// Returns an error for model failures, unrepresentable view dimensions
     /// or unexpected inference batch sizes.
     pub fn recognize(&mut self, image: &RgbImage) -> Result<Recognition, Error> {
+        self.recognize_with_ink(image, SourceInk::measure(image)?)
+    }
+
+    pub(crate) fn recognize_with_ink(
+        &mut self,
+        image: &RgbImage,
+        source_ink: SourceInk,
+    ) -> Result<Recognition, Error> {
+        if image.dimensions() != source_ink.dimensions
+            || hex::encode(Sha256::digest(image.as_raw())) != source_ink.rgb_sha256
+        {
+            return Err(Error::Invalid(
+                "recognition source ink belongs to different pixels".into(),
+            ));
+        }
         let mut views = Vec::new();
-        let source_ink = SourceInk::measure(image)?;
         for &model in self.profile.models() {
             let session = match self.sessions.entry(model) {
                 std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),

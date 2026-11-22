@@ -21,6 +21,10 @@ pub mod draft;
 pub mod draft_compare;
 #[cfg(any(feature = "pdf-integration", test))]
 mod fragment_ink;
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+mod fragment_reconciliation;
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+pub mod fragment_refinement;
 pub mod geometry;
 pub mod glyph_appearance;
 pub mod glyph_confirmation;
