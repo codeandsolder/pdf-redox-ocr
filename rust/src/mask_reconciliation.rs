@@ -228,7 +228,7 @@ impl Comparison<'_> {
         let after = Sequences::from_view(view)?;
         let revised = SequenceReference::Beam { index: 0 };
         let winner = after.evidence.sequence(revised)?;
-        if canonical(&winner.text) != self.revised {
+        if canonical(winner.text) != self.revised {
             return None;
         }
         let original_revised = before.evidence.find_sequence(winner.classes)?;

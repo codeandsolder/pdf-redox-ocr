@@ -126,6 +126,24 @@ fn consensus(views: &[ViewEvidence]) -> RefinementDecision {
     }
 }
 
+fn stretch_crop(image: &RgbImage, stretch: u32) -> Result<std::borrow::Cow<'_, RgbImage>, Error> {
+    let width = u32::try_from((u64::from(image.width()) * u64::from(stretch)).div_ceil(100))
+        .map_err(|_| Error::Invalid("refinement view width overflow".into()))?;
+    if width == 0 || image.height() == 0 {
+        return Err(Error::Invalid("empty refinement view".into()));
+    }
+    Ok(if stretch == 100 {
+        std::borrow::Cow::Borrowed(image)
+    } else {
+        std::borrow::Cow::Owned(image::imageops::resize(
+            image,
+            width,
+            image.height(),
+            FilterType::Triangle,
+        ))
+    })
+}
+
 /// Lazily loaded recognition-only sessions. Both use the same preprocessing,
 /// vocabulary and CPU provider configuration as primary recognition.
 pub struct RefinementRecognizer {
@@ -197,25 +215,7 @@ impl RefinementRecognizer {
             for &stretch in self.profile.stretches() {
                 let resampled = crops
                     .iter()
-                    .map(|(image, _)| {
-                        let width = u32::try_from(
-                            (u64::from(image.width()) * u64::from(stretch)).div_ceil(100),
-                        )
-                        .map_err(|_| Error::Invalid("refinement view width overflow".into()))?;
-                        if width == 0 || image.height() == 0 {
-                            return Err(Error::Invalid("empty refinement view".into()));
-                        }
-                        Ok(if stretch == 100 {
-                            std::borrow::Cow::Borrowed(*image)
-                        } else {
-                            std::borrow::Cow::Owned(image::imageops::resize(
-                                *image,
-                                width,
-                                image.height(),
-                                FilterType::Triangle,
-                            ))
-                        })
-                    })
+                    .map(|(image, _)| stretch_crop(image, stretch))
                     .collect::<Result<Vec<_>, Error>>()?;
                 let pixels = resampled
                     .iter()

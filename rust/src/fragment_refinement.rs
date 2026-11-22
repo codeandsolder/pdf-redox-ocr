@@ -323,6 +323,32 @@ impl PageContext<'_> {
         })))
     }
 
+    fn recognize_contractions(
+        &mut self,
+        sampled: &SampledLine,
+        predictor: &mut RefinementRecognizer,
+    ) -> Result<Vec<ContractionOutcome>, Error> {
+        let Some(strokes) = &sampled.audit.foreign_strokes else {
+            return Ok(Vec::new());
+        };
+        let mut variants = Vec::new();
+        for c in &strokes.contractions {
+            let Some((rgb, shared)) = self.prepare_crop(sampled, c.evidence.retained)? else {
+                variants.push(ContractionOutcome::Skipped {
+                    reason: Rejection::PixelBudgetExceeded,
+                });
+                continue;
+            };
+            let recognition = predictor.recognize_with_ink(&rgb, shared)?;
+            variants.push(ContractionOutcome::Measured {
+                recognition: Box::new(recognition),
+                transaction: None,
+                rejection: None,
+            });
+        }
+        Ok(variants)
+    }
+
     fn recognize_strokes(
         &mut self,
         sampled: &SampledLine,
@@ -354,21 +380,7 @@ impl PageContext<'_> {
                 }),
             });
         };
-        let mut variants = Vec::new();
-        for c in contractions {
-            let Some((rgb, shared)) = self.prepare_crop(sampled, c.evidence.retained)? else {
-                variants.push(ContractionOutcome::Skipped {
-                    reason: Rejection::PixelBudgetExceeded,
-                });
-                continue;
-            };
-            let recognition = predictor.recognize_with_ink(&rgb, shared)?;
-            variants.push(ContractionOutcome::Measured {
-                recognition: Box::new(recognition),
-                transaction: None,
-                rejection: None,
-            });
-        }
+        let mut variants = self.recognize_contractions(sampled, predictor)?;
         // Preserve the pixel-budget priority of the contraction crops,
         // then recognize the masked and original crops in one paired batch
         // per model and stretch. Equal dimensions preserve the view contract.
