@@ -396,7 +396,7 @@ impl PipelineResult {
     #[must_use]
     pub const fn audit(&self) -> PipelineAudit<'_> {
         PipelineAudit {
-            schema_version: 13,
+            schema_version: 14,
             preparation: None,
             pdf_sha256: self.draft.pdf_sha256.as_str(),
             model: self.draft.model.as_str(),
@@ -942,10 +942,11 @@ impl PreparedOcr {
             ) {
                 Ok(result) => {
                     progress(format!(
-                        "direct native decode: {} accepted sources, {} rejected, {} decoded occurrences",
+                        "direct native decode: {} accepted sources, {} rejected, {} decoded occurrences, {} reused occurrences",
                         result.stats.accepted_sources,
                         result.stats.rejected_sources.len(),
-                        result.stats.decoded_occurrences
+                        result.stats.decoded_occurrences,
+                        result.stats.reused_occurrences
                     ));
                     (result.images, Some(result.stats))
                 }

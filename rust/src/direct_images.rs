@@ -2,13 +2,14 @@
 //!
 //! A source-ID keyed consumer may reuse a decoded image only if every scanned
 //! occurrence is accounted for and has the same opaque native RGB pixels.
+//! Equal resolved decoding inputs reuse a previously verified raster.
 //! The interpreter, not this module, resolves filters, color and Decode arrays.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use hayro_interpret::{
     BlendMode, ClipPath, Context, Device, DrawMode, DrawProps, Image, ImageData, ImageDrawProps,
-    InterpreterCache, InterpreterSettings, RenderContent, SoftMask,
+    InterpreterCache, InterpreterSettings, RasterDecodeContext, RenderContent, SoftMask,
     font::GlyphRun,
     interpret_page,
     kurbo::{Affine, BezPath, Rect},
@@ -26,6 +27,8 @@ pub struct DirectDecodeStats {
     pub matched_occurrences: usize,
     pub decoded_occurrences: usize,
     pub decoded_pixels: u64,
+    pub reused_occurrences: usize,
+    pub reused_pixels: u64,
     pub accepted_sources: usize,
     pub rejected_sources: BTreeMap<String, &'static str>,
 }
@@ -41,6 +44,7 @@ struct Collector<'a> {
     budget: NativeImageBudget,
     result: DirectImages,
     stored_pixels: u64,
+    verified_contexts: BTreeMap<String, HashSet<RasterDecodeContext>>,
 }
 
 struct Expected<'a> {
@@ -64,19 +68,27 @@ impl Collector<'_> {
             .rejected_sources
             .entry(id.into())
             .or_insert(reason);
+        self.verified_contexts.remove(id);
         if let Some(image) = self.result.images.remove(id) {
             self.stored_pixels -= u64::from(image.width()) * u64::from(image.height());
         }
     }
 
-    fn retain(&mut self, id: &str, rgb: RgbImage) {
+    fn retain(&mut self, id: &str, rgb: RgbImage, context: Option<RasterDecodeContext>) {
         if let Some(previous) = self.result.images.get(id) {
             if previous != &rgb {
                 self.reject(id, "resolved_pixels_differ");
+                return;
             }
         } else {
             self.stored_pixels += u64::from(rgb.width()) * u64::from(rgb.height());
             self.result.images.insert(id.into(), rgb);
+        }
+        if let Some(context) = context {
+            self.verified_contexts
+                .entry(id.into())
+                .or_default()
+                .insert(context);
         }
     }
 }
@@ -250,6 +262,20 @@ impl Device<'_> for PageDevice<'_, '_> {
             self.collector.reject(&id, "stencil");
             return;
         };
+        let context = raster.decode_context(None);
+        if context.as_ref().is_some_and(|context| {
+            self.collector
+                .verified_contexts
+                .get(&id)
+                .is_some_and(|verified| verified.contains(context))
+        }) {
+            let stats = &mut self.collector.result.stats;
+            stats.reused_occurrences += 1;
+            stats.reused_pixels = stats
+                .reused_pixels
+                .saturating_add(u64::from(dimensions.0) * u64::from(dimensions.1));
+            return;
+        }
         if !self.can_decode(&id, dimensions) {
             return;
         }
@@ -264,7 +290,7 @@ impl Device<'_> for PageDevice<'_, '_> {
         );
         if let Some(rgb) = decoded {
             self.collector.result.stats.decoded_occurrences += 1;
-            self.collector.retain(&id, rgb);
+            self.collector.retain(&id, rgb, context);
         } else {
             self.collector
                 .reject(&id, "unsupported_or_nonopaque_decode");
@@ -273,7 +299,9 @@ impl Device<'_> for PageDevice<'_, '_> {
 }
 
 /// Decode selected source images without extracting unrelated page images.
-/// Reuse is based on full occurrence correspondence plus decoded RGB equality.
+///
+/// Reuse requires full occurrence correspondence and either equal decoded
+/// RGB or a previously verified exact interpreter decoding context.
 ///
 /// # Errors
 /// Rejects invalid budgets and page selections.
@@ -289,6 +317,7 @@ pub fn direct_native_images(
         budget: budget.validate()?,
         result: DirectImages::default(),
         stored_pixels: 0,
+        verified_contexts: BTreeMap::new(),
     };
     collector.result.stats.requested_sources = wanted.len();
     if wanted.is_empty() {

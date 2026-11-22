@@ -37,7 +37,10 @@ fn repeated_source_matches_poppler_and_validates_every_context()
         .collect::<Result<Vec<_>, _>>()?;
     let actual = extract(bytes, &pages, NativeImageBudget::default())?;
     assert_eq!(actual.stats.matched_occurrences, 6, "{:?}", actual.stats);
-    assert_eq!(actual.stats.decoded_occurrences, 6);
+    assert_eq!(actual.stats.decoded_occurrences, 1);
+    assert_eq!(actual.stats.reused_occurrences, 5);
+    assert_eq!(actual.stats.reused_pixels, 1_800_000);
+    assert_eq!(actual.stats.decoded_pixels, 360_000);
     assert_eq!(actual.stats.accepted_sources, 1);
     assert!(actual.stats.rejected_sources.is_empty());
     let dir = tempfile::tempdir()?;
@@ -148,9 +151,13 @@ fn native_color_decode_and_compositing_rejection() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-/// Two uses of an identical `XObject` stream, but its named color space resolves
-/// to opposing palettes in different resource dictionaries.
-fn context_fixture(same_page: bool) -> Vec<u8> {
+/// The same image stream painted via two named color-space resources.
+fn context_fixture(
+    same_page: bool,
+    second_palette: &str,
+    samples: [u8; 2],
+    repeats: usize,
+) -> Vec<u8> {
     let first=b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Resources << /XObject << /A 7 0 R /B 8 0 R >> >> /Contents 5 0 R >>".to_vec();
     let second=b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Resources << /XObject << /B 8 0 R >> >> /Contents 6 0 R >>".to_vec();
     let pages = if same_page {
@@ -158,29 +165,31 @@ fn context_fixture(same_page: bool) -> Vec<u8> {
     } else {
         b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec()
     };
-    let content = if same_page {
-        b"q 1 0 0 1 10 10 cm /A Do Q q 1 0 0 1 120 10 cm /B Do Q".as_slice()
-    } else {
-        b"/A Do".as_slice()
-    };
+    let second_content = "q 1 0 0 1 120 10 cm /B Do Q ".repeat(repeats);
+    let mut content = "q 1 0 0 1 10 10 cm /A Do Q ".repeat(repeats);
+    if same_page {
+        content.push_str(&second_content);
+    }
     support::pdf(&[
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         pages,
         first,
         second,
-        support::stream("", content),
-        support::stream("", b"/B Do"),
+        support::stream("", content.as_bytes()),
+        support::stream("", second_content.as_bytes()),
         support::stream(
             "/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << /ColorSpace << /Local [/Indexed /DeviceRGB 1 <ff000000ff00>] >> /XObject << /Im 9 0 R >> >>",
             b"q 40 0 0 20 10 10 cm /Im Do Q",
         ),
         support::stream(
-            "/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << /ColorSpace << /Local [/Indexed /DeviceRGB 1 <0000ffffffff>] >> /XObject << /Im 9 0 R >> >>",
+            &format!(
+                "/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << /ColorSpace << /Local [/Indexed /DeviceRGB 1 <{second_palette}>] >> /XObject << /Im 9 0 R >> >>"
+            ),
             b"q 40 0 0 20 10 10 cm /Im Do Q",
         ),
         support::stream(
             "/Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /Local /BitsPerComponent 8",
-            &[0, 1],
+            &samples,
         ),
     ])
 }
@@ -188,7 +197,7 @@ fn context_fixture(same_page: bool) -> Vec<u8> {
 #[test]
 fn different_resolved_resource_contexts_do_not_share_pixels()
 -> Result<(), Box<dyn std::error::Error>> {
-    let source = context_fixture(false);
+    let source = context_fixture(false, "0000ffffffff", [0, 1], 1);
     for (page, expected) in [(1, [255, 0, 0, 0, 255, 0]), (2, [0, 0, 255, 255, 255, 255])] {
         let single = extract(
             &source,
@@ -209,16 +218,52 @@ fn different_resolved_resource_contexts_do_not_share_pixels()
             .map(PageNumber::new)
             .collect::<Result<Vec<_>, _>>()?;
         let actual = extract(
-            &context_fixture(same_page),
+            &context_fixture(same_page, "0000ffffffff", [0, 1], 2),
             &pages,
             NativeImageBudget::default(),
         )?;
         assert_eq!(actual.stats.decoded_occurrences, 2, "{:?}", actual.stats);
+        assert_eq!(actual.stats.reused_occurrences, 1);
         assert!(actual.images.is_empty());
         assert_eq!(
             actual.stats.rejected_sources.get("9:0"),
             Some(&"resolved_pixels_differ")
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn each_distinct_equal_pixel_context_is_decoded_only_once() -> Result<(), Box<dyn std::error::Error>>
+{
+    for same_page in [true, false] {
+        let pages = (1..=if same_page { 1 } else { 2 })
+            .map(PageNumber::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        for (palette, decoded) in [("ff000000ff00", 1), ("ff00000000ff", 2)] {
+            let result = extract(
+                &context_fixture(same_page, palette, [0, 0], 2),
+                &pages,
+                NativeImageBudget {
+                    source_pixels: 2,
+                    total_pixels: 2,
+                    sources: 1,
+                    extraction_pixels: 2 * decoded,
+                },
+            )?;
+            assert_eq!(result.stats.matched_occurrences, 4);
+            assert_eq!(result.stats.decoded_pixels, 2 * decoded);
+            assert_eq!(result.stats.reused_pixels, 8 - 2 * decoded);
+            assert_eq!(
+                result.stats.decoded_occurrences + result.stats.reused_occurrences,
+                4
+            );
+            assert!(result.stats.rejected_sources.is_empty());
+            assert_eq!(
+                result.images.get("9:0").ok_or("source missing")?.as_raw(),
+                &[255, 0, 0, 255, 0, 0]
+            );
+        }
     }
     Ok(())
 }
