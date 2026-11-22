@@ -126,6 +126,24 @@ fn consensus(views: &[ViewEvidence]) -> RefinementDecision {
     }
 }
 
+fn stretch_crop(image: &RgbImage, stretch: u32) -> Result<std::borrow::Cow<'_, RgbImage>, Error> {
+    let width = u32::try_from((u64::from(image.width()) * u64::from(stretch)).div_ceil(100))
+        .map_err(|_| Error::Invalid("refinement view width overflow".into()))?;
+    if width == 0 || image.height() == 0 {
+        return Err(Error::Invalid("empty refinement view".into()));
+    }
+    Ok(if stretch == 100 {
+        std::borrow::Cow::Borrowed(image)
+    } else {
+        std::borrow::Cow::Owned(image::imageops::resize(
+            image,
+            width,
+            image.height(),
+            FilterType::Triangle,
+        ))
+    })
+}
+
 /// Lazily loaded recognition-only sessions. Both use the same preprocessing,
 /// vocabulary and CPU provider configuration as primary recognition.
 pub struct RefinementRecognizer {
@@ -159,14 +177,34 @@ impl RefinementRecognizer {
         image: &RgbImage,
         source_ink: SourceInk,
     ) -> Result<Recognition, Error> {
-        if image.dimensions() != source_ink.dimensions
-            || hex::encode(Sha256::digest(image.as_raw())) != source_ink.rgb_sha256
-        {
-            return Err(Error::Invalid(
-                "recognition source ink belongs to different pixels".into(),
-            ));
+        let [result] = self.recognize_crops([(image, source_ink)], None)?;
+        Ok(result)
+    }
+
+    pub(crate) fn recognize_pair(
+        &mut self,
+        original: (&RgbImage, SourceInk),
+        masked: (&RgbImage, SourceInk),
+        primary: &str,
+    ) -> Result<[Recognition; 2], Error> {
+        self.recognize_crops([original, masked], Some(primary))
+    }
+
+    fn recognize_crops<const N: usize>(
+        &mut self,
+        crops: [(&RgbImage, SourceInk); N],
+        primary: Option<&str>,
+    ) -> Result<[Recognition; N], Error> {
+        for (image, source_ink) in &crops {
+            if image.dimensions() != source_ink.dimensions
+                || hex::encode(Sha256::digest(image.as_raw())) != source_ink.rgb_sha256
+            {
+                return Err(Error::Invalid(
+                    "recognition source ink belongs to different pixels".into(),
+                ));
+            }
         }
-        let mut views = Vec::new();
+        let mut views: [Vec<ViewEvidence>; N] = std::array::from_fn(|_| Vec::new());
         for &model in self.profile.models() {
             let session = match self.sessions.entry(model) {
                 std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -175,73 +213,77 @@ impl RefinementRecognizer {
                 }
             };
             for &stretch in self.profile.stretches() {
-                let width =
-                    u32::try_from((u64::from(image.width()) * u64::from(stretch)).div_ceil(100))
-                        .map_err(|_| Error::Invalid("refinement view width overflow".into()))?;
-                if width == 0 || image.height() == 0 {
-                    return Err(Error::Invalid("empty refinement view".into()));
-                }
-                let resampled;
-                let pixels = if stretch == 100 {
-                    image
+                let resampled = crops
+                    .iter()
+                    .map(|(image, _)| stretch_crop(image, stretch))
+                    .collect::<Result<Vec<_>, Error>>()?;
+                let pixels = resampled
+                    .iter()
+                    .map(std::borrow::Cow::as_ref)
+                    .collect::<Vec<_>>();
+                let prediction = if let Some(primary) = primary {
+                    session.predict_pair(&pixels, primary)?
                 } else {
-                    resampled =
-                        image::imageops::resize(image, width, image.height(), FilterType::Triangle);
-                    &resampled
+                    session.predict(&pixels, CharacterEvidence::Ctc)?
                 };
-                let mut prediction = session.predict(&[pixels], CharacterEvidence::Ctc)?;
-                let text = prediction
+                if prediction.ctc.len() != N {
+                    return Err(Error::Inference("missing view CTC evidence".into()));
+                }
+                for (i, ((text, score), ctc)) in prediction
                     .output
                     .texts
-                    .pop()
-                    .ok_or_else(|| Error::Inference("missing view text".into()))?;
-                let score = prediction
-                    .output
-                    .scores
-                    .pop()
-                    .ok_or_else(|| Error::Inference("missing view score".into()))?;
-                let ctc = prediction
-                    .ctc
-                    .pop()
-                    .flatten()
-                    .ok_or_else(|| Error::Inference("missing view CTC evidence".into()))?;
-                if !(0.0..=1.0).contains(&score) {
-                    return Err(Error::Inference("invalid view score".into()));
-                }
-                let ink_mapping = match &ctc {
-                    CtcOutcome::Measured { evidence } => {
-                        source_ink.map_view(pixels.dimensions(), evidence)
+                    .into_iter()
+                    .zip(prediction.output.scores)
+                    .zip(prediction.ctc)
+                    .enumerate()
+                {
+                    let ctc =
+                        ctc.ok_or_else(|| Error::Inference("missing view CTC evidence".into()))?;
+                    if !(0.0..=1.0).contains(&score) {
+                        return Err(Error::Inference("invalid view score".into()));
                     }
-                    CtcOutcome::Unavailable { .. } => None,
-                };
-                views.push(ViewEvidence {
-                    model,
-                    stretch_percent: stretch,
-                    dimensions: pixels.dimensions(),
-                    rgb_sha256: hex::encode(Sha256::digest(pixels.as_raw())),
-                    greedy_text: text,
-                    greedy_score: f64::from(score),
-                    ctc,
-                    ink_mapping,
-                });
+                    let dimensions = pixels[i].dimensions();
+                    let ink_mapping = match &ctc {
+                        CtcOutcome::Measured { evidence } => {
+                            crops[i].1.map_view(dimensions, evidence)
+                        }
+                        CtcOutcome::Unavailable { .. } => None,
+                    };
+                    views[i].push(ViewEvidence {
+                        model,
+                        stretch_percent: stretch,
+                        dimensions,
+                        rgb_sha256: hex::encode(Sha256::digest(pixels[i].as_raw())),
+                        greedy_text: text,
+                        greedy_score: f64::from(score),
+                        ctc,
+                        ink_mapping,
+                    });
+                }
             }
         }
-        let decision = match self.profile {
-            RefinementModel::Consensus => consensus(&views),
-            RefinementModel::Small | RefinementModel::Medium => views
-                .first()
-                .filter(|v| !v.greedy_text.trim().is_empty())
-                .map_or(RefinementDecision::Abstained, |v| {
-                    RefinementDecision::Greedy {
-                        text: v.greedy_text.clone(),
-                    }
-                }),
-        };
-        Ok(Recognition {
-            views,
-            decision,
-            source_ink: Box::new(source_ink),
-        })
+        let mut results = Vec::with_capacity(N);
+        for ((_, source_ink), views) in crops.into_iter().zip(views) {
+            let decision = match self.profile {
+                RefinementModel::Consensus => consensus(&views),
+                RefinementModel::Small | RefinementModel::Medium => views
+                    .first()
+                    .filter(|v| !v.greedy_text.trim().is_empty())
+                    .map_or(RefinementDecision::Abstained, |v| {
+                        RefinementDecision::Greedy {
+                            text: v.greedy_text.clone(),
+                        }
+                    }),
+            };
+            results.push(Recognition {
+                views,
+                decision,
+                source_ink: Box::new(source_ink),
+            });
+        }
+        results
+            .try_into()
+            .map_err(|_| Error::Inference("inconsistent recognition count".into()))
     }
 }
 
@@ -267,6 +309,7 @@ mod tests {
             ink_mapping: None,
             ctc: CtcOutcome::Measured {
                 evidence: CtcEvidence {
+                    queries: Vec::new(),
                     sequence_length: 2,
                     vocabulary_size: 3,
                     row_class_limit: 8,

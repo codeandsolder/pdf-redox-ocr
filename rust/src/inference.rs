@@ -227,6 +227,26 @@ impl RecognitionSessionModel {
         images: &[&RgbImage],
         mode: CharacterEvidence,
     ) -> Result<CropPredictions, Error> {
+        self.predict_impl(images, mode, None)
+    }
+
+    pub(crate) fn predict_pair(
+        &self,
+        images: &[&RgbImage],
+        primary: &str,
+    ) -> Result<CropPredictions, Error> {
+        if images.len() != 2 || images[0].dimensions() != images[1].dimensions() {
+            return Err(Error::Invalid("paired CTC crop dimensions mismatch".into()));
+        }
+        self.predict_impl(images, CharacterEvidence::Ctc, Some(primary))
+    }
+
+    fn predict_impl(
+        &self,
+        images: &[&RgbImage],
+        mode: CharacterEvidence,
+        pair_primary: Option<&str>,
+    ) -> Result<CropPredictions, Error> {
         let (output, ctc) = if mode == CharacterEvidence::Ctc {
             let input = self
                 .model
@@ -237,7 +257,7 @@ impl RecognitionSessionModel {
                 .infer(&input)
                 .map_err(|error| inference_error(&error))?;
             let output = self.model.postprocess(&probabilities, true);
-            let ctc = probabilities
+            let mut ctc = probabilities
                 .outer_iter()
                 .enumerate()
                 .map(|(index, sequence)| {
@@ -272,6 +292,38 @@ impl RecognitionSessionModel {
                     })
                 })
                 .collect::<Vec<_>>();
+            if let Some(primary) = pair_primary
+                && let [
+                    Some(CtcOutcome::Measured { evidence: before }),
+                    Some(CtcOutcome::Measured { evidence: after }),
+                ] = ctc.as_mut_slice()
+            {
+                let mut matrices = probabilities.outer_iter();
+                let before_matrix = matrices
+                    .next()
+                    .ok_or_else(|| Error::Invalid("missing original CTC tensor".into()))?;
+                let after_matrix = matrices
+                    .next()
+                    .ok_or_else(|| Error::Invalid("missing masked CTC tensor".into()))?;
+                let before_rows = before_matrix
+                    .as_slice()
+                    .ok_or_else(|| Error::Invalid("noncontiguous original CTC tensor".into()))?
+                    .chunks_exact(before.vocabulary_size)
+                    .collect::<Vec<_>>();
+                let after_rows = after_matrix
+                    .as_slice()
+                    .ok_or_else(|| Error::Invalid("noncontiguous masked CTC tensor".into()))?
+                    .chunks_exact(after.vocabulary_size)
+                    .collect::<Vec<_>>();
+                CtcEvidence::pair_queries(
+                    &self.vocabulary,
+                    before,
+                    &before_rows,
+                    after,
+                    &after_rows,
+                    primary,
+                );
+            }
             (output, ctc)
         } else {
             (

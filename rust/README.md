@@ -932,7 +932,11 @@ all non-mask samples. The original recognition is shared with contractions.
 A masked text-only correction requires unique retained-run assignment in
 both models, compatible localization of the very same revised class sequence
 before masking, and increased full conditional CTC log odds versus the same
-primary class sequence. An ordered token assignment must preserve the exact
+primary class sequence. Original and masked crops of identical dimensions share
+a batch for each model and stretch. Missing comparison sequences are
+scored exactly from the same complete inference distributions, independently
+of beam rank, and serialized as explicit queries with their own token mapping.
+Queries never participate in recognition consensus. An ordered token assignment must preserve the exact
 transcription of every unaffected source group. Only groups with measured
 removed foreground may change their labels; split groups retain a common
 original identity. Each accepted vote records the path-mass comparison and
@@ -970,7 +974,7 @@ peer additionally requires stable independently localized literal text inside th
 observation, and cannot have a shared component cut by the replacement boundary.
 Native-text conflicts and incomplete peer samples abstain.
 
-The schema 11 report retains the original observation identity, all considered extensions and contractions,
+The schema 12 report retains the original observation identity, all considered extensions and contractions,
 conditional CTC evidence, common-raster run counts, peer evidence, transactions and
 conflicts. Strictly nested candidates can supersede a shorter candidate only if all added
 foreground is bound to tokens, the larger component chain and crop contain the

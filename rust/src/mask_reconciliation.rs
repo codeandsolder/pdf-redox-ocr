@@ -4,10 +4,9 @@
 use serde::Serialize;
 
 use crate::{
-    candidate_ink::{CandidateAnchor, CandidateMapping, SourceInk},
+    candidate_ink::{CandidateAnchor, SourceInk, ViewInkMapping},
     character_alignment::RunAlignment,
-    ctc_alignment::SequenceAlignment,
-    ctc_evidence::{CtcOutcome, SequenceHypothesis},
+    ctc_evidence::{CtcEvidence, CtcOutcome, SequenceReference},
     fragment_reconciliation::{Operation, Rejection, Transaction, consistent_votes},
     line_audit::AuditedLine,
     orthogonal_mask::MaskEvidence,
@@ -29,9 +28,9 @@ pub struct RunPartition {
 pub struct MaskVote {
     pub original_view: usize,
     pub masked_view: usize,
-    /// Primary and revised class sequence indices, respectively.
-    pub original_hypotheses: [usize; 2],
-    pub masked_hypotheses: [usize; 2],
+    /// Primary and revised exact class sequences, respectively.
+    pub original_sequences: [SequenceReference; 2],
+    pub masked_sequences: [SequenceReference; 2],
     /// Full conditional path log mass difference, revised minus primary.
     pub log_odds_before: f64,
     pub log_odds_after: f64,
@@ -190,8 +189,8 @@ fn localized_assignment(
 }
 
 struct Sequences<'a> {
-    hypotheses: &'a [SequenceHypothesis],
-    mappings: &'a [CandidateMapping],
+    evidence: &'a CtcEvidence,
+    mapping: &'a ViewInkMapping,
 }
 
 impl<'a> Sequences<'a> {
@@ -199,36 +198,11 @@ impl<'a> Sequences<'a> {
         let CtcOutcome::Measured { evidence } = &view.ctc else {
             return None;
         };
-        let mappings = &view.ink_mapping.as_ref()?.hypotheses;
-        (mappings.len() == evidence.hypotheses.len()).then_some(Self {
-            hypotheses: &evidence.hypotheses,
-            mappings,
-        })
+        let mapping = view.ink_mapping.as_ref()?;
+        (mapping.hypotheses.len() == evidence.hypotheses.len()
+            && mapping.queries.len() == evidence.queries.len())
+        .then_some(Self { evidence, mapping })
     }
-
-    fn index_of(&self, classes: &[usize]) -> Option<usize> {
-        self.hypotheses.iter().position(|h| h.classes == classes)
-    }
-
-    fn strongest(&self, text: &str) -> Option<usize> {
-        self.hypotheses
-            .iter()
-            .enumerate()
-            .filter_map(|(i, h)| {
-                (canonical(&h.text) == text)
-                    .then(|| log_mass(h).map(|mass| (i, mass)))
-                    .flatten()
-            })
-            .max_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(i, _)| i)
-    }
-}
-
-fn log_mass(h: &SequenceHypothesis) -> Option<f64> {
-    let SequenceAlignment::Measured { log_mass, .. } = h.alignment else {
-        return None;
-    };
-    log_mass.is_finite().then_some(log_mass)
 }
 
 struct Comparison<'a> {
@@ -252,24 +226,32 @@ impl Comparison<'_> {
         }
         let before = Sequences::from_view(old_view)?;
         let after = Sequences::from_view(view)?;
-        let winner = after.hypotheses.first()?;
-        if canonical(&winner.text) != self.revised {
+        let revised = SequenceReference::Beam { index: 0 };
+        let winner = after.evidence.sequence(revised)?;
+        if canonical(winner.text) != self.revised {
             return None;
         }
-        let original_revised = before.index_of(&winner.classes)?;
-        let original_primary = before.strongest(self.primary)?;
-        let masked_primary = after.index_of(&before.hypotheses[original_primary].classes)?;
-        let before_odds = log_mass(&before.hypotheses[original_revised])?
-            - log_mass(&before.hypotheses[original_primary])?;
-        let after_odds = log_mass(winner)? - log_mass(&after.hypotheses[masked_primary])?;
+        let original_revised = before.evidence.find_sequence(winner.classes)?;
+        let original_primary = before
+            .evidence
+            .strongest_matching(|text| canonical(text) == self.primary)?;
+        let primary = before.evidence.sequence(original_primary)?;
+        let masked_primary = after.evidence.find_sequence(primary.classes)?;
+        let before_odds =
+            before.evidence.sequence(original_revised)?.log_mass()? - primary.log_mass()?;
+        let after_odds =
+            winner.log_mass()? - after.evidence.sequence(masked_primary)?.log_mass()?;
         // Compare the very same class sequences, not separately pruned beam
         // mass, nor probability across unrelated model configurations.
         if after_odds <= 0.0 || after_odds <= before_odds {
             return None;
         }
-        let runs = after.mappings.first()?.unique_runs(self.revised)?;
+        let runs = after.mapping.sequence(revised)?.unique_runs(self.revised)?;
         let labels = self.partition.labels(self.revised, &runs)?;
-        let original_anchors = before.mappings[original_revised].visible_anchors(self.revised)?;
+        let original_anchors = before
+            .mapping
+            .sequence(original_revised)?
+            .visible_anchors(self.revised)?;
         if original_anchors.len() != runs.len()
             || !original_anchors.iter().zip(&runs).all(|(a, &r)| {
                 let group = self.partition.parents[r];
@@ -278,7 +260,10 @@ impl Comparison<'_> {
         {
             return None;
         }
-        let old_anchors = before.mappings[original_primary].visible_anchors(self.primary)?;
+        let old_anchors = before
+            .mapping
+            .sequence(original_primary)?
+            .visible_anchors(self.primary)?;
         let primary_token_groups =
             localized_assignment(&old_anchors, &self.partition.groups, &labels)?;
         Some((
@@ -286,8 +271,8 @@ impl Comparison<'_> {
             MaskVote {
                 original_view: original_index,
                 masked_view: index,
-                original_hypotheses: [original_primary, original_revised],
-                masked_hypotheses: [masked_primary, 0],
+                original_sequences: [original_primary, original_revised],
+                masked_sequences: [masked_primary, revised],
                 log_odds_before: before_odds,
                 log_odds_after: after_odds,
                 primary_token_groups,
