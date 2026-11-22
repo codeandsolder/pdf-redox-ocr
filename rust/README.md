@@ -911,8 +911,12 @@ Native-text conflicts and incomplete peer samples abstain.
 
 The report retains the original observation identity, all considered extensions,
 conditional CTC evidence, common-raster run counts, peer evidence, transactions and
-conflicts. Operations sharing observations or overlapping replacement geometry are
-blocked symmetrically. The output is a **non-importable schema 0 draft** with every
+conflicts. Strictly nested candidates can supersede a shorter candidate only if all added
+foreground is bound to tokens, the larger component chain and crop contain the
+smaller, every preserved token has identical common-raster run bounds and pixel
+support, and peer claims are unchanged. The report records every strict
+dominator. Remaining operations sharing observations or overlapping replacement
+geometry are blocked symmetrically; dominated options do not revive on conflict. The output is a **non-importable schema 0 draft** with every
 confidence zero and no reviewed flags. This is an offline diagnostic, not automatic
 overlay admission. The combined page pixel budget covers padded source renders,
 rectification, variant crops and separately sampled peers. The ink-check budget is

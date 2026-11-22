@@ -75,10 +75,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         write_atomic(path, &bytes)?;
     }
     eprintln!(
-        "{} proposed fragment transactions, {} conflicts, {} accepted (non-importable research)",
+        "{} proposed fragment transactions, {} superseded, {} conflicts, {} accepted (non-importable research)",
         report.transactions.len(),
+        report.superseded.len(),
         report.conflicts.len(),
-        report.transactions.len() - report.conflicts.len()
+        report.transactions.len() - report.conflicts.len() - report.superseded.len()
     );
     Ok(())
 }

@@ -16,7 +16,7 @@ use crate::{
     candidate_ink::SourceInk,
     draft::{DraftPage, OcrDraft},
     fragment_ink::{InkAccounting, Sample},
-    fragment_reconciliation::{conflicts, experimental_draft, propose},
+    fragment_reconciliation::{conflicts, experimental_draft, propose, superseded},
     geometry::{DisplayMapper, Quad},
     line_audit::{
         AuditedLine, BoundaryPeer, LineAuditPolicy, MappedBoundaryExtension, SampledLine,
@@ -105,6 +105,8 @@ pub struct FragmentReport {
     pub max_ink_checks: u64,
     pub pages: Vec<PageEvidence>,
     pub transactions: Vec<Transaction>,
+    /// Replaced candidate index and every strictly dominating candidate index.
+    pub superseded: BTreeMap<usize, Vec<usize>>,
     pub conflicts: BTreeSet<usize>,
 }
 
@@ -353,12 +355,18 @@ pub fn reconcile_fragments(
             peers: context.peers,
         });
     }
-    let conflicts = conflicts(&transactions);
-    let draft = experimental_draft(source, &transactions, &conflicts);
+    let superseded = superseded(&transactions);
+    let conflicts = conflicts(&transactions, &superseded);
+    let blocked = conflicts
+        .iter()
+        .copied()
+        .chain(superseded.keys().copied())
+        .collect();
+    let draft = experimental_draft(source, &transactions, &blocked);
     source.verify_pdf(pdf)?;
     Ok((
         FragmentReport {
-            schema_version: 2,
+            schema_version: 3,
             pdf_sha256: source.pdf_sha256.clone(),
             draft_model: source.model.clone(),
             secondary_model: RefinementModel::Consensus.label(),
@@ -372,6 +380,7 @@ pub fn reconcile_fragments(
             max_ink_checks: policy.audit.max_ink_checks,
             pages,
             transactions,
+            superseded,
             conflicts,
         },
         draft,
