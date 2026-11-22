@@ -52,6 +52,39 @@ pub enum CandidateMapping {
     Unavailable { reason: String },
 }
 
+impl CandidateMapping {
+    /// Localized non-whitespace tokens for the specified canonical text.
+    #[must_use]
+    pub fn visible_anchors(&self, text: &str) -> Option<Vec<&CandidateAnchor>> {
+        let Self::Mapped { anchors } = self else {
+            return None;
+        };
+        let visible = anchors
+            .iter()
+            .filter(|a| !a.anchor.character.is_whitespace())
+            .collect::<Vec<_>>();
+        visible
+            .iter()
+            .map(|a| a.anchor.character)
+            .eq(text.chars().filter(|c| !c.is_whitespace()))
+            .then_some(visible)
+    }
+
+    /// A unique, strictly ordered source-run identity for each token.
+    #[must_use]
+    pub fn unique_runs(&self, text: &str) -> Option<Vec<usize>> {
+        let runs = self
+            .visible_anchors(text)?
+            .iter()
+            .map(|a| match a.anchor.alignment {
+                RunAlignment::Unique { run } => Some(run),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        runs.windows(2).all(|p| p[0] < p[1]).then_some(runs)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct ViewGeometry {
     pub tensor_width: usize,

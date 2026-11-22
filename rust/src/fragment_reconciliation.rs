@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use crate::{
     boundary_ink::BoundaryEvidence,
-    candidate_ink::{CandidateAnchor, CandidateMapping},
+    candidate_ink::CandidateAnchor,
     character_alignment::{CharacterAnchor, RunAlignment, align_runs},
     ctc_evidence::CtcOutcome,
     draft::{OcrDraft, OcrLine},
@@ -67,6 +67,7 @@ pub struct Expansion {
 pub enum Operation {
     Expansion(Expansion),
     Contraction(crate::stroke_reconciliation::Contraction),
+    MaskCorrection(crate::mask_reconciliation::MaskCorrection),
 }
 
 #[derive(Debug, Serialize)]
@@ -106,6 +107,7 @@ pub enum Rejection {
     NotLiteralContraction,
     UnlocalizedRemovedTokens,
     ForegroundPartitionMismatch,
+    UnlocalizedMaskChange,
 }
 
 /// Non-space scalar range in the longer literal edge extension.
@@ -133,19 +135,11 @@ fn top_anchors<'a>(
     if canonical(&evidence.hypotheses.first()?.text) != canonical(text) {
         return None;
     }
-    let CandidateMapping::Mapped { anchors } = view.ink_mapping.as_ref()?.hypotheses.first()?
-    else {
-        return None;
-    };
-    let visible = anchors
-        .iter()
-        .filter(|a| !a.anchor.character.is_whitespace())
-        .collect::<Vec<_>>();
-    visible
-        .iter()
-        .map(|a| a.anchor.character)
-        .eq(canonical(text).chars())
-        .then_some(visible)
+    view.ink_mapping
+        .as_ref()?
+        .hypotheses
+        .first()?
+        .visible_anchors(text)
 }
 
 fn constrained_view(

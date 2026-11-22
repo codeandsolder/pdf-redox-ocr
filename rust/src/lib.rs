@@ -43,6 +43,8 @@ pub mod layout_leaders;
 #[cfg(feature = "pdf-integration")]
 pub mod line_audit;
 mod line_frame;
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+mod mask_reconciliation;
 #[cfg(feature = "pdf-integration")]
 pub mod mixed_visibility;
 #[cfg(feature = "pdf-integration")]

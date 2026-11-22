@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-const MAX_CELLS: usize = 2_000_000;
+pub(crate) const MAX_CELLS: usize = 2_000_000;
 const LOG_ZERO: f64 = f64::NEG_INFINITY;
 
 #[derive(Debug, Serialize, Deserialize)]

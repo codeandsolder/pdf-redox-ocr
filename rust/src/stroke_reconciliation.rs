@@ -7,8 +7,7 @@ use std::{collections::BTreeSet, ops::Range};
 use serde::Serialize;
 
 use crate::{
-    candidate_ink::{CandidateMapping, SourceInk},
-    character_alignment::RunAlignment,
+    candidate_ink::SourceInk,
     ctc_evidence::CtcOutcome,
     fragment_reconciliation::{Operation, Rejection, Transaction, edge_difference},
     layout_leaders::LeaderEdge,
@@ -152,27 +151,6 @@ fn partition(
     Some(runs)
 }
 
-fn assignment(mapping: &CandidateMapping, text: &str) -> Option<Vec<usize>> {
-    let CandidateMapping::Mapped { anchors } = mapping else {
-        return None;
-    };
-    let visible = anchors
-        .iter()
-        .filter(|a| !a.anchor.character.is_whitespace())
-        .collect::<Vec<_>>();
-    if !visible.iter().map(|a| a.anchor.character).eq(text.chars()) {
-        return None;
-    }
-    let runs = visible
-        .iter()
-        .map(|a| match a.anchor.alignment {
-            RunAlignment::Unique { run } => Some(run),
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>()?;
-    runs.windows(2).all(|p| p[0] < p[1]).then_some(runs)
-}
-
 /// Every removed run must be bound and no retained token may change its
 /// measured source identity. Unclaimed retained ink is allowed.
 fn conserved(
@@ -228,7 +206,7 @@ fn original_assignment(
         if canonical(&h.text) != text {
             continue;
         }
-        let runs = assignment(m, text)?;
+        let runs = m.unique_runs(text)?;
         if result.as_ref().is_some_and(|old| old != &runs) {
             return None;
         }
@@ -257,7 +235,12 @@ impl VoteContext<'_> {
         if canonical(&evidence.hypotheses.first()?.text) != self.new {
             return None;
         }
-        let revised_runs = assignment(view.ink_mapping.as_ref()?.hypotheses.first()?, self.new)?;
+        let revised_runs = view
+            .ink_mapping
+            .as_ref()?
+            .hypotheses
+            .first()?
+            .unique_runs(self.new)?;
         let mut candidates =
             self.original.views.iter().enumerate().filter(|(_, v)| {
                 v.model == view.model && v.stretch_percent == view.stretch_percent
