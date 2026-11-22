@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let targets = parse_exact_lines(&args.lines)?;
     let mut policy = FragmentPolicy::default();
     policy.audit.dpi = args.dpi;
-    policy.audit.padding_pixels = args.padding_pixels;
+    policy.audit.padding_pixels = args.padding_pixels.map(|n| [n; 4]);
     policy.audit.max_pixels = args.max_line_pixels;
     policy.audit.max_ink_checks = args.max_ink_checks;
     policy.max_page_pixels = args.max_page_pixels;

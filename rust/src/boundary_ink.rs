@@ -286,7 +286,7 @@ const fn outward(bounds: InkBounds, edge: LeaderEdge, sample_width: u32) -> (u32
 const fn edge_extent(height: u32) -> u32 {
     height.saturating_mul(2)
 }
-const fn edge_margin(height: u32) -> u32 {
+pub(crate) const fn edge_margin(height: u32) -> u32 {
     height.div_ceil(6)
 }
 
@@ -342,6 +342,7 @@ fn candidates_on_edge(
     observation: InkBounds,
     edge: LeaderEdge,
     sample_width: u32,
+    horizon: u32,
 ) -> Vec<BoundaryEvidence> {
     let h = height(observation);
     let (_, original_edge) = outward(observation, edge, sample_width);
@@ -365,7 +366,9 @@ fn candidates_on_edge(
     for run in candidates {
         let (near, far) = outward(run.bounds, edge, sample_width);
         let gap = near.saturating_sub(previous);
-        if gap > h - h.div_ceil(4) || far - original_edge > edge_extent(h) || width(run.bounds) > h
+        if gap > h - h.div_ceil(4)
+            || far - original_edge > edge_extent(h).max(horizon)
+            || width(run.bounds) > h
         {
             break;
         }
@@ -408,6 +411,7 @@ pub fn audit_edge_extensions<'a>(
     components: impl IntoIterator<Item = &'a PixelRegion>,
     observation: InkBounds,
     sample_width: u32,
+    peer_horizon: [u32; 2],
 ) -> Vec<BoundaryEvidence> {
     let components = components.into_iter().collect::<Vec<_>>();
     if observation.left >= observation.right
@@ -430,7 +434,10 @@ pub fn audit_edge_extensions<'a>(
     }
     [LeaderEdge::Left, LeaderEdge::Right]
         .into_iter()
-        .flat_map(|edge| candidates_on_edge(&components, &runs, observation, edge, sample_width))
+        .zip(peer_horizon)
+        .flat_map(|(edge, horizon)| {
+            candidates_on_edge(&components, &runs, observation, edge, sample_width, horizon)
+        })
         .collect()
 }
 
@@ -476,7 +483,7 @@ mod tests {
             mark(223, 131, 285, 154, 0),
             mark(226, 119, 229, 122, 0),
         ];
-        let candidates = audit_edge_extensions(&components, observation, 285);
+        let candidates = audit_edge_extensions(&components, observation, 285, [0; 2]);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].edge, LeaderEdge::Right);
         assert_eq!(candidates[0].component_indices, [3]);
@@ -495,11 +502,40 @@ mod tests {
             right: 185,
             ..observation
         };
-        let left = audit_edge_extensions(&reflected, reflected_observation, 285);
+        let left = audit_edge_extensions(&reflected, reflected_observation, 285, [0; 2]);
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].edge, LeaderEdge::Left);
         assert_eq!(left[0].component_indices, [3]);
         assert_eq!(left[0].expanded.left, 65);
+    }
+
+    #[test]
+    fn peer_horizon_does_not_bypass_contiguous_glyph_chain() {
+        let observation = InkBounds {
+            left: 10,
+            top: 10,
+            right: 45,
+            bottom: 30,
+        };
+        let mut components = vec![mark(12, 12, 29, 28, 8)];
+        components.push(mark(42, 12, 55, 28, 4));
+        components.extend([
+            mark(58, 12, 73, 28, 0),
+            mark(76, 12, 91, 28, 0),
+            mark(94, 12, 109, 28, 0),
+        ]);
+        assert_eq!(
+            audit_edge_extensions(&components, observation, 150, [0; 2]).len(),
+            2
+        );
+        let extended = audit_edge_extensions(&components, observation, 150, [0, 64]);
+        assert_eq!(extended.len(), 4);
+        assert_eq!(extended[3].component_indices, [1, 2, 3, 4]);
+        components.push(mark(75, 0, 76, 40, 0));
+        assert_eq!(
+            audit_edge_extensions(&components, observation, 150, [0, 64]).len(),
+            2
+        );
     }
 
     #[test]
@@ -516,7 +552,7 @@ mod tests {
             mark(178, 151, 183, 157, 4),
             mark(191, 109, 220, 157, 0),
         ];
-        let both = audit_edge_extensions(&base, observation, 281);
+        let both = audit_edge_extensions(&base, observation, 281, [0; 2]);
         assert_eq!(both.len(), 2);
         assert_eq!(both[0].component_indices, [2]);
         assert_eq!(both[0].expanded.right, 187);
@@ -524,7 +560,7 @@ mod tests {
         assert_eq!(both[1].expanded.right, 230);
         let mut blocked = base.to_vec();
         blocked.push(mark(186, 80, 189, 180, 0));
-        let only_period = audit_edge_extensions(&blocked, observation, 281);
+        let only_period = audit_edge_extensions(&blocked, observation, 281, [0; 2]);
         assert_eq!(only_period.len(), 1);
         assert_eq!(only_period[0].component_indices, [2]);
         assert_eq!(only_period[0].expanded.right, 184);
@@ -553,7 +589,7 @@ mod tests {
                 observation,
             )
         };
-        let result = audit_edge_extensions(&measure(&raster)?, observation, 60);
+        let result = audit_edge_extensions(&measure(&raster)?, observation, 60, [0; 2]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].edge, LeaderEdge::Right);
         assert_eq!(result[0].expanded.right, 44);
@@ -561,7 +597,7 @@ mod tests {
         for y in 0..40 {
             crossed.put_pixel(31, y, image::Luma([0]));
         }
-        assert!(audit_edge_extensions(&measure(&crossed)?, observation, 60).is_empty());
+        assert!(audit_edge_extensions(&measure(&crossed)?, observation, 60, [0; 2]).is_empty());
         Ok(())
     }
 
@@ -588,7 +624,7 @@ mod tests {
             )
         };
         let components = measure(&image)?;
-        assert!(audit_edge_extensions(&components, observation, 60).is_empty());
+        assert!(audit_edge_extensions(&components, observation, 60, [0; 2]).is_empty());
         let (band, corrected) = measured_body_band(
             &image,
             128,
@@ -603,7 +639,7 @@ mod tests {
                 ..observation
             }
         );
-        let candidates = audit_edge_extensions(&corrected, band, 60);
+        let candidates = audit_edge_extensions(&corrected, band, 60, [0; 2]);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].edge, LeaderEdge::Right);
         assert_eq!(candidates[0].expanded.top, 10);
@@ -661,7 +697,7 @@ mod tests {
                 ..observation
             }
         );
-        assert_eq!(audit_edge_extensions(&corrected, band, 80).len(), 1);
+        assert_eq!(audit_edge_extensions(&corrected, band, 80, [0; 2]).len(), 1);
 
         // A long vertical continuation may contain a dense blob within the
         // original box. It is not a body glyph if most of its span is outside.

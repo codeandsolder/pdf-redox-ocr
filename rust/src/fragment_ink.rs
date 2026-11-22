@@ -10,8 +10,9 @@ use serde::Serialize;
 use crate::{
     Error,
     geometry::{Point, Quad},
-    line_frame::{LineFrame, SampleWindow, convex},
+    line_frame::{LineFrame, SampleWindow},
     pixel_regions::{InkBounds, PixelClass, regions_visit},
+    polygon::ConvexQuad,
 };
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -133,54 +134,6 @@ pub struct RunAccounting {
     pub charged_checks: u64,
 }
 
-struct ConvexQuad {
-    corners: Quad,
-    positive: bool,
-    min: Point,
-    max: Point,
-}
-
-impl ConvexQuad {
-    fn new(corners: Quad) -> Result<Self, Error> {
-        if !convex(&corners) {
-            return Err(Error::Invalid("invalid fragment accounting quad".into()));
-        }
-        let (min, max) = corners.iter().fold(
-            (
-                Point(f64::INFINITY, f64::INFINITY),
-                Point(f64::NEG_INFINITY, f64::NEG_INFINITY),
-            ),
-            |(Point(l, t), Point(r, b)), &Point(x, y)| {
-                (Point(l.min(x), t.min(y)), Point(r.max(x), b.max(y)))
-            },
-        );
-        let [a, b, c, _] = corners;
-        Ok(Self {
-            positive: (b.0 - a.0).mul_add(c.1 - b.1, -(b.1 - a.1) * (c.0 - b.0)) > 0.0,
-            corners,
-            min,
-            max,
-        })
-    }
-
-    fn contains(&self, Point(x, y): Point) -> bool {
-        if x < self.min.0 || x > self.max.0 || y < self.min.1 || y > self.max.1 {
-            return false;
-        }
-        self.corners
-            .iter()
-            .zip(self.corners.iter().cycle().skip(1))
-            .all(|(&a, &b)| {
-                let cross = (b.0 - a.0).mul_add(y - a.1, -(b.1 - a.1) * (x - a.0));
-                if self.positive {
-                    cross >= 0.0
-                } else {
-                    cross <= 0.0
-                }
-            })
-    }
-}
-
 struct MeasuredInk {
     sample: InkCounts,
     peer_union: InkCounts,
@@ -194,6 +147,13 @@ pub struct Sample<'a> {
     pub frame: LineFrame,
     pub window: SampleWindow,
     pub threshold: u8,
+}
+
+/// Charge every raster position and every potential peer membership.
+pub fn membership_checks(width: u32, height: u32, peers: usize) -> u64 {
+    u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(u64::try_from(peers).unwrap_or(u64::MAX).saturating_add(1))
 }
 
 impl Sample<'_> {
@@ -220,13 +180,7 @@ impl Sample<'_> {
                 "inconsistent fragment accounting bounds".into(),
             ));
         }
-        let required_checks = u64::from(width)
-            .saturating_mul(u64::from(height))
-            .saturating_mul(
-                u64::try_from(peers.len())
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(1),
-            );
+        let required_checks = membership_checks(width, height, peers.len());
         let Some(remaining) = remaining_checks.checked_sub(required_checks) else {
             return Ok(InkAccounting::BudgetExceeded {
                 required_checks,
@@ -279,13 +233,7 @@ impl Sample<'_> {
         };
         let width = expanded.right - expanded.left;
         let height = expanded.bottom - expanded.top;
-        let charged_checks = u64::from(width)
-            .saturating_mul(u64::from(height))
-            .saturating_mul(
-                u64::try_from(peer_quads.len())
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(1),
-            );
+        let charged_checks = membership_checks(width, height, peer_quads.len());
         let Some(remaining) = remaining_checks.checked_sub(charged_checks) else {
             return Ok(None);
         };

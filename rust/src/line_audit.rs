@@ -19,10 +19,10 @@ use crate::{
     glyph_isolation::{InkBand, InkGroup, InkIsolation, InkRun, isolate_ink},
     ink_polarity::{Polarity, PolarityEvidence},
     layout_leaders::{LeaderEdge, LeaderEvidence, detect_leaders},
-    line_frame::{LineAxis, LineFrame, SampleWindow, convex},
+    line_frame::{LineAxis, LineFrame, SampleWindow},
     pdf_metadata::PdfMetadata,
     pixel_regions::{InkBounds, PixelRegion},
-    polygon::{area, clip_convex},
+    polygon::{area, clip_convex, convex},
     rasterize::{calculate_crop, render_crop},
 };
 
@@ -38,8 +38,8 @@ pub struct LineAuditPolicy {
     pub segmentation_threshold: u8,
     pub topology_thresholds: Vec<u8>,
     pub polarity: Polarity,
-    /// Fixed uniform padding, or geometry-scaled search margins when absent.
-    pub padding_pixels: Option<u32>,
+    /// Explicit left/top/right/bottom margins, or geometry-scaled margins when absent.
+    pub padding_pixels: Option<[u32; 4]>,
 }
 
 impl Default for LineAuditPolicy {
@@ -51,7 +51,7 @@ impl Default for LineAuditPolicy {
             segmentation_threshold: 192,
             topology_thresholds: vec![64, 128, 192, 224],
             polarity: Polarity::Auto,
-            padding_pixels: Some(0),
+            padding_pixels: Some([0; 4]),
         }
     }
 }
@@ -70,7 +70,7 @@ impl LineAuditPolicy {
     }
 }
 
-fn inside_page(display: DisplayMapper) -> impl Fn(Point) -> bool {
+pub(crate) fn inside_page(display: DisplayMapper) -> impl Fn(Point) -> bool {
     move |point| {
         let Point(u, v) = display.to_raster(point);
         (-1e-8..=1.0 + 1e-8).contains(&u) && (-1e-8..=1.0 + 1e-8).contains(&v)
@@ -210,7 +210,7 @@ pub struct LineAuditReport {
     pub segmentation_threshold: u8,
     pub topology_thresholds: Vec<u8>,
     pub requested_polarity: Polarity,
-    pub requested_padding_pixels: Option<u32>,
+    pub requested_padding_pixels: Option<[u32; 4]>,
     pub max_ink_checks: u64,
     pub lines: Vec<AuditedLine>,
 }
@@ -325,7 +325,7 @@ pub(crate) fn audit_line(
         inside_page(display),
         policy
             .padding_pixels
-            .map_or_else(|| search_padding(frame.height), |n| [n; 4]),
+            .unwrap_or_else(|| search_padding(frame.height)),
         policy.max_pixels,
     )?;
     let (width, height) = window
@@ -416,6 +416,8 @@ impl SampledLine {
         &mut self,
         page: &DraftPage,
         policy: &LineAuditPolicy,
+        horizon: [u32; 2],
+        remaining_checks: &mut u64,
     ) -> Result<(), Error> {
         self.audit.boundary_extensions = mapped_boundary_extensions(
             &self.audit,
@@ -426,7 +428,8 @@ impl SampledLine {
                 window: self.window,
                 threshold: policy.segmentation_threshold,
             },
-            policy.max_ink_checks,
+            horizon,
+            remaining_checks,
         )?;
         Ok(())
     }
@@ -513,6 +516,7 @@ fn added_strips(original: InkBounds, expanded: InkBounds, edge: LeaderEdge) -> V
 fn boundary_candidates(
     line: &AuditedLine,
     sample: &Sample<'_>,
+    horizon: [u32; 2],
 ) -> Result<Vec<BoundaryEvidence>, Error> {
     let original = line.observation_bounds;
     let components = line
@@ -523,9 +527,11 @@ fn boundary_candidates(
     if let Some((band, measured)) =
         measured_body_band(sample.image, sample.threshold, original, &components)?
     {
-        Ok(audit_edge_extensions(&measured, band, line.width))
+        Ok(audit_edge_extensions(&measured, band, line.width, horizon))
     } else {
-        Ok(audit_edge_extensions(components, original, line.width))
+        Ok(audit_edge_extensions(
+            components, original, line.width, horizon,
+        ))
     }
 }
 
@@ -533,12 +539,13 @@ fn mapped_boundary_extensions(
     line: &AuditedLine,
     page: &DraftPage,
     sample: &Sample<'_>,
-    mut remaining_checks: u64,
+    horizon: [u32; 2],
+    remaining_checks: &mut u64,
 ) -> Result<Vec<MappedBoundaryExtension>, Error> {
     let observation = line.observation_bounds;
     let frame = sample.frame;
     let window = sample.window;
-    let candidates = boundary_candidates(line, sample)?;
+    let candidates = boundary_candidates(line, sample, horizon)?;
     if !candidates.is_empty()
         && page
             .lines
@@ -583,7 +590,7 @@ fn mapped_boundary_extensions(
                 })
                 .unzip();
             let ink_accounting =
-                sample.account(evidence.expanded, &peer_quads, &mut remaining_checks)?;
+                sample.account(evidence.expanded, &peer_quads, remaining_checks)?;
             Ok(MappedBoundaryExtension {
                 evidence,
                 proposed_quad,
@@ -643,7 +650,8 @@ pub fn audit_lines(
                 return Err(Error::Invalid("invalid original OCR observation".into()));
             }
             let mut sampled = audit_line(pdf, &metadata, page, index, line, policy, None)?;
-            sampled.measure_extensions(original, policy)?;
+            let mut remaining_checks = policy.max_ink_checks;
+            sampled.measure_extensions(original, policy, [0; 2], &mut remaining_checks)?;
             lines.push(sampled.audit);
         }
     }
@@ -653,7 +661,7 @@ pub fn audit_lines(
         ));
     }
     Ok(LineAuditReport {
-        schema_version: 12,
+        schema_version: 13,
         pdf_sha256: draft.pdf_sha256.clone(),
         draft_model: draft.model.clone(),
         dpi: policy.dpi,

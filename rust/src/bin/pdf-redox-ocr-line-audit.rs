@@ -77,7 +77,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
         max_ink_checks: args.max_ink_checks,
         segmentation_threshold: args.segmentation_threshold,
         polarity: args.polarity.into(),
-        padding_pixels: Some(args.padding_pixels),
+        padding_pixels: Some([args.padding_pixels; 4]),
         ..LineAuditPolicy::default()
     };
     if !args.threshold.is_empty() {
