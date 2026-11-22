@@ -364,9 +364,10 @@ fn group_region(items: &[Item], page: PageBox, pitch: f64) -> Option<PageBox> {
     .ok()
 }
 
-/// Image-only pages need actual compositing when paints cannot be interpreted
-/// independently or native text can span adjacent image fragments. This holds
-/// even if the subsequent crop plan fails a budget or geometry gate.
+/// Determine when independent image recognition must use composited inputs.
+///
+/// This holds even when the subsequent crop plan fails a budget or geometry
+/// gate: deliberately avoid the raw-source shortcut in that case.
 #[must_use]
 pub fn requires_composited_recognition(
     paints: &[ImagePaint],
