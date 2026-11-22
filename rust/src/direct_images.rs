@@ -5,7 +5,7 @@
 //! Equal resolved decoding inputs reuse a previously verified raster.
 //! The interpreter, not this module, resolves filters, color and Decode arrays.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, btree_map::Entry};
 
 use hayro_interpret::{
     BlendMode, ClipPath, Context, Device, DrawMode, DrawProps, Image, ImageData, ImageDrawProps,
@@ -14,10 +14,13 @@ use hayro_interpret::{
     interpret_page,
     kurbo::{Affine, BezPath, Rect},
 };
+use hayro_syntax::{content::UntypedIter, object::Stream, page::Page};
 use image::RgbImage;
 
 use crate::{
-    Error, PageNumber, native_images::NativeImageBudget, paint_scan::ImagePaint,
+    Error, PageNumber,
+    native_images::NativeImageBudget,
+    paint_scan::{ImagePaint, page_content},
     pdf_metadata::PdfMetadata,
 };
 
@@ -54,7 +57,7 @@ struct Expected<'a> {
 
 struct PageDevice<'a, 'b> {
     collector: &'a mut Collector<'b>,
-    expected: BTreeMap<String, Vec<Expected<'b>>>,
+    expected: BTreeMap<&'b [u32], Expected<'b>>,
     groups: Vec<bool>,
     blocked_groups: usize,
     attempted_pixels: u64,
@@ -132,17 +135,23 @@ fn transform_matches(paint: &ImagePaint, transform: Affine) -> bool {
 }
 
 impl PageDevice<'_, '_> {
-    fn match_paint(&mut self, id: &str, dimensions: (u32, u32), transform: Affine) -> bool {
-        let Some(expected) = self.expected.get_mut(id) else {
+    fn match_paint(
+        &mut self,
+        id: &str,
+        path: Option<&[u32]>,
+        dimensions: (u32, u32),
+        transform: Affine,
+    ) -> bool {
+        let Some(entry) = path.and_then(|path| self.expected.get_mut(path)) else {
             return false;
         };
-        let Some(entry) = expected.iter_mut().find(|entry| {
-            !entry.seen
-                && (entry.paint.width, entry.paint.height) == dimensions
-                && transform_matches(entry.paint, transform)
-        }) else {
+        if entry.seen
+            || entry.paint.source_id != id
+            || (entry.paint.width, entry.paint.height) != dimensions
+            || !transform_matches(entry.paint, transform)
+        {
             return false;
-        };
+        }
         entry.seen = true;
         self.collector.result.stats.matched_occurrences += 1;
         true
@@ -184,9 +193,10 @@ impl PageDevice<'_, '_> {
     }
 
     fn finish(self) {
-        for (id, entries) in &self.expected {
-            if self.malformed_groups || entries.iter().any(|entry| !entry.seen) {
-                self.collector.reject(id, "unmatched_scanned_occurrence");
+        for entry in self.expected.values() {
+            if self.malformed_groups || !entry.seen {
+                self.collector
+                    .reject(&entry.paint.source_id, "unmatched_scanned_occurrence");
             }
         }
     }
@@ -243,7 +253,12 @@ impl Device<'_> for PageDevice<'_, '_> {
             return;
         }
         let dimensions = (image.width(), image.height());
-        if !self.match_paint(&id, dimensions, props.transform) {
+        if !self.match_paint(
+            &id,
+            props.page_xobject_path.as_deref(),
+            dimensions,
+            props.transform,
+        ) {
             self.collector
                 .reject(&id, "unmatched_interpreter_occurrence");
             return;
@@ -298,6 +313,118 @@ impl Device<'_> for PageDevice<'_, '_> {
     }
 }
 
+// A Contents array can be joined differently by the scanner and interpreter.
+// For a single stream both consume the same parsed stream's decoded bytes.
+fn equivalent_page_program(metadata: &PdfMetadata, page: &Page<'_>) -> Result<bool, Error> {
+    let Some(interpreted) = page.page_stream() else {
+        return Ok(false);
+    };
+    if page.raw().get::<Stream<'_>>(b"Contents").is_some() {
+        return Ok(true);
+    }
+    let id = page
+        .raw()
+        .obj_id()
+        .ok_or_else(|| Error::Invalid("missing extraction page identity".into()))?;
+    let scanned = page_content(metadata.source(), id.into())?;
+    if scanned == interpreted {
+        return Ok(true);
+    }
+    let (mut scanned, mut interpreted) =
+        (UntypedIter::new(&scanned), UntypedIter::new(interpreted));
+    loop {
+        match (scanned.next(), interpreted.next()) {
+            (Some(a), Some(b)) if *a.operator == *b.operator && a.operands == b.operands => {}
+            (None, None) => return Ok(scanned.is_at_end() && interpreted.is_at_end()),
+            _ => return Ok(false),
+        }
+    }
+}
+
+type PageExpectations<'a> = BTreeMap<PageNumber, BTreeMap<&'a [u32], Expected<'a>>>;
+
+fn index_expected_paints<'a>(
+    collector: &mut Collector<'_>,
+    pages: &BTreeSet<PageNumber>,
+    paints: &'a [ImagePaint],
+) -> Result<PageExpectations<'a>, Error> {
+    // Index exact invocation paths before decoding any pixels. A
+    // known unsafe occurrence invalidates shared source reuse immediately.
+    let mut expected_pages = PageExpectations::new();
+    for paint in paints
+        .iter()
+        .filter(|paint| collector.wanted.contains(&paint.source_id))
+    {
+        let page = PageNumber::new(paint.page)?;
+        if !pages.contains(&page) {
+            collector.reject(&paint.source_id, "occurrence_outside_selection");
+            continue;
+        }
+        if !paint.unsafe_reasons.is_empty() {
+            collector.reject(&paint.source_id, "unsafe_scanned_occurrence");
+        }
+        match expected_pages
+            .entry(page)
+            .or_default()
+            .entry(&paint.paint_path)
+        {
+            Entry::Vacant(entry) => {
+                entry.insert(Expected { paint, seen: false });
+            }
+            Entry::Occupied(entry) => {
+                collector.reject(&entry.get().paint.source_id, "duplicate_scanned_occurrence");
+                collector.reject(&paint.source_id, "duplicate_scanned_occurrence");
+            }
+        }
+    }
+    Ok(expected_pages)
+}
+
+fn preflight_pages(
+    metadata: &PdfMetadata,
+    collector: &mut Collector<'_>,
+    pages: &BTreeSet<PageNumber>,
+    expected_pages: &PageExpectations<'_>,
+) -> Result<(), Error> {
+    // Preflight all selected page contexts before interpreting any of them.
+    // A later incompatible occurrence must not consume earlier decode budgets.
+    let pdf = metadata.source().syntax();
+    for &page in pages {
+        let index = usize::try_from(page.get() - 1)
+            .map_err(|_| Error::Invalid("invalid extraction page".into()))?;
+        let source_page = pdf
+            .pages()
+            .get(index)
+            .ok_or_else(|| Error::Invalid("extraction page outside source".into()))?;
+        let Some(expected) = expected_pages.get(&page) else {
+            continue;
+        };
+        // interpret_page does not wrap the root page in its declared
+        // transparency group. Do not assume that space is equivalent to
+        // independently decoded source RGB.
+        let reason = if source_page.raw().contains_key(b"Group".as_slice()) {
+            Some("page_transparency_group")
+        } else if expected.values().any(|entry| {
+            !collector
+                .result
+                .stats
+                .rejected_sources
+                .contains_key(&entry.paint.source_id)
+        }) && !equivalent_page_program(metadata, source_page)?
+        {
+            Some("page_content_path_mismatch")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            for entry in expected.values() {
+                collector.reject(&entry.paint.source_id, reason);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Decode selected source images without extracting unrelated page images.
 ///
 /// Reuse requires full occurrence correspondence and either equal decoded
@@ -328,54 +455,16 @@ pub fn direct_native_images(
     if pages.len() != selected.len() {
         return Err(Error::Invalid("duplicate extraction page".into()));
     }
-    // Index the expected placements once, before decoding any pixels. A
-    // known unsafe occurrence invalidates shared source reuse immediately.
-    let mut expected_pages = BTreeMap::<PageNumber, BTreeMap<String, Vec<Expected>>>::new();
-    for paint in paints
-        .iter()
-        .filter(|paint| wanted.contains(&paint.source_id))
-    {
-        let page = PageNumber::new(paint.page)?;
-        if !pages.contains(&page) {
-            collector.reject(&paint.source_id, "occurrence_outside_selection");
-            continue;
-        }
-        if !paint.unsafe_reasons.is_empty() {
-            collector.reject(&paint.source_id, "unsafe_scanned_occurrence");
-        }
-        expected_pages
-            .entry(page)
-            .or_default()
-            .entry(paint.source_id.clone())
-            .or_default()
-            .push(Expected { paint, seen: false });
-    }
-    // Preflight all selected page contexts before interpreting any of them.
-    // A later incompatible occurrence must not consume earlier decode budgets.
-    for &page in &pages {
-        let index = usize::try_from(page.get() - 1)
-            .map_err(|_| Error::Invalid("invalid extraction page".into()))?;
-        let source_page = pdf
-            .pages()
-            .get(index)
-            .ok_or_else(|| Error::Invalid("extraction page outside source".into()))?;
-        let Some(expected) = expected_pages.get(&page) else {
-            continue;
-        };
-        // interpret_page does not wrap the root page in its declared
-        // transparency group. Do not assume that space is equivalent to
-        // independently decoded source RGB.
-        if source_page.raw().contains_key(b"Group".as_slice()) {
-            for id in expected.keys() {
-                collector.reject(id, "page_transparency_group");
-            }
-        }
-    }
+    let expected_pages = index_expected_paints(&mut collector, &pages, paints)?;
+    preflight_pages(metadata, &mut collector, &pages, &expected_pages)?;
     for (page, expected) in expected_pages {
-        if expected
-            .keys()
-            .all(|id| collector.result.stats.rejected_sources.contains_key(id))
-        {
+        if expected.values().all(|entry| {
+            collector
+                .result
+                .stats
+                .rejected_sources
+                .contains_key(&entry.paint.source_id)
+        }) {
             continue;
         }
         let index = usize::try_from(page.get() - 1)

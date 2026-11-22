@@ -22,7 +22,7 @@ pdf-redox = { git = "https://github.com/codeandsolder/pdf-redox", rev = "3f00775
 oar-ocr = { version = "=0.10.2", features = ["auto-download"], optional = true }
 tempfile = "3.27"
 hayro-syntax = { git = "https://github.com/LaurenzV/hayro", rev = "e7ada1354dff4041cdeed3d8ba56fe01b6186132", default-features = false, features = ["std", "images"], optional = true }
-hayro-interpret = { git = "https://github.com/codeandsolder/hayro", rev = "8d13eea0e2de878b228df918ec631bd8bf1b23a7", optional = true }
+hayro-interpret = { git = "https://github.com/codeandsolder/hayro", rev = "d13941c56f24d910993b296f04934cfee1cbea17", optional = true }
 
 # Cargo does not propagate dependency workspace patches. Reuse the exact
 # generated standalone syntax snapshot in the pinned pdf-redox repository.

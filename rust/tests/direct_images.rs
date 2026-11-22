@@ -376,3 +376,70 @@ fn later_incompatible_page_does_not_starve_independent_source()
     );
     Ok(())
 }
+
+fn split_program_fixture(first: &[u8], second: &[u8]) -> Vec<u8> {
+    support::pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /XObject << /Im 6 0 R >> >> /Contents [4 0 R 5 0 R] >>".to_vec(),
+        support::stream("", first),
+        support::stream("", second),
+        support::stream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8", &[255, 0, 0]),
+    ])
+}
+
+#[test]
+fn exact_do_paths_disambiguate_equal_transforms_after_skipped_operations()
+-> Result<(), Box<dyn std::error::Error>> {
+    let bytes = split_program_fixture(b"Do /Missing Do /Im Do", b"/Im Do");
+    let doc = PdfMetadata::from_bytes(bytes)?;
+    let pages = [PageNumber::new(1)?];
+    let mut paints = enumerate_image_paints(&doc, &pages)?.placements;
+    let wanted = BTreeSet::from(["6:0".into()]);
+    assert_eq!(paints.len(), 2);
+    assert_eq!(paints[0].paint_path, [2]);
+    assert_eq!(paints[1].paint_path, [3]);
+    assert_eq!(paints[0].ctm, paints[1].ctm);
+    let actual =
+        direct_native_images(&doc, &pages, &wanted, &paints, NativeImageBudget::default())?;
+    assert_eq!(actual.stats.matched_occurrences, 2);
+    assert_eq!(actual.stats.decoded_occurrences, 1);
+    assert_eq!(actual.stats.reused_occurrences, 1);
+    assert!(actual.images.contains_key("6:0"));
+
+    paints[0].paint_path = vec![1];
+    let missing =
+        direct_native_images(&doc, &pages, &wanted, &paints, NativeImageBudget::default())?;
+    assert_eq!(
+        missing.stats.rejected_sources.get("6:0"),
+        Some(&"unmatched_interpreter_occurrence")
+    );
+    assert_eq!(missing.stats.decoded_occurrences, 0);
+
+    paints[0].paint_path = paints[1].paint_path.clone();
+    let duplicate =
+        direct_native_images(&doc, &pages, &wanted, &paints, NativeImageBudget::default())?;
+    assert_eq!(
+        duplicate.stats.rejected_sources.get("6:0"),
+        Some(&"duplicate_scanned_occurrence")
+    );
+    assert_eq!(duplicate.stats.decoded_occurrences, 0);
+    Ok(())
+}
+
+#[test]
+fn divergent_content_array_programs_are_rejected_before_decode()
+-> Result<(), Box<dyn std::error::Error>> {
+    let bytes = split_program_fixture(b"/Im Do % comment", b"/Im Do");
+    let pages = [PageNumber::new(1)?];
+    let doc = PdfMetadata::from_bytes(bytes.clone())?;
+    assert_eq!(enumerate_image_paints(&doc, &pages)?.placements.len(), 2);
+    let actual = extract(&bytes, &pages, NativeImageBudget::default())?;
+    assert_eq!(
+        actual.stats.rejected_sources.get("6:0"),
+        Some(&"page_content_path_mismatch")
+    );
+    assert_eq!(actual.stats.decoded_occurrences, 0);
+    assert!(actual.images.is_empty());
+    Ok(())
+}
