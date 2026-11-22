@@ -227,16 +227,16 @@ pub fn audit_contractions(
             if let Some(profile) = columns.get_mut(&i) {
                 profile.record(x, y);
             }
-            if (observation.left..observation.right).contains(&x) {
-                if let Some(cell) = inside.get_mut(i) {
-                    let b = InkBounds {
-                        left: x,
-                        top: y,
-                        right: x + 1,
-                        bottom: y + 1,
-                    };
-                    *cell = Some(cell.map_or(b, |old| old.union(b)));
-                }
+            if (observation.left..observation.right).contains(&x)
+                && let Some(cell) = inside.get_mut(i)
+            {
+                let b = InkBounds {
+                    left: x,
+                    top: y,
+                    right: x + 1,
+                    bottom: y + 1,
+                };
+                *cell = Some(cell.map_or(b, |old| old.union(b)));
             }
         }
     })?;
