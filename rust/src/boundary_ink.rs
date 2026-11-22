@@ -149,13 +149,27 @@ pub(crate) fn detect_boundaries(
         .collect()
 }
 
-/// A body component must be completely measured, glyph-sized, and have
-/// more actual support inside its original observation than outside.
+/// A body component must be completely measured and locally supported.
+/// Its width is bounded by the original band height, but its height is
+/// not: a clipped ascender or descender can exceed the detected height.
+/// Require majority support both in actual pixels and in vertical extent.
 #[cfg(any(feature = "pdf-integration", test))]
-const fn body_component(c: &PixelRegion, line_height: u32) -> bool {
+const fn body_component(c: &PixelRegion, original: InkBounds) -> bool {
+    let b = c.bounds;
+    let top = if b.top > original.top {
+        b.top
+    } else {
+        original.top
+    };
+    let bottom = if b.bottom < original.bottom {
+        b.bottom
+    } else {
+        original.bottom
+    };
+    let inside = bottom.saturating_sub(top);
     !c.touches_line_edge
-        && width(c.bounds) <= line_height
-        && height(c.bounds) <= line_height
+        && width(b) <= height(original)
+        && inside > height(b) - inside
         && c.observation_support.inside_pixels > c.observation_support.outside_pixels
 }
 
@@ -174,8 +188,10 @@ pub fn measured_body_band(
     original: InkBounds,
     components: &[&PixelRegion],
 ) -> Result<Option<(InkBounds, Vec<PixelRegion>)>, crate::Error> {
-    let h = height(original);
-    let supported = components.iter().copied().filter(|c| body_component(c, h));
+    let supported = components
+        .iter()
+        .copied()
+        .filter(|c| body_component(c, original));
     let band = supported.fold(original, |mut b, c| {
         b.top = b.top.min(c.bounds.top);
         b.bottom = b.bottom.max(c.bounds.bottom);
@@ -202,7 +218,7 @@ pub fn measured_body_band(
     }
     if measured.iter().zip(components).any(|(new, old)| {
         new.observation_support.inside_pixels > old.observation_support.inside_pixels
-            && !body_component(old, h)
+            && !body_component(old, original)
     }) {
         return Ok(None);
     }
@@ -594,6 +610,70 @@ mod tests {
         // Same body support but unrelated newly included dot in the widened
         // orthogonal band: no authorization to expand that band.
         image.put_pixel(28, 10, image::Luma([0]));
+        let components = measure(&image)?;
+        assert!(
+            measured_body_band(
+                &image,
+                128,
+                observation,
+                &components.iter().collect::<Vec<_>>()
+            )?
+            .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn body_extent_is_measured_not_limited_by_detected_height() -> Result<(), crate::Error> {
+        let observation = InkBounds {
+            left: 15,
+            top: 15,
+            right: 45,
+            bottom: 30,
+        };
+        let image = image::GrayImage::from_fn(80, 55, |x, y| {
+            let ordinary = (18..26).contains(&x) && (13..29).contains(&y);
+            let ascender = (31..34).contains(&x) && (12..32).contains(&y);
+            let next = (48..57).contains(&x) && (12..32).contains(&y);
+            image::Luma([if ordinary || ascender || next { 0 } else { 255 }])
+        });
+        let measure = |im: &image::GrayImage| {
+            crate::pixel_regions::regions(
+                im,
+                128,
+                crate::pixel_regions::PixelClass::Ink,
+                observation,
+            )
+        };
+        let components = measure(&image)?;
+        let (band, corrected) = measured_body_band(
+            &image,
+            128,
+            observation,
+            &components.iter().collect::<Vec<_>>(),
+        )?
+        .ok_or_else(|| crate::Error::Invalid("expected full glyph band".into()))?;
+        assert_eq!(
+            band,
+            InkBounds {
+                top: 12,
+                bottom: 32,
+                ..observation
+            }
+        );
+        assert_eq!(audit_edge_extensions(&corrected, band, 80).len(), 1);
+
+        // A long vertical continuation may contain a dense blob within the
+        // original box. It is not a body glyph if most of its span is outside.
+        let mut image = image;
+        for y in 1..45 {
+            image.put_pixel(38, y, image::Luma([0]));
+        }
+        for y in 15..30 {
+            for x in 36..44 {
+                image.put_pixel(x, y, image::Luma([0]));
+            }
+        }
         let components = measure(&image)?;
         assert!(
             measured_body_band(
