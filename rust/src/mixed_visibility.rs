@@ -6,7 +6,7 @@
 //! pixels then prove visibility for that exact occurrence.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     fs,
     path::Path,
 };
@@ -157,6 +157,33 @@ pub(crate) struct MixedVerifier<'a> {
     masked_cache: BTreeMap<(AppearanceId, usize), Option<MaskedSourceObject>>,
 }
 
+fn cached_mask<'a>(
+    cache: &'a mut BTreeMap<(AppearanceId, usize), Option<MaskedSourceObject>>,
+    identity: (AppearanceId, usize),
+    document: &PdfMetadata,
+    paint: &ImagePaint,
+    source: &SourceObservation,
+    minimum_confidence: f64,
+) -> Result<Option<&'a MaskedSourceObject>, Error> {
+    let entry = match cache.entry(identity) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => {
+            let masked = match mask_source_object(
+                document.source(),
+                MaskSource::Paint(paint),
+                &source.lines,
+                minimum_confidence,
+            ) {
+                Ok(value) => value,
+                Err(Error::Invalid(_)) => None,
+                Err(error) => return Err(error),
+            };
+            entry.insert(masked)
+        }
+    };
+    Ok(entry.as_ref())
+}
+
 impl<'a> MixedVerifier<'a> {
     pub(crate) fn new(
         original_pdf: &'a Path,
@@ -226,23 +253,14 @@ impl<'a> MixedVerifier<'a> {
                 continue;
             };
             let mask_identity = (appearance_id, components);
-            if !self.masked_cache.contains_key(&mask_identity) {
-                let masked = match mask_source_object(
-                    self.document.source(),
-                    MaskSource::Paint(paint),
-                    &source.lines,
-                    self.minimum_confidence,
-                ) {
-                    Ok(masked) => masked,
-                    Err(Error::Invalid(_)) => None,
-                    Err(error) => return Err(error),
-                };
-                self.masked_cache.insert(mask_identity, masked);
-            }
-            let Some(masked) = self
-                .masked_cache
-                .get(&mask_identity)
-                .and_then(Option::as_ref)
+            let Some(masked) = cached_mask(
+                &mut self.masked_cache,
+                mask_identity,
+                self.document,
+                paint,
+                source,
+                self.minimum_confidence,
+            )?
             else {
                 continue;
             };

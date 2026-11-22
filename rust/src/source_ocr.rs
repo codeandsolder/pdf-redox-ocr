@@ -125,7 +125,7 @@ pub struct SourceOnlyResult {
 /// A recognized image is not enough: all actual painted images must be
 /// decoded/recognized, all source quads inside the native raster and known clips, there must be
 /// at least one positive text observation, and every image layer must be
-/// mutually non-overlapping. Named XObject color-space aliases require a
+/// mutually non-overlapping. Named `XObject` color-space aliases require a
 /// separate rendered visibility proof, even if every paint decoded natively.
 ///
 /// # Errors
@@ -241,7 +241,7 @@ mod tests {
             generation: 0,
             width: 200,
             height: 100,
-            sample_layout: Default::default(),
+            sample_layout: crate::sample_layout::ImageSampleLayout::default(),
             ctm: [200.0, 0.0, 0.0, 100.0, tx, 20.0],
             page_quad: [
                 Point(tx, 20.0),
@@ -307,7 +307,7 @@ mod tests {
                 generation: 0,
                 width: 200,
                 height: 100,
-                sample_layout: Default::default(),
+                sample_layout: crate::sample_layout::ImageSampleLayout::default(),
                 ctm: [200.0, 0.0, 0.0, 100.0, 20.0, 20.0],
                 page_quad: [
                     Point(20.0, 20.0),
