@@ -895,6 +895,11 @@ a hard bound on interpreter or compressed-stream allocation.
 
 `pdf-redox-ocr-fragment-reconcile --pdf FILE --primary-ocr DRAFT --line PAGE:INDEX --report REPORT --experimental-draft RESEARCH`
 evaluates bounded source edge extensions with the Small+Medium four-stretch CTC recognizer.
+By default the source sampling window scales with the measured line height:
+longitudinal margin covers the maximum extension distance and its background
+margin, while each orthogonal margin covers one glyph height. An explicit
+`--padding-pixels` replaces this with a uniform diagnostic margin. Actual
+within-page sampled bounds are recorded per line.
 The padded RGB source is rectified once. Every expanded recognition window is an exact
 subimage of that raster, using the original observation's measured luminance normalization.
 Recognition runs are independently counted in the common raster, including how much

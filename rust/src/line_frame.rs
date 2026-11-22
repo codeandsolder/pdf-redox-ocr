@@ -217,7 +217,7 @@ impl SampleWindow {
     pub fn new(
         frame: LineFrame,
         inside: impl Fn(Point) -> bool,
-        requested: u32,
+        requested: [u32; 4],
         max_pixels: u64,
     ) -> Result<Self, Error> {
         let mut result = Self { padding: [0; 4] };
@@ -226,7 +226,7 @@ impl SampleWindow {
                 "line audit quad extends outside source extent".into(),
             ));
         }
-        for side in 0..4 {
+        for (side, requested) in requested.into_iter().enumerate() {
             let (mut low, mut high) = (0, requested);
             while low < high {
                 let candidate = low + (high - low).div_ceil(2);

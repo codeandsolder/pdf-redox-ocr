@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Error, PageNumber,
-    boundary_ink::{BoundaryEvidence, audit_edge_extensions},
+    boundary_ink::{BoundaryEvidence, audit_edge_extensions, search_padding},
     draft::{DraftPage, OcrDraft, OcrLine, sha256_file},
     fragment_ink::Sample,
     geometry::{DisplayMapper, PageBox, Point, Quad, QuadBounds},
@@ -38,7 +38,8 @@ pub struct LineAuditPolicy {
     pub segmentation_threshold: u8,
     pub topology_thresholds: Vec<u8>,
     pub polarity: Polarity,
-    pub padding_pixels: u32,
+    /// Fixed uniform padding, or geometry-scaled search margins when absent.
+    pub padding_pixels: Option<u32>,
 }
 
 impl Default for LineAuditPolicy {
@@ -50,7 +51,7 @@ impl Default for LineAuditPolicy {
             segmentation_threshold: 192,
             topology_thresholds: vec![64, 128, 192, 224],
             polarity: Polarity::Auto,
-            padding_pixels: 0,
+            padding_pixels: Some(0),
         }
     }
 }
@@ -208,7 +209,7 @@ pub struct LineAuditReport {
     pub segmentation_threshold: u8,
     pub topology_thresholds: Vec<u8>,
     pub requested_polarity: Polarity,
-    pub requested_padding_pixels: u32,
+    pub requested_padding_pixels: Option<u32>,
     pub max_ink_checks: u64,
     pub lines: Vec<AuditedLine>,
 }
@@ -321,7 +322,9 @@ pub(crate) fn audit_line(
     let window = SampleWindow::new(
         frame,
         inside_page(display),
-        policy.padding_pixels,
+        policy
+            .padding_pixels
+            .map_or_else(|| search_padding(frame.height), |n| [n; 4]),
         policy.max_pixels,
     )?;
     let (width, height) = window
@@ -602,7 +605,7 @@ pub fn audit_lines(
         ));
     }
     Ok(LineAuditReport {
-        schema_version: 10,
+        schema_version: 11,
         pdf_sha256: draft.pdf_sha256.clone(),
         draft_model: draft.model.clone(),
         dpi: policy.dpi,
@@ -700,7 +703,7 @@ mod tests {
             Rotation::Deg270,
         ] {
             let display = DisplayMapper::new(page, rotation);
-            let window = SampleWindow::new(frame, inside_page(display), 8, policy.max_pixels)?;
+            let window = SampleWindow::new(frame, inside_page(display), [8; 4], policy.max_pixels)?;
             assert_eq!(window.padding, [0, 8, 8, 8]);
             let original = window.observation(frame);
             for (actual, expected) in window.quad(frame, original).iter().zip(corners) {
@@ -708,7 +711,36 @@ mod tests {
                     (actual.0 - expected.0).abs() < 1e-10 && (actual.1 - expected.1).abs() < 1e-10
                 );
             }
-            assert!(SampleWindow::new(frame, inside_page(display), 8, 1).is_err());
+            assert!(SampleWindow::new(frame, inside_page(display), [8; 4], 1).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn search_padding_scales_with_line_axis_and_page_clip() -> Result<(), crate::Error> {
+        let frame = LineFrame::new(
+            [
+                Point(30., 50.),
+                Point(80., 50.),
+                Point(80., 60.),
+                Point(30., 60.),
+            ],
+            |n| n,
+            2_000_000,
+            LineAxis::ReadingOrder,
+        )?;
+        let page = PageBox::new([20., 20., 200., 200.])?;
+        let request = super::search_padding(frame.height);
+        assert_eq!(request, [23, 10, 23, 10]);
+        let display = DisplayMapper::new(page, Rotation::Deg90);
+        let window = SampleWindow::new(frame, inside_page(display), request, 2_000_000)?;
+        assert_eq!(window.padding, [10, 10, 23, 10]);
+        for (actual, expected) in window
+            .quad(frame, window.observation(frame))
+            .iter()
+            .zip(frame.corners)
+        {
+            assert!((actual.0 - expected.0).abs() < 1e-10 && (actual.1 - expected.1).abs() < 1e-10);
         }
         Ok(())
     }

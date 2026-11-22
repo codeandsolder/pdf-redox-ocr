@@ -121,7 +121,7 @@ fn source_padding_recovers_clipped_stroke_across_rotations()
         &draft,
         &targets,
         &LineAuditPolicy {
-            padding_pixels: 36,
+            padding_pixels: Some(36),
             ..LineAuditPolicy::default()
         },
     )?;
@@ -227,7 +227,7 @@ fn periodic_source_leader_mapping_preserves_body_ink_across_rotations()
         &draft,
         &targets,
         &LineAuditPolicy {
-            padding_pixels: 160,
+            padding_pixels: Some(160),
             ..LineAuditPolicy::default()
         },
     )?;
@@ -288,11 +288,11 @@ fn source_edge_extensions_report_competing_observations_across_rotations()
         &draft,
         &targets,
         &LineAuditPolicy {
-            padding_pixels: 240,
+            padding_pixels: Some(240),
             ..LineAuditPolicy::default()
         },
     )?;
-    assert_eq!(report.schema_version, 10);
+    assert_eq!(report.schema_version, 11);
     for line in report.lines {
         let extension = line
             .boundary_extensions
@@ -405,7 +405,7 @@ fn tall_single_glyph_preserves_classified_reading_axis_across_page_rotations()
         &draft,
         &targets,
         &LineAuditPolicy {
-            padding_pixels: 100,
+            padding_pixels: Some(100),
             ..LineAuditPolicy::default()
         },
     )?;

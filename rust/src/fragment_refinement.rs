@@ -43,7 +43,7 @@ impl Default for FragmentPolicy {
     fn default() -> Self {
         Self {
             audit: LineAuditPolicy {
-                padding_pixels: 100,
+                padding_pixels: None,
                 ..LineAuditPolicy::default()
             },
             max_page_pixels: 32_000_000,
@@ -96,7 +96,7 @@ pub struct FragmentReport {
     pub draft_model: String,
     pub secondary_model: &'static str,
     pub dpi: u32,
-    pub padding_pixels: u32,
+    pub padding_pixels: Option<u32>,
     pub segmentation_threshold: u8,
     pub topology_thresholds: Vec<u8>,
     pub polarity: crate::ink_polarity::Polarity,
@@ -366,7 +366,7 @@ pub fn reconcile_fragments(
     source.verify_pdf(pdf)?;
     Ok((
         FragmentReport {
-            schema_version: 3,
+            schema_version: 4,
             pdf_sha256: source.pdf_sha256.clone(),
             draft_model: source.model.clone(),
             secondary_model: RefinementModel::Consensus.label(),

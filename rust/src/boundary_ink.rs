@@ -207,6 +207,25 @@ const fn outward(bounds: InkBounds, edge: LeaderEdge, sample_width: u32) -> (u32
     }
 }
 
+const fn edge_extent(height: u32) -> u32 {
+    height.saturating_mul(2)
+}
+const fn edge_margin(height: u32) -> u32 {
+    height.div_ceil(6)
+}
+
+/// Cover the same extent and background margin that the geometry search
+/// can propose. Orthogonal padding allows fully sampling any glyph-sized
+/// component intersecting the original band.
+#[cfg(feature = "pdf-integration")]
+#[must_use]
+pub const fn search_padding(height: u32) -> [u32; 4] {
+    let axis = edge_extent(height)
+        .saturating_add(edge_margin(height))
+        .saturating_add(1);
+    [axis, height, axis, height]
+}
+
 fn extension_margin(
     components: &[&PixelRegion],
     selected: &std::collections::BTreeSet<usize>,
@@ -217,7 +236,7 @@ fn extension_margin(
 ) -> Option<u32> {
     let (_, original_edge) = outward(observation, edge, sample_width);
     let mut outer = far
-        .saturating_add(height(observation).div_ceil(6))
+        .saturating_add(edge_margin(height(observation)))
         .min(sample_width);
     for (index, c) in components.iter().enumerate() {
         if selected.contains(&index) || c.observation_support.inside_pixels > 0 {
@@ -270,9 +289,7 @@ fn candidates_on_edge(
     for run in candidates {
         let (near, far) = outward(run.bounds, edge, sample_width);
         let gap = near.saturating_sub(previous);
-        if gap > h - h.div_ceil(4)
-            || far - original_edge > h.saturating_mul(2)
-            || width(run.bounds) > h
+        if gap > h - h.div_ceil(4) || far - original_edge > edge_extent(h) || width(run.bounds) > h
         {
             break;
         }
