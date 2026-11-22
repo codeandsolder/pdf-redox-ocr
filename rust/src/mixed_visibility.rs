@@ -577,7 +577,7 @@ impl PageProbe<'_> {
         let Some(target) = treated_paints.placements.iter().find(|candidate| {
             candidate.paint_path == paint.paint_path
                 && candidate.page == paint.page
-                && candidate.ctm == paint.ctm
+                && candidate.ctm.map(f64::to_bits) == paint.ctm.map(f64::to_bits)
                 && candidate.width == paint.width
                 && candidate.height == paint.height
         }) else {
@@ -588,6 +588,29 @@ impl PageProbe<'_> {
             return Ok(None);
         };
         Ok(Some((before, after)))
+    }
+
+    fn render_single_treatment(
+        &self,
+        paint: &ImagePaint,
+        masked: &MaskedSourceObject,
+    ) -> Result<(Vec<u8>, RgbImage), Error> {
+        let bytes = isolate_source_paints(
+            self.document,
+            [PaintReplacement {
+                image: masked.object.clone(),
+                paints: vec![paint],
+            }],
+        )?;
+        let temp = NamedTempFile::new()?;
+        fs::write(temp.path(), &bytes)?;
+        let treatment = render_rgb_page(temp.path(), self.page, self.policy)?;
+        if treatment.dimensions() != self.control.dimensions() {
+            return Err(Error::Invalid(
+                "counterfactual changed page raster size".into(),
+            ));
+        }
+        Ok((bytes, treatment))
     }
 
     fn examine(
@@ -610,21 +633,7 @@ impl PageProbe<'_> {
         if lines.is_empty() {
             return Ok(None);
         }
-        let bytes = isolate_source_paints(
-            self.document,
-            [PaintReplacement {
-                image: masked.object.clone(),
-                paints: vec![paint],
-            }],
-        )?;
-        let temp = NamedTempFile::new()?;
-        fs::write(temp.path(), &bytes)?;
-        let treatment = render_rgb_page(temp.path(), self.page, self.policy)?;
-        if treatment.dimensions() != self.control.dimensions() {
-            return Err(Error::Invalid(
-                "counterfactual changed page raster size".into(),
-            ));
-        }
+        let (bytes, treatment) = self.render_single_treatment(paint, masked)?;
         let projection = SourceObservation {
             width: source.width,
             height: source.height,
@@ -813,7 +822,7 @@ fn changed_raster_pixels(
             }
             let control = before.get_pixel(x, y);
             let treatment = after.get_pixel(x, y);
-            if significant_rgb_change(control, treatment) {
+            if significant_rgb_change(*control, *treatment) {
                 changed += 1;
             }
         }

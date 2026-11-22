@@ -466,7 +466,10 @@ pub(crate) fn native_rgb_change_count(
             let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) else {
                 return false;
             };
-            crate::rasterize::significant_rgb_change(before.get_pixel(x, y), after.get_pixel(x, y))
+            crate::rasterize::significant_rgb_change(
+                *before.get_pixel(x, y),
+                *after.get_pixel(x, y),
+            )
         },
     ))
 }
