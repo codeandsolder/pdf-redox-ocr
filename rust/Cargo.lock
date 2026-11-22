@@ -1024,7 +1024,7 @@ source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56
 [[package]]
 name = "hayro-cmap"
 version = "0.1.1"
-source = "git+https://github.com/codeandsolder/hayro?rev=d13941c56f24d910993b296f04934cfee1cbea17#d13941c56f24d910993b296f04934cfee1cbea17"
+source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56fe01b6186132#e7ada1354dff4041cdeed3d8ba56fe01b6186132"
 dependencies = [
  "brotli",
  "hayro-postscript",
@@ -1033,7 +1033,7 @@ dependencies = [
 [[package]]
 name = "hayro-font"
 version = "0.5.0"
-source = "git+https://github.com/codeandsolder/hayro?rev=d13941c56f24d910993b296f04934cfee1cbea17#d13941c56f24d910993b296f04934cfee1cbea17"
+source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56fe01b6186132#e7ada1354dff4041cdeed3d8ba56fe01b6186132"
 dependencies = [
  "bitflags",
  "hayro-cmap",
@@ -1048,7 +1048,6 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.9.0"
-source = "git+https://github.com/codeandsolder/hayro?rev=d13941c56f24d910993b296f04934cfee1cbea17#d13941c56f24d910993b296f04934cfee1cbea17"
 dependencies = [
  "bitflags",
  "hayro-cmap",
@@ -1082,7 +1081,7 @@ dependencies = [
 [[package]]
 name = "hayro-postscript"
 version = "0.2.0"
-source = "git+https://github.com/codeandsolder/hayro?rev=d13941c56f24d910993b296f04934cfee1cbea17#d13941c56f24d910993b296f04934cfee1cbea17"
+source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56fe01b6186132#e7ada1354dff4041cdeed3d8ba56fe01b6186132"
 
 [[package]]
 name = "hayro-syntax"
