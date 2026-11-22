@@ -78,6 +78,27 @@ impl ObservationSupport {
     }
 }
 
+/// Nearest actual component pixels beyond either reading-axis edge, within
+/// the observation's orthogonal band. Left is exclusive; right is inclusive.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct BandNeighbors {
+    pub left: Option<u32>,
+    pub right: Option<u32>,
+}
+
+impl BandNeighbors {
+    fn record(&mut self, x: u32, y: u32, observation: InkBounds) {
+        if !(observation.top..observation.bottom).contains(&y) {
+            return;
+        }
+        if x < observation.left {
+            self.left = Some(self.left.map_or(x + 1, |old| old.max(x + 1)));
+        } else if x >= observation.right {
+            self.right = Some(self.right.map_or(x, |old| old.min(x)));
+        }
+    }
+}
+
 /// A threshold-connected set of actual raster pixels.
 #[derive(Clone, Debug, Serialize)]
 pub struct PixelRegion {
@@ -86,6 +107,7 @@ pub struct PixelRegion {
     pub centroid: [f64; 2],
     pub touches_line_edge: bool,
     pub observation_support: ObservationSupport,
+    pub band_neighbors: BandNeighbors,
 }
 
 /// Dual digital topology: eight-connected ink, four-connected background.
@@ -173,6 +195,7 @@ impl Flood<'_> {
         let mut area = 0_usize;
         let mut sums = [0.0, 0.0];
         let mut support = ObservationSupport::default();
+        let mut band_neighbors = BandNeighbors::default();
         while let Some(index) = self.stack.pop() {
             let x = u32::try_from(index % self.width)
                 .map_err(|_| Error::Invalid("unrepresentable region X".into()))?;
@@ -186,6 +209,7 @@ impl Flood<'_> {
             sums[0] += f64::from(x);
             sums[1] += f64::from(y);
             support.record(x, y, observation);
+            band_neighbors.record(x, y, observation);
             visit(x, y);
             self.neighbors(index);
         }
@@ -198,6 +222,7 @@ impl Flood<'_> {
             centroid: sums.map(|sum| sum / denominator),
             touches_line_edge: bounds.touches_edge(self.image.width(), self.image.height()),
             observation_support: support,
+            band_neighbors,
         })
     }
 }
