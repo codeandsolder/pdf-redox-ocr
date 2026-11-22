@@ -96,7 +96,7 @@ impl RefinementDecision {
 #[derive(Debug, Serialize)]
 pub struct Recognition {
     pub views: Vec<ViewEvidence>,
-    pub source_ink: Option<SourceInk>,
+    pub source_ink: Box<SourceInk>,
     pub decision: RefinementDecision,
 }
 
@@ -273,7 +273,7 @@ impl RefinementRecognizer {
         Ok(Recognition {
             views,
             decision,
-            source_ink: Some(source_ink),
+            source_ink: Box::new(source_ink),
         })
     }
 }

@@ -768,9 +768,9 @@ mod tests {
                 },
                 ..request
             },
-            |_| {
+            |image| {
                 Ok(Recognition {
-                    source_ink: None,
+                    source_ink: Box::new(crate::candidate_ink::SourceInk::measure(image)?),
                     views: Vec::new(),
                     decision: RefinementDecision::Abstained,
                 })
@@ -815,7 +815,7 @@ mod tests {
             calls += 1;
             assert!(image.width() > 2 && image.height() > 2);
             Ok(Recognition {
-                source_ink: None,
+                source_ink: Box::new(crate::candidate_ink::SourceInk::measure(image)?),
                 views: Vec::new(),
                 decision: RefinementDecision::Greedy {
                     text: "CAPAC1TOR".into(),
