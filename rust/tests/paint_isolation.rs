@@ -5,6 +5,7 @@
 
 use std::{collections::BTreeMap, fs};
 
+use pdf_redox_ocr::source_appearances::PaintAppearances;
 use pdf_redox_ocr::{
     PageNumber, draft::OcrLine, geometry::Point, mixed_visibility::prove_mixed_source_text,
     paint_scan::enumerate_image_paints, pdf_metadata::PdfMetadata, rasterize::RenderPolicy,
@@ -66,7 +67,7 @@ fn attributes_repeated_direct_form_and_nested_form_paints() -> Result<(), Box<dy
         &pdf,
         &document,
         &painted,
-        &recognized,
+        &PaintAppearances::from_object_inventory(recognized, &painted.placements),
         &pages,
         RenderPolicy {
             max_side: 1600,
@@ -106,11 +107,10 @@ fn attributes_repeated_direct_form_and_nested_form_paints() -> Result<(), Box<dy
 #[test]
 fn isolated_paint_does_not_modify_other_visible_uses_or_reserved_aliases()
 -> Result<(), Box<dyn std::error::Error>> {
-    use pdf_redox::ObjectId;
     use pdf_redox_ocr::{
         paint_isolation::{PaintReplacement, isolate_source_paints},
         rasterize::render_rgb_page,
-        source_mask::mask_source_object,
+        source_mask::{MaskSource, mask_source_object},
     };
 
     let original = include_bytes!("fixtures/repeated-nested-paint-both-visible.pdf");
@@ -145,7 +145,7 @@ fn isolated_paint_does_not_modify_other_visible_uses_or_reserved_aliases()
             .ok_or("missing first image")?;
         let masked = mask_source_object(
             metadata.source(),
-            ObjectId::new(first.object_number, i32::from(first.generation)),
+            MaskSource::Paint(first),
             std::slice::from_ref(&original_line),
             0.97,
         )?

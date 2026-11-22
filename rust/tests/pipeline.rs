@@ -724,7 +724,7 @@ fn audit_binds_raw_source_observations_paints_and_admission_to_original_pdf()
     let result = PreparedOcr::open(&pdf, None, policy)?
         .recognize(&SelectiveRecognizer::default(), |_| {})?;
     let audit = serde_json::to_value(result.audit())?;
-    assert_eq!(audit["schema_version"], 14);
+    assert_eq!(audit["schema_version"], 15);
     assert_eq!(audit["pdf_sha256"], result.draft.pdf_sha256);
     assert_eq!(audit["model"], result.draft.model);
     assert_eq!(audit["policy"]["render"]["max_side"], 600);
@@ -740,17 +740,20 @@ fn audit_binds_raw_source_observations_paints_and_admission_to_original_pdf()
             .all(|a| a["outcome"]["status"] == "accepted")
     );
     assert_eq!(audit["recognition"]["inference_calls"], 3);
-    assert_eq!(audit["source_observations"]["5:0"]["width"], 600);
     assert_eq!(
-        audit["source_observations"]["5:0"]["lines"][0]["text"],
+        audit["source_observations"]["variants"]["0"]["value"]["width"],
+        600
+    );
+    assert_eq!(
+        audit["source_observations"]["variants"]["0"]["value"]["lines"][0]["text"],
         "ALPHA"
     );
     assert_eq!(
-        audit["source_observations"]["5:0"]["lines"][1]["text"],
+        audit["source_observations"]["variants"]["0"]["value"]["lines"][1]["text"],
         "BETA"
     );
     assert_eq!(
-        audit["source_observations"]["5:0"]["lines"][0]["quad"][0],
+        audit["source_observations"]["variants"]["0"]["value"]["lines"][0]["quad"][0],
         serde_json::json!([50.0, 70.0])
     );
     assert_eq!(audit["paints"]["placements"][0]["source_id"], "5:0");
@@ -926,5 +929,92 @@ fn all_mode_considers_low_gain_sources_and_off_retains_native_only_bypass()
         assert_eq!(result.source_observations.len(), expected);
         assert_eq!(result.recognition.inference_calls, 1 + expected);
     }
+    Ok(())
+}
+
+struct PaletteRecognizer;
+
+impl RecognitionBackend for PaletteRecognizer {
+    fn model_profile(&self) -> &'static str {
+        "palette fixture"
+    }
+
+    fn recognize_pixels(&self, rgb: RgbImage) -> Result<RasterRecognition, Error> {
+        let text = match rgb.get_pixel(0, 0).0 {
+            [255, 0, 0] => "RED LABEL",
+            [0, 0, 255] => "BLUE LABEL",
+            [255, 255, 255] => return Ok(RasterRecognition::default()),
+            other => return Err(Error::Inference(format!("unexpected palette {other:?}"))),
+        };
+        Ok(vec![PixelLine {
+            text: text.into(),
+            confidence: 0.99,
+            quad: [
+                Point(10., 20.),
+                Point(70., 20.),
+                Point(70., 10.),
+                Point(10., 10.),
+            ],
+        }]
+        .into())
+    }
+}
+
+#[test]
+fn distinct_appearances_are_bound_but_require_actual_renderer_visibility()
+-> Result<(), Box<dyn std::error::Error>> {
+    let bytes = support::pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 80 40] /Resources << /XObject << /Im 7 0 R >> /ColorSpace << /Local [/Indexed /DeviceRGB 1 <ff000000ff00>] >> >> /Contents 5 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 80 40] /Resources << /XObject << /Im 7 0 R >> /ColorSpace << /Local [/Indexed /DeviceRGB 1 <0000ffffffff>] >> >> /Contents 6 0 R >>".to_vec(),
+        support::stream("", b"q 80 0 0 40 0 0 cm /Im Do Q"),
+        support::stream("", b"q 80 0 0 40 0 0 cm /Im Do Q"),
+        support::stream("/Type /XObject /Subtype /Image /Width 80 /Height 40 /ColorSpace /Local /BitsPerComponent 8", &vec![0; 3200]),
+    ]);
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("palette.pdf");
+    fs::write(&path, &bytes)?;
+    let result = PreparedOcr::open(
+        &path,
+        None,
+        PipelinePolicy {
+            native_image_decoder: pdf_redox_ocr::pipeline::NativeImageDecoder::Hayro,
+            raster_mode: RasterMode::All,
+            ..policy()
+        },
+    )?
+    .recognize(&PaletteRecognizer, |_| {})?;
+    assert_eq!(result.stats.image_source_only_pages, 0);
+    assert_eq!(result.stats.page_fallback_pages, 2);
+    assert_eq!(result.source_observations.len(), 2);
+    assert_eq!(result.source_rasters.len(), 2);
+    for (paint, expected) in result
+        .paints
+        .placements
+        .iter()
+        .zip(["RED LABEL", "BLUE LABEL"])
+    {
+        let (_, source) = result
+            .source_observations
+            .get(paint)
+            .ok_or("missing appearance")?;
+        assert_eq!(source.lines[0].text, expected);
+    }
+    assert!(result.draft.pages.iter().all(|page| page.lines.is_empty()));
+    assert!(result.visibility.proofs.is_empty());
+    let legacy = PreparedOcr::open(
+        &path,
+        None,
+        PipelinePolicy {
+            native_image_decoder: pdf_redox_ocr::pipeline::NativeImageDecoder::Poppler,
+            raster_mode: RasterMode::All,
+            ..policy()
+        },
+    )?
+    .recognize(&PaletteRecognizer, |_| {})?;
+    assert!(legacy.source_observations.is_empty());
+    assert!(legacy.draft.pages.iter().all(|page| page.lines.is_empty()));
+    assert_eq!(fs::read(path)?, bytes);
     Ok(())
 }

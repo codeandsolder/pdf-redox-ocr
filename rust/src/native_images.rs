@@ -88,9 +88,9 @@ pub fn parse_inventory_line(line: &str) -> Result<Option<ImageInventoryEntry>, E
 pub struct NativeImageBudget {
     /// Maximum pixels for one source `XObject`.
     pub source_pixels: u64,
-    /// Maximum pixels stored across all distinct sources.
+    /// Maximum pixels stored across distinct decoded appearances.
     pub total_pixels: u64,
-    /// Maximum number of distinct source objects.
+    /// Maximum number of resident decoded appearances (objects for Poppler).
     pub sources: usize,
     /// Per-page extraction work: all Poppler image pixels or targeted Hayro decode pixels.
     pub extraction_pixels: u64,

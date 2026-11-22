@@ -5,6 +5,7 @@
 
 use std::{collections::BTreeMap, fs};
 
+use pdf_redox_ocr::source_appearances::PaintAppearances;
 use pdf_redox_ocr::{
     PageNumber,
     draft::OcrLine,
@@ -53,7 +54,7 @@ fn source_isolation_accepts_visible_and_rejects_opaque_occlusion()
         &path,
         &document,
         &painted,
-        &recognized,
+        &PaintAppearances::from_object_inventory(recognized, &painted.placements),
         &pages,
         RenderPolicy {
             max_side: 1600,
@@ -137,7 +138,10 @@ fn invalid_native_recognition_retains_page_fallback() -> Result<(), Box<dyn std:
             &path,
             &document,
             &painted,
-            &BTreeMap::from([(id.clone(), source)]),
+            &PaintAppearances::from_object_inventory(
+                BTreeMap::from([(id.clone(), source)]),
+                &painted.placements,
+            ),
             &pages,
             policy,
             0.97,

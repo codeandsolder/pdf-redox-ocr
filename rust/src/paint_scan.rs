@@ -15,6 +15,7 @@ use crate::{
     geometry::{PageBox, Point, Quad},
     pdf_metadata::{PdfMetadata, resolve_owned},
     polygon::area,
+    sample_layout::{ImageSampleLayout, image_sample_layout},
 };
 
 pub(crate) const MAX_FORM_DEPTH: usize = 32;
@@ -105,6 +106,8 @@ pub struct ImagePaint {
     pub width: u32,
     /// Image native pixel height.
     pub height: u32,
+    /// Resolved packed sample layout for counterfactual masks.
+    pub sample_layout: ImageSampleLayout,
     /// PDF user-space CTM at paint invocation.
     pub ctm: [f64; 6],
     /// Image unit square in PDF user coordinates.
@@ -917,6 +920,7 @@ impl ScanContext<'_> {
             generation,
             width,
             height,
+            sample_layout: image_sample_layout(self.source, dict, resources),
             ctm: state.ctm.0,
             page_quad: state.ctm.rect_quad(PageBox::new([0.0, 0.0, 1.0, 1.0])?),
             clips: state.clips.clone(),

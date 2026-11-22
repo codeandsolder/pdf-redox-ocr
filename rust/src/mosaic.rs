@@ -479,6 +479,7 @@ mod tests {
             generation: 0,
             width: w,
             height: h,
+            sample_layout: crate::sample_layout::ImageSampleLayout::default(),
             ctm,
             page_quad: PdfMatrix(ctm).rect_quad(PageBox {
                 x0: 0.0,

@@ -11,12 +11,41 @@ use crate::{
     Error,
     draft::OcrLine,
     geometry::{Point, Quad},
-    pdf_metadata::resolve_owned,
+    paint_scan::ImagePaint,
     polygon::area,
+    sample_layout::color_components,
     source_samples::PackedSamples,
 };
 
 const MASK_PADDING: u32 = 3;
+
+/// A standalone intrinsic image or a particular resolved paint.
+#[derive(Debug, Clone, Copy)]
+pub enum MaskSource<'a> {
+    Object(ObjectId),
+    Paint(&'a ImagePaint),
+}
+
+impl MaskSource<'_> {
+    fn object_id(self) -> ObjectId {
+        match self {
+            Self::Object(id) => id,
+            Self::Paint(paint) => ObjectId::new(paint.object_number, i32::from(paint.generation)),
+        }
+    }
+
+    fn components(self, source: &SourcePdf, object: &OwnedObject) -> Result<Option<usize>, Error> {
+        match self {
+            Self::Paint(paint) => Ok(paint.sample_layout.components),
+            Self::Object(_) => object
+                .as_dictionary()
+                .and_then(|dict| dict.get(b"ColorSpace".as_slice()))
+                .map(|raw| color_components(source, raw))
+                .transpose()
+                .map(Option::flatten),
+        }
+    }
+}
 
 /// Quantifies the specific source text modified by a counterfactual.
 #[derive(Debug, Clone)]
@@ -61,7 +90,13 @@ pub fn mask_source_text(
     min_confidence: f64,
 ) -> Result<Option<MaskedSourcePdf>, Error> {
     let mut doc = EditDocument::from_bytes(original.to_vec())?;
-    let Some(masked) = mask_source_object(doc.source(), source_id, lines, min_confidence)? else {
+    let Some(masked) = mask_source_object(
+        doc.source(),
+        MaskSource::Object(source_id),
+        lines,
+        min_confidence,
+    )?
+    else {
         return Ok(None);
     };
     *doc.edit_object(source_id)? = masked.object;
@@ -79,7 +114,7 @@ pub fn mask_source_text(
 /// Returns an error for invalid source polygons or a malformed source PDF.
 pub fn mask_source_object(
     source: &SourcePdf,
-    source_id: ObjectId,
+    image: MaskSource<'_>,
     lines: &[OcrLine],
     min_confidence: f64,
 ) -> Result<Option<MaskedSourceObject>, Error> {
@@ -91,7 +126,7 @@ pub fn mask_source_object(
         .enumerate()
         .filter_map(|(index, line)| mask_candidate(line, min_confidence).then_some(index))
         .collect::<Vec<_>>();
-    mask_source_subset(source, source_id, lines, &selected)
+    mask_source_subset(source, image, lines, &selected)
 }
 
 pub(crate) fn mask_candidate(line: &OcrLine, min_confidence: f64) -> bool {
@@ -110,7 +145,7 @@ pub(crate) fn mask_candidate(line: &OcrLine, min_confidence: f64) -> bool {
 /// geometry in selected and protected observations.
 pub fn mask_source_subset(
     source: &SourcePdf,
-    source_id: ObjectId,
+    image: MaskSource<'_>,
     lines: &[OcrLine],
     selected: &[usize],
 ) -> Result<Option<MaskedSourceObject>, Error> {
@@ -128,8 +163,8 @@ pub fn mask_source_subset(
         .iter()
         .map(|&index| &lines[index])
         .collect::<Vec<_>>();
-    let object = source.materialize(source_id)?;
-    let Some(mut image) = decode_native_samples(source, source_id, &object)? else {
+    let object = source.materialize(image.object_id())?;
+    let Some(mut image) = decode_native_samples(source, image, &object)? else {
         return Ok(None);
     };
     let before = image.clone();
@@ -201,7 +236,7 @@ pub fn mask_source_subset(
 /// Decode samples without changing their color-space interpretation.
 fn decode_native_samples(
     source: &SourcePdf,
-    source_id: ObjectId,
+    image: MaskSource<'_>,
     object: &OwnedObject,
 ) -> Result<Option<PackedSamples>, Error> {
     let Some(dictionary) = object.as_dictionary() else {
@@ -222,11 +257,7 @@ fn decode_native_samples(
     {
         return Ok(None);
     }
-    let Some(components) = entry(b"ColorSpace")
-        .map(|raw| color_components(source, raw))
-        .transpose()?
-        .flatten()
-    else {
+    let Some(components) = image.components(source, object)? else {
         return Ok(None);
     };
     let Some(bits) = entry(b"BitsPerComponent").and_then(|raw| match raw {
@@ -269,7 +300,7 @@ fn decode_native_samples(
     }
     // Image codecs that cannot expose exact native samples are eligible for
     // page OCR; unsupported source decoding must not abort the whole document.
-    let Ok(decoded) = source.decoded_stream_data(source_id) else {
+    let Ok(decoded) = source.decoded_stream_data(image.object_id()) else {
         return Ok(None);
     };
     Ok(PackedSamples::new(
@@ -279,55 +310,6 @@ fn decode_native_samples(
         bits,
         decoded.into_owned(),
     ))
-}
-
-/// Count PDF color-space components without performing color conversion.
-/// Unknown named aliases require page/Form resources and cannot be guessed.
-fn color_components(source: &SourcePdf, raw: &OwnedObject) -> Result<Option<usize>, Error> {
-    let resolved = resolve_owned(source, raw.clone())?;
-    let OwnedObject::Array(items) = &resolved else {
-        return Ok(match resolved {
-            OwnedObject::Name(name) => match name.as_slice() {
-                b"DeviceGray" => Some(1),
-                b"DeviceRGB" => Some(3),
-                b"DeviceCMYK" => Some(4),
-                _ => None,
-            },
-            _ => None,
-        });
-    };
-    let Some(first) = items.first() else {
-        return Ok(None);
-    };
-    let OwnedObject::Name(kind) = resolve_owned(source, first.clone())? else {
-        return Ok(None);
-    };
-    let count = match kind.as_slice() {
-        b"CalGray" if items.len() == 2 => Some(1),
-        b"CalRGB" | b"Lab" if items.len() == 2 => Some(3),
-        b"Indexed" | b"I" | b"Separation" if items.len() == 4 => Some(1),
-        b"DeviceN" if items.len() >= 4 => match resolve_owned(source, items[1].clone())? {
-            OwnedObject::Array(names)
-                if names.iter().all(|n| matches!(n, OwnedObject::Name(_))) =>
-            {
-                Some(names.len())
-            }
-            _ => None,
-        },
-        b"ICCBased" if items.len() == 2 => {
-            let profile = resolve_owned(source, items[1].clone())?;
-            profile
-                .as_dictionary()
-                .and_then(|dict| dict.get(b"N".as_slice()))
-                .and_then(|value| match value {
-                    OwnedObject::Integer(value) => usize::try_from(*value).ok(),
-                    _ => None,
-                })
-                .filter(|channels| matches!(*channels, 1 | 3 | 4))
-        }
-        _ => None,
-    };
-    Ok(count.filter(|channels| (1..=32).contains(channels)))
 }
 
 fn to_top_left(quad: &Quad, width: u32, height: u32) -> Result<Quad, Error> {
