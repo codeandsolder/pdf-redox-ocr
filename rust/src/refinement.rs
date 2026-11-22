@@ -10,7 +10,6 @@ use std::{
 };
 
 use image::RgbImage;
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -20,7 +19,10 @@ use crate::{
     line_frame::{LineAxis, LineFrame, SampleWindow},
     pdf_metadata::PdfMetadata,
     rasterize::{calculate_crop, render_crop, sample_whitened},
-    refinement_recognition::{Recognition, canonical},
+    refinement_evidence::{
+        Recognition, RefinementOutcome, RefinementProposal, RefinementReport, RefinementSummary,
+        SelectionMode, SourceCropEvidence, experimental_draft,
+    },
 };
 
 /// Second-pass selection and resource limits.
@@ -83,90 +85,6 @@ pub enum RefinementScope<'a> {
     },
     /// Research selection of exact zero-based line indices keyed by PDF page.
     ExplicitLines(&'a BTreeMap<PageNumber, BTreeSet<usize>>),
-}
-
-/// Exact source sampling provenance.
-#[derive(Debug, Serialize)]
-pub struct SourceCropEvidence {
-    pub rgb_sha256: String,
-    pub dimensions: (u32, u32),
-    pub rendered_dimensions: (u32, u32),
-    pub rendered_quad: Quad,
-    pub charged_pixels: u64,
-}
-
-/// Per-line diagnostic result, including explicit geometry/budget failures.
-#[derive(Debug, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum RefinementOutcome {
-    Recognized {
-        crop: SourceCropEvidence,
-        recognition: Recognition,
-    },
-    Skipped {
-        reason: String,
-    },
-}
-
-/// Report for a single original OCR observation.
-#[derive(Debug, Serialize)]
-pub struct RefinementProposal {
-    pub page: u32,
-    pub line_index: usize,
-    pub quad: Quad,
-    pub primary_text: String,
-    pub primary_score: f64,
-    pub outcome: RefinementOutcome,
-}
-
-impl RefinementProposal {
-    fn revised_text(&self) -> Option<&str> {
-        let RefinementOutcome::Recognized { recognition, .. } = &self.outcome else {
-            return None;
-        };
-        recognition
-            .decision
-            .text()
-            .filter(|text| meaningful_change(&self.primary_text, text))
-    }
-}
-
-/// Summary of attempted recognition-only revisions.
-#[derive(Debug, Clone, Serialize)]
-pub struct RefinementSummary {
-    pub source_lines: usize,
-    pub selected_lines: usize,
-    pub revised_predictions: usize,
-    pub recognized_lines: usize,
-    pub skipped_lines: usize,
-    pub charged_pixels: u64,
-    pub seconds: f64,
-    pub source_pages: usize,
-    pub pages_refined: usize,
-}
-
-/// Research-only provenance-bound comparison report.
-#[derive(Debug, Serialize)]
-pub struct RefinementReport {
-    pub schema_version: u32,
-    pub pdf_sha256: String,
-    pub source_model: String,
-    pub secondary_model: String,
-    pub selection_mode: &'static str,
-    pub max_primary_score: Option<f64>,
-    pub min_chars: Option<usize>,
-    pub dpi: u32,
-    pub max_line_pixels: u64,
-    pub max_page_pixels: u64,
-    pub summary: RefinementSummary,
-    pub proposals: Vec<RefinementProposal>,
-}
-
-/// Ignore only whitespace; retain literal engineering symbols, punctuation,
-/// superscripts and full-width forms.
-#[must_use]
-pub fn meaningful_change(left: &str, right: &str) -> bool {
-    canonical(left) != canonical(right)
 }
 
 struct SourcePlan {
@@ -430,31 +348,13 @@ pub fn refine_draft(
         proposals.extend(page_proposals);
         charged_pixels = charged_pixels.saturating_add(pixels);
     }
-    let mut experimental = source.clone();
-    experimental.model = format!(
-        "{} + research-only {secondary_model} hypotheses",
-        source.model
-    );
-    for page in &mut experimental.pages {
-        for line in &mut page.lines {
-            line.confidence = 0.0;
-            line.reviewed = false;
-        }
-    }
-    for proposal in &proposals {
-        if let Some(text) = proposal.revised_text() {
-            let page = experimental
-                .pages
-                .iter_mut()
-                .find(|p| p.page == proposal.page)
-                .ok_or_else(|| Error::Invalid("refinement proposal page missing".into()))?;
-            let line: &mut OcrLine = page
-                .lines
-                .get_mut(proposal.line_index)
-                .ok_or_else(|| Error::Invalid("refinement proposal line missing".into()))?;
-            text.clone_into(&mut line.text);
-        }
-    }
+    let experimental = experimental_draft(
+        source,
+        secondary_model,
+        proposals
+            .iter()
+            .filter_map(|p| p.revised_text().map(|text| (p.page, p.line_index, text))),
+    )?;
     let by_confidence = matches!(scope, RefinementScope::ByConfidence { .. });
     source.verify_pdf(pdf)?;
     let recognized_lines = proposals
@@ -467,9 +367,9 @@ pub fn refine_draft(
         source_model: source.model.clone(),
         secondary_model: secondary_model.to_owned(),
         selection_mode: if by_confidence {
-            "confidence"
+            SelectionMode::Confidence
         } else {
-            "explicit-lines"
+            SelectionMode::ExplicitLines
         },
         max_primary_score: by_confidence.then_some(policy.max_primary_score),
         min_chars: by_confidence.then_some(policy.min_chars),
@@ -499,14 +399,14 @@ pub fn refine_draft(
 mod tests {
     use super::{
         Recognition, RefinementPolicy, RefinementRequest, RefinementScope, SourcePlan,
-        meaningful_change, refine_draft, refinement_plan,
+        refine_draft, refinement_plan,
     };
     use crate::{
         PageNumber,
         draft::{DraftPage, OcrDraft, OcrLine, sha256_file},
         geometry::{DisplayMapper, PageBox, Point, Rotation},
         pdf_metadata::PdfMetadata,
-        refinement_recognition::RefinementDecision,
+        refinement_evidence::{RefinementDecision, meaningful_change},
     };
     use std::{
         collections::{BTreeMap, BTreeSet},

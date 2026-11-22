@@ -19,7 +19,7 @@ use crate::{
 };
 use image::RgbImage;
 use num_traits::ToPrimitive;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -75,7 +75,7 @@ fn invalid_geometry() -> Error {
 
 /// One observed CTC token. Its signed pixel coordinate is intentionally
 /// unclamped; an emission in right padding is not a source glyph.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct CharacterAnchor {
     pub character: char,
     pub column: usize,
@@ -85,7 +85,7 @@ pub struct CharacterAnchor {
 }
 
 /// Ordered matching describes geometric compatibility, not character identity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum RunAlignment {
     Whitespace,

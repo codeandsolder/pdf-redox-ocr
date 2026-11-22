@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     Error,
@@ -24,7 +24,7 @@ const SEARCH_CLASSES: usize = BEAM_WIDTH + 2;
 const REPORTED_HYPOTHESES: usize = 5;
 
 /// An actual model class at one CTC timestep; class zero is blank.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ClassScore {
     pub class_index: usize,
     pub character: Option<char>,
@@ -32,7 +32,7 @@ pub struct ClassScore {
 }
 
 /// Top classes at the actual first timestep of a collapsed greedy emission.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct EmissionEvidence {
     pub column: usize,
     pub classes: Vec<ClassScore>,
@@ -41,7 +41,7 @@ pub struct EmissionEvidence {
 }
 
 /// Lower bound on the path mass for one retained class sequence.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SequenceHypothesis {
     pub text: String,
     /// Distinct model class sequences can decode to the same Unicode text.
@@ -52,7 +52,7 @@ pub struct SequenceHypothesis {
 }
 
 /// Diagnostic evidence from the same inference as the ordinary greedy output.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CtcEvidence {
     pub sequence_length: usize,
     pub vocabulary_size: usize,
@@ -65,7 +65,7 @@ pub struct CtcEvidence {
 }
 
 /// Preserve an explicit failure rather than silently substituting other crops.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CtcOutcome {
     Measured { evidence: CtcEvidence },

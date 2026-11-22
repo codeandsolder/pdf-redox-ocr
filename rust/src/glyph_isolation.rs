@@ -1,7 +1,7 @@
 //! Geometry-only isolation of visible ink along an OCR line.
 
 use image::{GrayImage, Pixel, RgbImage, imageops};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     Error,
@@ -11,7 +11,7 @@ use crate::{
 };
 
 /// A projection group and its exact constituent connected components.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InkRun {
     pub ink: InkBounds,
     /// Indices into the line's connected-component array.
@@ -20,7 +20,7 @@ pub struct InkRun {
 }
 
 /// One isolated ink group, with diagnostic topology at each requested threshold.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InkGroup {
     #[serde(flatten)]
     pub run: InkRun,
