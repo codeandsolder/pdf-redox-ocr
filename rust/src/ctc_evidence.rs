@@ -51,6 +51,59 @@ pub struct SequenceHypothesis {
     pub alignment: SequenceAlignment,
 }
 
+/// An explicit sequence query on the complete original class distribution.
+/// No beam rank or retained-path mass is implied.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExactSequence {
+    pub text: String,
+    pub classes: Vec<usize>,
+    pub alignment: SequenceAlignment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SequenceReference {
+    Beam { index: usize },
+    Query { index: usize },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SequenceData<'a> {
+    pub text: &'a str,
+    pub classes: &'a [usize],
+    pub alignment: &'a SequenceAlignment,
+}
+
+#[cfg(any(feature = "native-inference", test))]
+impl SequenceData<'_> {
+    pub(crate) fn log_mass(self) -> Option<f64> {
+        let SequenceAlignment::Measured { log_mass, .. } = *self.alignment else {
+            return None;
+        };
+        log_mass.is_finite().then_some(log_mass)
+    }
+}
+
+impl SequenceHypothesis {
+    pub(crate) fn data(&self) -> SequenceData<'_> {
+        SequenceData {
+            text: &self.text,
+            classes: &self.classes,
+            alignment: &self.alignment,
+        }
+    }
+}
+
+impl ExactSequence {
+    pub(crate) fn data(&self) -> SequenceData<'_> {
+        SequenceData {
+            text: &self.text,
+            classes: &self.classes,
+            alignment: &self.alignment,
+        }
+    }
+}
+
 /// Diagnostic evidence from the same inference as the ordinary greedy output.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CtcEvidence {
@@ -62,6 +115,9 @@ pub struct CtcEvidence {
     pub greedy_text: String,
     pub emissions: Vec<EmissionEvidence>,
     pub hypotheses: Vec<SequenceHypothesis>,
+    /// Exact conditional scores of requested sequences absent from the beam.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queries: Vec<ExactSequence>,
 }
 
 /// Preserve an explicit failure rather than silently substituting other crops.
@@ -282,6 +338,128 @@ impl PrefixBeam {
 }
 
 impl CtcEvidence {
+    #[cfg(any(feature = "native-inference", test))]
+    pub(crate) fn sequences(&self) -> impl Iterator<Item = (SequenceReference, SequenceData<'_>)> {
+        self.hypotheses
+            .iter()
+            .enumerate()
+            .map(|(index, h)| (SequenceReference::Beam { index }, h.data()))
+            .chain(
+                self.queries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, h)| (SequenceReference::Query { index }, h.data())),
+            )
+    }
+
+    #[cfg(any(feature = "native-inference", test))]
+    pub(crate) fn sequence(&self, reference: SequenceReference) -> Option<SequenceData<'_>> {
+        Some(match reference {
+            SequenceReference::Beam { index } => self.hypotheses.get(index)?.data(),
+            SequenceReference::Query { index } => self.queries.get(index)?.data(),
+        })
+    }
+
+    #[cfg(any(feature = "native-inference", test))]
+    pub(crate) fn find_sequence(&self, classes: &[usize]) -> Option<SequenceReference> {
+        self.sequences()
+            .find_map(|(r, h)| (h.classes == classes).then_some(r))
+    }
+
+    #[cfg(any(feature = "native-inference", test))]
+    pub(crate) fn strongest_matching(
+        &self,
+        matches: impl Fn(&str) -> bool,
+    ) -> Option<SequenceReference> {
+        self.sequences()
+            .filter_map(|(r, h)| {
+                matches(h.text)
+                    .then(|| h.log_mass().map(|m| (r, m)))
+                    .flatten()
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(r, _)| r)
+    }
+
+    // The caller supplies the very same already validated tensor as measure().
+    // Queries are independent of the retained beam and cannot change its rank.
+    #[cfg(any(feature = "native-inference", test))]
+    fn query(&mut self, labels: &[char], rows: &[&[f32]], classes: &[usize]) {
+        if self.find_sequence(classes).is_some()
+            || rows.len() != self.sequence_length
+            || labels.len() != self.vocabulary_size
+            || classes.iter().any(|&c| c == 0 || c >= labels.len())
+        {
+            return;
+        }
+        self.queries.push(ExactSequence {
+            text: classes.iter().map(|&c| labels[c]).collect(),
+            classes: classes.to_vec(),
+            alignment: align(rows, classes),
+        });
+    }
+
+    /// Score the same actual primary and revised sequences on both sides of
+    /// a counterfactual, even when one spelling falls outside the beam.
+    /// The probability slices are borrowed from each original inference.
+    #[cfg(any(feature = "native-inference", test))]
+    pub(crate) fn pair_queries(
+        labels: &[char],
+        before: &mut Self,
+        before_rows: &[&[f32]],
+        after: &mut Self,
+        after_rows: &[&[f32]],
+        primary: &str,
+    ) {
+        let key = crate::refinement_evidence::canonical(primary);
+        let matches = |text: &str| crate::refinement_evidence::canonical(text) == key;
+        let Some(winner) = after.hypotheses.first() else {
+            return;
+        };
+        if matches(&winner.text) {
+            return;
+        }
+        let revised = winner.classes.clone();
+        if before.strongest_matching(matches).is_none() {
+            // Preserve the actual greedy sequence when it represents the
+            // primary observation; otherwise use a uniquely encodable literal.
+            let primary_classes = if matches(&before.greedy_text) {
+                Some(
+                    before
+                        .emissions
+                        .iter()
+                        .filter_map(|e| e.classes.first().map(|c| c.class_index))
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                primary
+                    .chars()
+                    .map(|ch| {
+                        let mut indices = labels
+                            .iter()
+                            .enumerate()
+                            .skip(1)
+                            .filter_map(|(i, &c)| (c == ch).then_some(i));
+                        let index = indices.next()?;
+                        indices.next().is_none().then_some(index)
+                    })
+                    .collect()
+            };
+            if let Some(classes) = primary_classes {
+                before.query(labels, before_rows, &classes);
+            }
+        }
+        let Some(primary_classes) = before
+            .strongest_matching(matches)
+            .and_then(|r| before.sequence(r))
+            .map(|h| h.classes.to_vec())
+        else {
+            return;
+        };
+        before.query(labels, before_rows, &revised);
+        after.query(labels, after_rows, &primary_classes);
+    }
+
     /// Keep the top classes and prefix hypotheses from a probability tensor.
     /// The vocabulary is indexed by class, including blank at index zero.
     /// Verify the independent greedy collapse against the model's actual output.
@@ -335,6 +513,7 @@ impl CtcEvidence {
             greedy_text,
             emissions,
             hypotheses: beam.finish(labels, &rows),
+            queries: Vec::new(),
         })
     }
 }
@@ -342,6 +521,44 @@ impl CtcEvidence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paired_exact_queries_do_not_depend_on_retained_beam()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let labels = ['\0', 'A', 'B', 'C', 'D', 'E', 'F', 'G'];
+        let before_row = [0.01, 0.90, 0.03, 0.02, 0.01, 0.01, 0.01, 0.01];
+        let after_row = [0.01, 0.0001, 0.90, 0.025, 0.025, 0.02, 0.01, 0.0099];
+        let before_rows = [before_row.as_slice()];
+        let after_rows = [after_row.as_slice()];
+        let mut before = CtcEvidence::measure(&labels, before_rows, "A", &[0])?;
+        let mut after = CtcEvidence::measure(&labels, after_rows, "B", &[0])?;
+        assert!(after.find_sequence(&[1]).is_none());
+        let rank = serde_json::to_value(&after.hypotheses)?;
+        CtcEvidence::pair_queries(
+            &labels,
+            &mut before,
+            &before_rows,
+            &mut after,
+            &after_rows,
+            "A",
+        );
+        assert_eq!(serde_json::to_value(&after.hypotheses)?, rank);
+        let path = after
+            .find_sequence(&[1])
+            .and_then(|r| after.sequence(r))
+            .ok_or_else(|| invalid("missing exact primary query"))?;
+        assert_eq!(path.text, "A");
+        let probability = path
+            .log_mass()
+            .ok_or_else(|| invalid("missing exact primary mass"))?
+            .exp();
+        assert!((probability - f64::from(after_row[1])).abs() < 1e-12);
+        assert!(matches!(
+            after.find_sequence(&[1]),
+            Some(SequenceReference::Query { .. })
+        ));
+        Ok(())
+    }
 
     #[test]
     fn beam_sums_paths_and_preserves_repeated_labels() -> Result<(), Error> {

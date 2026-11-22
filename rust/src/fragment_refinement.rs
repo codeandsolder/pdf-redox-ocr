@@ -168,6 +168,12 @@ pub struct FragmentReport {
     pub conflicts: BTreeSet<usize>,
 }
 
+struct MaskCrop {
+    rgb: image::RgbImage,
+    ink: SourceInk,
+    evidence: MaskEvidence,
+}
+
 struct PageContext<'a> {
     pdf: &'a Path,
     metadata: &'a PdfMetadata,
@@ -266,14 +272,11 @@ impl PageContext<'_> {
         Ok(Some((rgb, shared)))
     }
 
-    fn recognize_mask(
+    fn prepare_mask(
         &mut self,
         sampled: &SampledLine,
         budget: &mut u64,
-        predictor: &mut RefinementRecognizer,
-        original: &Recognition,
-        transactions: &mut Vec<Transaction>,
-    ) -> Result<Option<OrthogonalOutcome>, Error> {
+    ) -> Result<Option<Result<MaskCrop, Rejection>>, Error> {
         let Some(strokes) = &sampled.audit.foreign_strokes else {
             return Ok(None);
         };
@@ -283,14 +286,10 @@ impl PageContext<'_> {
         let b = sampled.audit.observation_bounds;
         let required = membership_checks(b.right - b.left, b.bottom - b.top, 3);
         let Some(remaining) = budget.checked_sub(required) else {
-            return Ok(Some(OrthogonalOutcome::Skipped {
-                reason: Rejection::InkBudgetExceeded,
-            }));
+            return Ok(Some(Err(Rejection::InkBudgetExceeded)));
         };
         let Some((mut rgb, mut normalized)) = self.crop_pixels(sampled, b) else {
-            return Ok(Some(OrthogonalOutcome::Skipped {
-                reason: Rejection::PixelBudgetExceeded,
-            }));
+            return Ok(Some(Err(Rejection::PixelBudgetExceeded)));
         };
         *budget = remaining;
         let threshold = self.policy.audit.segmentation_threshold;
@@ -302,9 +301,7 @@ impl PageContext<'_> {
             &sampled.audit.polarity,
         )?
         else {
-            return Ok(Some(OrthogonalOutcome::Skipped {
-                reason: Rejection::NoMeasuredInk,
-            }));
+            return Ok(Some(Err(Rejection::NoMeasuredInk)));
         };
         mask.apply(&mut rgb, &mut normalized, threshold)?;
         let shared = self.measure_crop(sampled, &rgb, &normalized)?;
@@ -319,26 +316,11 @@ impl PageContext<'_> {
                 "masked recognition foreground mismatch".into(),
             ));
         }
-        let recognition = predictor.recognize_with_ink(&rgb, shared)?;
-        let (transaction, rejection) = match mask_reconciliation::propose(
-            &sampled.audit,
-            original,
-            &recognition,
-            &mask.evidence,
-        ) {
-            Ok(operation) => {
-                let id = transactions.len();
-                transactions.push(operation);
-                (Some(id), None)
-            }
-            Err(reason) => (None, Some(reason)),
-        };
-        Ok(Some(OrthogonalOutcome::Measured {
+        Ok(Some(Ok(MaskCrop {
+            rgb,
+            ink: shared,
             evidence: mask.evidence,
-            recognition: Box::new(recognition),
-            transaction,
-            rejection,
-        }))
+        })))
     }
 
     fn recognize_strokes(
@@ -372,9 +354,8 @@ impl PageContext<'_> {
                 }),
             });
         };
-        let original = predictor.recognize_with_ink(&rgb, shared)?;
         let mut variants = Vec::new();
-        for (i, c) in contractions.iter().enumerate() {
+        for c in contractions {
             let Some((rgb, shared)) = self.prepare_crop(sampled, c.evidence.retained)? else {
                 variants.push(ContractionOutcome::Skipped {
                     reason: Rejection::PixelBudgetExceeded,
@@ -382,24 +363,73 @@ impl PageContext<'_> {
                 continue;
             };
             let recognition = predictor.recognize_with_ink(&rgb, shared)?;
-            let (transaction, rejection) =
-                match stroke_reconciliation::propose(&sampled.audit, i, &original, &recognition) {
-                    Ok(operation) => {
-                        let id = transactions.len();
-                        transactions.push(operation);
-                        (Some(id), None)
-                    }
-                    Err(reason) => (None, Some(reason)),
-                };
             variants.push(ContractionOutcome::Measured {
                 recognition: Box::new(recognition),
-                transaction,
-                rejection,
+                transaction: None,
+                rejection: None,
             });
         }
-        let orthogonal = self
-            .recognize_mask(sampled, budget, predictor, &original, transactions)?
-            .map(Box::new);
+        // Preserve the pixel-budget priority of the contraction crops,
+        // then recognize the masked and original crops in one paired batch
+        // per model and stretch. Equal dimensions preserve the view contract.
+        let prepared = self.prepare_mask(sampled, budget)?;
+        let (original, mask_result) = match prepared {
+            Some(Ok(mask)) => {
+                let [original, masked] = predictor.recognize_pair(
+                    (&rgb, shared),
+                    (&mask.rgb, mask.ink),
+                    &sampled.audit.original_text,
+                )?;
+                (original, Some(Ok((mask.evidence, masked))))
+            }
+            Some(Err(reason)) => (
+                predictor.recognize_with_ink(&rgb, shared)?,
+                Some(Err(reason)),
+            ),
+            None => (predictor.recognize_with_ink(&rgb, shared)?, None),
+        };
+        for (i, variant) in variants.iter_mut().enumerate() {
+            if let ContractionOutcome::Measured {
+                recognition,
+                transaction,
+                rejection,
+            } = variant
+            {
+                match stroke_reconciliation::propose(&sampled.audit, i, &original, recognition) {
+                    Ok(operation) => {
+                        *transaction = Some(transactions.len());
+                        transactions.push(operation);
+                    }
+                    Err(reason) => *rejection = Some(reason),
+                }
+            }
+        }
+        let orthogonal = mask_result.map(|result| {
+            Box::new(match result {
+                Err(reason) => OrthogonalOutcome::Skipped { reason },
+                Ok((evidence, recognition)) => {
+                    let (transaction, rejection) = match mask_reconciliation::propose(
+                        &sampled.audit,
+                        &original,
+                        &recognition,
+                        &evidence,
+                    ) {
+                        Ok(operation) => {
+                            let id = transactions.len();
+                            transactions.push(operation);
+                            (Some(id), None)
+                        }
+                        Err(reason) => (None, Some(reason)),
+                    };
+                    OrthogonalOutcome::Measured {
+                        evidence,
+                        recognition: Box::new(recognition),
+                        transaction,
+                        rejection,
+                    }
+                }
+            })
+        });
         Ok(StrokeMeasurements {
             original: Some(Box::new(original)),
             contractions: variants,
@@ -756,7 +786,7 @@ pub fn reconcile_fragments(
     source.verify_pdf(pdf)?;
     Ok((
         FragmentReport {
-            schema_version: 11,
+            schema_version: 12,
             pdf_sha256: source.pdf_sha256.clone(),
             draft_model: source.model.clone(),
             secondary_model: RefinementModel::Consensus.label(),

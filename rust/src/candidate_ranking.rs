@@ -598,6 +598,7 @@ mod tests {
             })
             .collect();
         let evidence = CtcEvidence {
+            queries: Vec::new(),
             sequence_length: 80,
             vocabulary_size: 3,
             row_class_limit: 3,

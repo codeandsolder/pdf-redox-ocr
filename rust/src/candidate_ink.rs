@@ -3,6 +3,8 @@
 //! All horizontal views use one segmentation of the unmodified
 //! reading-order crop, so alternative hypotheses cannot create new pixels.
 
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+use crate::ctc_evidence::SequenceReference;
 use image::RgbImage;
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
@@ -14,7 +16,7 @@ use crate::{
         BatchGeometry, CharacterAnchor, EmissionCell, RunAlignment, align_runs, anchor_candidates,
     },
     ctc_alignment::{SequenceAlignment, TokenLocalization},
-    ctc_evidence::{CtcEvidence, SequenceHypothesis},
+    ctc_evidence::{CtcEvidence, SequenceData},
     glyph_appearance::GlyphShape,
     glyph_isolation::{InkGroup, MeasuredInk},
     ink_polarity::PolarityEvidence,
@@ -144,6 +146,18 @@ pub struct ViewInkMapping {
     pub geometry: ViewGeometry,
     /// Same order as the measured CTC hypotheses, even on partial failure.
     pub hypotheses: Vec<CandidateMapping>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queries: Vec<CandidateMapping>,
+}
+
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+impl ViewInkMapping {
+    pub(crate) fn sequence(&self, reference: SequenceReference) -> Option<&CandidateMapping> {
+        match reference {
+            SequenceReference::Beam { index } => self.hypotheses.get(index),
+            SequenceReference::Query { index } => self.queries.get(index),
+        }
+    }
 }
 
 impl SourceInk {
@@ -215,13 +229,13 @@ impl SourceInk {
         })
     }
 
-    fn map_hypothesis(
+    fn map_sequence(
         &self,
         geometry: &ViewGeometry,
-        hypothesis: &SequenceHypothesis,
+        hypothesis: SequenceData<'_>,
         runs: &[InkBounds],
     ) -> CandidateMapping {
-        let SequenceAlignment::Measured { tokens, .. } = &hypothesis.alignment else {
+        let SequenceAlignment::Measured { tokens, .. } = hypothesis.alignment else {
             return CandidateMapping::Unavailable {
                 reason: "no conditional token localization".into(),
             };
@@ -325,11 +339,17 @@ impl SourceInk {
         let hypotheses = evidence
             .hypotheses
             .iter()
-            .map(|candidate| self.map_hypothesis(&geometry, candidate, runs))
+            .map(|candidate| self.map_sequence(&geometry, candidate.data(), runs))
+            .collect();
+        let queries = evidence
+            .queries
+            .iter()
+            .map(|query| self.map_sequence(&geometry, query.data(), runs))
             .collect();
         Some(ViewInkMapping {
             geometry,
             hypotheses,
+            queries,
         })
     }
 }
@@ -337,6 +357,7 @@ impl SourceInk {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ctc_evidence::SequenceHypothesis;
     use image::Rgb;
 
     fn source() -> Result<SourceInk, Error> {
@@ -379,7 +400,7 @@ mod tests {
         let geometry = ViewGeometry::new(source.dimensions, view, 80)
             .ok_or_else(|| Error::Invalid("fixture geometry".into()))?;
         let bounds = source.groups.iter().map(|g| g.run.ink).collect::<Vec<_>>();
-        match source.map_hypothesis(&geometry, hypothesis, &bounds) {
+        match source.map_sequence(&geometry, hypothesis.data(), &bounds) {
             CandidateMapping::Mapped { anchors } => Ok(anchors),
             CandidateMapping::Unavailable { reason } => Err(Error::Invalid(reason)),
         }
