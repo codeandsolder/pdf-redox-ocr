@@ -134,7 +134,6 @@ pub struct RasterCharacterMapping {
 
 impl RasterCharacterMapping {
     /// Whether this mapping belongs to the final accepted page route.
-    #[cfg(feature = "pdf-integration")]
     pub(crate) fn selected(&self, residual_pages: &BTreeSet<crate::PageNumber>) -> bool {
         match &self.scope {
             RasterMappingScope::WholePage { residual } => {
@@ -145,7 +144,6 @@ impl RasterCharacterMapping {
     }
 
     /// Restrict supplemental raster evidence to explicitly admitted detections.
-    #[cfg(feature = "pdf-integration")]
     pub(crate) fn includes_detection(&self, detection_index: usize) -> bool {
         match &self.scope {
             RasterMappingScope::WholePage { .. } => true,
@@ -157,7 +155,6 @@ impl RasterCharacterMapping {
     }
 
     /// Reject ambiguous repeated executions of the same raster before matching.
-    #[cfg(feature = "pdf-integration")]
     pub(crate) fn unique_audit<'a>(
         &self,
         audits: &'a [RasterCharacterAudit],
