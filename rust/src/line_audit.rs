@@ -730,7 +730,7 @@ mod tests {
             LineAxis::ReadingOrder,
         )?;
         let page = PageBox::new([20., 20., 200., 200.])?;
-        let request = search_padding(frame.height);
+        let request = super::search_padding(frame.height);
         assert_eq!(request, [23, 10, 23, 10]);
         let display = DisplayMapper::new(page, Rotation::Deg90);
         let window = SampleWindow::new(frame, inside_page(display), request, 2_000_000)?;
