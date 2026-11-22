@@ -108,7 +108,8 @@ pub enum Rejection {
     ForegroundPartitionMismatch,
 }
 
-fn added_range(primary: &str, candidate: &str, edge: LeaderEdge) -> Option<Range<usize>> {
+/// Non-space scalar range in the longer literal edge extension.
+pub fn edge_difference(primary: &str, candidate: &str, edge: LeaderEdge) -> Option<Range<usize>> {
     let old = canonical(primary);
     let new = canonical(candidate);
     let (a, b) = (old.chars().count(), new.chars().count());
@@ -503,7 +504,7 @@ pub fn propose(
     if canonical(original) == canonical(text) {
         return Err(Rejection::Unchanged);
     }
-    let added = added_range(original, text, extension.evidence.edge)
+    let added = edge_difference(original, text, extension.evidence.edge)
         .ok_or(Rejection::NotLiteralExtension)?;
     let bindings = bind_added(
         variant,
@@ -793,10 +794,10 @@ mod tests {
 
     #[test]
     fn left_extensions_and_repeated_symbols_use_literal_scalar_positions() {
-        assert_eq!(added_range(" Ω² ", "µΩ²", LeaderEdge::Left), Some(0..1));
-        assert_eq!(added_range("Ω", "ΩΩ", LeaderEdge::Right), Some(1..2));
-        assert_eq!(added_range("Ω", "OΩ", LeaderEdge::Right), None);
-        assert_eq!(added_range("Ω", "Ω ", LeaderEdge::Right), None);
+        assert_eq!(edge_difference(" Ω² ", "µΩ²", LeaderEdge::Left), Some(0..1));
+        assert_eq!(edge_difference("Ω", "ΩΩ", LeaderEdge::Right), Some(1..2));
+        assert_eq!(edge_difference("Ω", "OΩ", LeaderEdge::Right), None);
+        assert_eq!(edge_difference("Ω", "Ω ", LeaderEdge::Right), None);
         let a = [
             anchor(
                 'A',

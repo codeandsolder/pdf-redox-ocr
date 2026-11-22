@@ -10,7 +10,7 @@ use crate::{
     candidate_ink::{CandidateMapping, SourceInk},
     character_alignment::RunAlignment,
     ctc_evidence::CtcOutcome,
-    fragment_reconciliation::{Operation, Rejection, Transaction},
+    fragment_reconciliation::{Operation, Rejection, Transaction, edge_difference},
     layout_leaders::LeaderEdge,
     line_audit::{AuditedLine, MappedEdgeContraction},
     pixel_regions::InkBounds,
@@ -38,7 +38,7 @@ pub struct ContractionVote {
 /// The absent retained-run identity identifies exactly the deleted tokens.
 #[derive(Debug, Serialize)]
 pub struct Contraction {
-    pub contraction_index: usize,
+    pub variant_index: usize,
     pub removed_pixels: u64,
     pub retained_pixels: u64,
     pub partition: Vec<PartitionRun>,
@@ -46,11 +46,11 @@ pub struct Contraction {
     pub votes: Vec<ContractionVote>,
 }
 
-fn dimensions(b: InkBounds) -> (u32, u32) {
+const fn dimensions(b: InkBounds) -> (u32, u32) {
     (b.right - b.left, b.bottom - b.top)
 }
 
-fn translated(b: InkBounds, x: u32, y: u32) -> InkBounds {
+const fn translated(b: InkBounds, x: u32, y: u32) -> InkBounds {
     InkBounds {
         left: b.left + x,
         right: b.right + x,
@@ -59,7 +59,7 @@ fn translated(b: InkBounds, x: u32, y: u32) -> InkBounds {
     }
 }
 
-fn within(b: InkBounds, outer: InkBounds) -> bool {
+const fn within(b: InkBounds, outer: InkBounds) -> bool {
     b.left >= outer.left
         && b.right <= outer.right
         && b.top >= outer.top
@@ -150,20 +150,6 @@ fn partition(
         return None;
     }
     Some(runs)
-}
-
-fn removed_range(original: &str, revised: &str, edge: LeaderEdge) -> Option<Range<usize>> {
-    let old = canonical(original);
-    let new = canonical(revised);
-    let (a, b) = (old.chars().count(), new.chars().count());
-    if b == 0 || a <= b {
-        return None;
-    }
-    match edge {
-        LeaderEdge::Left if old.ends_with(&new) => Some(0..a - b),
-        LeaderEdge::Right if old.starts_with(&new) => Some(b..a),
-        _ => None,
-    }
 }
 
 fn assignment(mapping: &CandidateMapping, text: &str) -> Option<Vec<usize>> {
@@ -319,7 +305,7 @@ pub fn propose(
     if old == new {
         return Err(Rejection::Unchanged);
     }
-    let removed = removed_range(&old, &new, contraction.evidence.edge)
+    let removed = edge_difference(&new, &old, contraction.evidence.edge)
         .ok_or(Rejection::NotLiteralContraction)?;
     let partition = partition(
         &original.source_ink,
@@ -369,7 +355,7 @@ pub fn propose(
         quad: contraction.proposed_quad,
         text: text.clone(),
         operation: Operation::Contraction(Contraction {
-            contraction_index,
+            variant_index: contraction_index,
             removed_pixels: contraction.evidence.removed_pixels,
             retained_pixels: contraction.evidence.retained_pixels,
             partition,
@@ -422,13 +408,13 @@ mod tests {
 
     #[test]
     fn only_literal_edge_deletions_are_permitted() {
-        assert_eq!(removed_range("−1.0", "1.0", LeaderEdge::Left), Some(0..1));
+        assert_eq!(edge_difference("1.0", "−1.0", LeaderEdge::Left), Some(0..1));
         assert_eq!(
-            removed_range("a 中 x", "a 中", LeaderEdge::Right),
+            edge_difference("a 中", "a 中 x", LeaderEdge::Right),
             Some(2..3)
         );
-        assert_eq!(removed_range("a1x", "ax", LeaderEdge::Left), None);
-        assert_eq!(removed_range("abc", "", LeaderEdge::Right), None);
-        assert_eq!(removed_range("A B", "AB", LeaderEdge::Left), None);
+        assert_eq!(edge_difference("ax", "a1x", LeaderEdge::Left), None);
+        assert_eq!(edge_difference("", "abc", LeaderEdge::Right), None);
+        assert_eq!(edge_difference("AB", "A B", LeaderEdge::Left), None);
     }
 }
