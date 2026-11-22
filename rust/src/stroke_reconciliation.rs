@@ -7,14 +7,14 @@ use std::{collections::BTreeSet, ops::Range};
 use serde::Serialize;
 
 use crate::{
-    candidate_ink::{CandidateMapping, SourceInk},
-    character_alignment::RunAlignment,
+    candidate_ink::SourceInk,
     ctc_evidence::CtcOutcome,
-    fragment_reconciliation::{Operation, Rejection, Transaction, edge_difference},
+    fragment_reconciliation::{
+        Operation, Rejection, Transaction, consistent_votes, edge_difference,
+    },
     layout_leaders::LeaderEdge,
     line_audit::{AuditedLine, MappedEdgeContraction},
     pixel_regions::InkBounds,
-    recognition_model::RecognitionModel,
     refinement_evidence::{Recognition, RefinementDecision, canonical},
 };
 
@@ -152,27 +152,6 @@ fn partition(
     Some(runs)
 }
 
-fn assignment(mapping: &CandidateMapping, text: &str) -> Option<Vec<usize>> {
-    let CandidateMapping::Mapped { anchors } = mapping else {
-        return None;
-    };
-    let visible = anchors
-        .iter()
-        .filter(|a| !a.anchor.character.is_whitespace())
-        .collect::<Vec<_>>();
-    if !visible.iter().map(|a| a.anchor.character).eq(text.chars()) {
-        return None;
-    }
-    let runs = visible
-        .iter()
-        .map(|a| match a.anchor.alignment {
-            RunAlignment::Unique { run } => Some(run),
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>()?;
-    runs.windows(2).all(|p| p[0] < p[1]).then_some(runs)
-}
-
 /// Every removed run must be bound and no retained token may change its
 /// measured source identity. Unclaimed retained ink is allowed.
 fn conserved(
@@ -228,7 +207,7 @@ fn original_assignment(
         if canonical(&h.text) != text {
             continue;
         }
-        let runs = assignment(m, text)?;
+        let runs = m.unique_runs(text)?;
         if result.as_ref().is_some_and(|old| old != &runs) {
             return None;
         }
@@ -257,7 +236,12 @@ impl VoteContext<'_> {
         if canonical(&evidence.hypotheses.first()?.text) != self.new {
             return None;
         }
-        let revised_runs = assignment(view.ink_mapping.as_ref()?.hypotheses.first()?, self.new)?;
+        let revised_runs = view
+            .ink_mapping
+            .as_ref()?
+            .hypotheses
+            .first()?
+            .unique_runs(self.new)?;
         let mut candidates =
             self.original.views.iter().enumerate().filter(|(_, v)| {
                 v.model == view.model && v.stretch_percent == view.stretch_percent
@@ -323,9 +307,6 @@ pub fn propose(
             bottom: p.bounds.bottom - line.observation_bounds.top,
         })
         .collect::<Vec<_>>();
-    let mut votes = Vec::new();
-    let mut models = BTreeSet::new();
-    let mut assigned = None;
     let context = VoteContext {
         original,
         revised,
@@ -335,20 +316,8 @@ pub fn propose(
         removed: &removed,
         partition: &partition,
     };
-    for &i in view_indices {
-        let Some((runs, evidence)) = context.vote(i) else {
-            continue;
-        };
-        if assigned.as_ref().is_some_and(|a| a != &runs) {
-            return Err(Rejection::UnlocalizedRemovedTokens);
-        }
-        assigned = Some(runs);
-        models.insert(revised.views[i].model);
-        votes.push(evidence);
-    }
-    if !models.contains(&RecognitionModel::Small) || !models.contains(&RecognitionModel::Medium) {
-        return Err(Rejection::UnlocalizedRemovedTokens);
-    }
+    let (assigned, votes) = consistent_votes(revised, view_indices, |i, _| context.vote(i))
+        .ok_or(Rejection::UnlocalizedRemovedTokens)?;
     Ok(Transaction {
         page: line.page,
         line_index: line.line_index,
@@ -359,7 +328,7 @@ pub fn propose(
             removed_pixels: contraction.evidence.removed_pixels,
             retained_pixels: contraction.evidence.retained_pixels,
             partition,
-            original_token_runs: assigned.ok_or(Rejection::UnlocalizedRemovedTokens)?,
+            original_token_runs: assigned,
             votes,
         }),
         consumed: Vec::new(),

@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use crate::{
     boundary_ink::BoundaryEvidence,
-    candidate_ink::{CandidateAnchor, CandidateMapping},
+    candidate_ink::CandidateAnchor,
     character_alignment::{CharacterAnchor, RunAlignment, align_runs},
     ctc_evidence::CtcOutcome,
     draft::{OcrDraft, OcrLine},
@@ -67,6 +67,7 @@ pub struct Expansion {
 pub enum Operation {
     Expansion(Expansion),
     Contraction(crate::stroke_reconciliation::Contraction),
+    MaskCorrection(crate::mask_reconciliation::MaskCorrection),
 }
 
 #[derive(Debug, Serialize)]
@@ -106,6 +107,7 @@ pub enum Rejection {
     NotLiteralContraction,
     UnlocalizedRemovedTokens,
     ForegroundPartitionMismatch,
+    UnlocalizedMaskChange,
 }
 
 /// Non-space scalar range in the longer literal edge extension.
@@ -133,19 +135,11 @@ fn top_anchors<'a>(
     if canonical(&evidence.hypotheses.first()?.text) != canonical(text) {
         return None;
     }
-    let CandidateMapping::Mapped { anchors } = view.ink_mapping.as_ref()?.hypotheses.first()?
-    else {
-        return None;
-    };
-    let visible = anchors
-        .iter()
-        .filter(|a| !a.anchor.character.is_whitespace())
-        .collect::<Vec<_>>();
-    visible
-        .iter()
-        .map(|a| a.anchor.character)
-        .eq(canonical(text).chars())
-        .then_some(visible)
+    view.ink_mapping
+        .as_ref()?
+        .hypotheses
+        .first()?
+        .visible_anchors(text)
 }
 
 fn constrained_view(
@@ -240,35 +234,14 @@ fn bind_added(
     ink: &RunAccounting,
     expanded: InkBounds,
 ) -> Option<Vec<TokenBinding>> {
-    let mut votes = Vec::new();
-    let mut models = BTreeSet::new();
-    let mut assignment = None;
-    for &index in view_indices {
-        let view = recognition.views.get(index)?;
-        let Some(anchors) = top_anchors(view, text) else {
-            continue;
-        };
-        let Some(runs) =
-            constrained_view(&anchors, &added, ink, recognition.source_ink.dimensions.0)
-        else {
-            continue;
-        };
-        if assignment
-            .as_ref()
-            .is_some_and(|previous| previous != &runs)
-        {
-            return None;
-        }
-        assignment = Some(runs);
-        models.insert(view.model);
-        votes.push(index);
-    }
-    if !both_models(&models) {
-        return None;
-    }
+    let (assignment, votes) = consistent_votes(recognition, view_indices, |index, view| {
+        let anchors = top_anchors(view, text)?;
+        let runs = constrained_view(&anchors, &added, ink, recognition.source_ink.dimensions.0)?;
+        Some((runs, index))
+    })?;
     let characters = canonical(text).chars().collect::<Vec<_>>();
     added
-        .zip(assignment?)
+        .zip(assignment)
         .map(|(position, run)| {
             let b = recognition.source_ink.groups.get(run)?.run.ink;
             Some(TokenBinding {
@@ -286,6 +259,39 @@ fn bind_added(
             })
         })
         .collect()
+}
+
+/// Independent view evidence must establish one stable ordered assignment
+/// and include both recognizer models. A conflicting measured assignment
+/// invalidates the whole proposal rather than turning into an abstention.
+pub fn consistent_votes<V>(
+    recognition: &Recognition,
+    view_indices: &[usize],
+    mut measure: impl FnMut(usize, &crate::refinement_evidence::ViewEvidence) -> Option<(Vec<usize>, V)>,
+) -> Option<(Vec<usize>, Vec<V>)> {
+    let mut votes = Vec::new();
+    let mut models = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    let mut assignment = None;
+    for &i in view_indices {
+        let view = recognition.views.get(i)?;
+        if !seen.insert((view.model, view.stretch_percent)) {
+            continue;
+        }
+        let Some((runs, vote)) = measure(i, view) else {
+            continue;
+        };
+        if assignment.as_ref().is_some_and(|old| old != &runs) {
+            return None;
+        }
+        assignment = Some(runs);
+        models.insert(view.model);
+        votes.push(vote);
+    }
+    if !both_models(&models) {
+        return None;
+    }
+    Some((assignment?, votes))
 }
 
 fn both_models(models: &BTreeSet<RecognitionModel>) -> bool {

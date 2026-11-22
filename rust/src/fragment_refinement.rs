@@ -23,6 +23,7 @@ use crate::{
         AuditedLine, BoundaryPeer, LineAuditPolicy, MappedBoundaryExtension, SampledLine,
         audit_line, inside_page,
     },
+    mask_reconciliation,
     orthogonal_mask::build_mask,
     pdf_metadata::PdfMetadata,
     pixel_regions::InkBounds,
@@ -37,6 +38,7 @@ pub use crate::{
     fragment_reconciliation::{
         Consumption, Expansion, Operation, PeerClaim, Rejection, TokenBinding, Transaction,
     },
+    mask_reconciliation::{MaskCorrection, MaskVote, RunPartition},
     orthogonal_mask::MaskEvidence,
     stroke_reconciliation::{Contraction, ContractionVote, PartitionRun},
 };
@@ -96,6 +98,8 @@ pub enum OrthogonalOutcome {
     Measured {
         evidence: MaskEvidence,
         recognition: Box<Recognition>,
+        transaction: Option<usize>,
+        rejection: Option<Rejection>,
     },
 }
 
@@ -267,6 +271,8 @@ impl PageContext<'_> {
         sampled: &SampledLine,
         budget: &mut u64,
         predictor: &mut RefinementRecognizer,
+        original: &Recognition,
+        transactions: &mut Vec<Transaction>,
     ) -> Result<Option<OrthogonalOutcome>, Error> {
         let Some(strokes) = &sampled.audit.foreign_strokes else {
             return Ok(None);
@@ -314,9 +320,24 @@ impl PageContext<'_> {
             ));
         }
         let recognition = predictor.recognize_with_ink(&rgb, shared)?;
+        let (transaction, rejection) = match mask_reconciliation::propose(
+            &sampled.audit,
+            original,
+            &recognition,
+            &mask.evidence,
+        ) {
+            Ok(operation) => {
+                let id = transactions.len();
+                transactions.push(operation);
+                (Some(id), None)
+            }
+            Err(reason) => (None, Some(reason)),
+        };
         Ok(Some(OrthogonalOutcome::Measured {
             evidence: mask.evidence,
             recognition: Box::new(recognition),
+            transaction,
+            rejection,
         }))
     }
 
@@ -377,7 +398,7 @@ impl PageContext<'_> {
             });
         }
         let orthogonal = self
-            .recognize_mask(sampled, budget, predictor)?
+            .recognize_mask(sampled, budget, predictor, &original, transactions)?
             .map(Box::new);
         Ok(StrokeMeasurements {
             original: Some(Box::new(original)),
@@ -735,7 +756,7 @@ pub fn reconcile_fragments(
     source.verify_pdf(pdf)?;
     Ok((
         FragmentReport {
-            schema_version: 10,
+            schema_version: 11,
             pdf_sha256: source.pdf_sha256.clone(),
             draft_model: source.model.clone(),
             secondary_model: RefinementModel::Consensus.label(),

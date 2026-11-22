@@ -929,7 +929,16 @@ white in the shared normalized raster. Each component is counted once even
 if both entry edges prove it. The report binds the mask and paired original
 and masked recognitions by hashes, pixel counts and source spans, preserving
 all non-mask samples. The original recognition is shared with contractions.
-No orthogonal-mask recognition can yet authorize a transaction.
+A masked text-only correction requires unique retained-run assignment in
+both models, compatible localization of the very same revised class sequence
+before masking, and increased full conditional CTC log odds versus the same
+primary class sequence. An ordered token assignment must preserve the exact
+transcription of every unaffected source group. Only groups with measured
+removed foreground may change their labels; split groups retain a common
+original identity. Each accepted vote records the path-mass comparison and
+an explicit compatible ordered assignment. These text-only operations
+participate in the existing atomic conflict resolver. The output remains
+research-only and non-importable.
 
 The observation band can widen orthogonally only to fully measured,
 locally supported components with majority foreground and vertical extent
@@ -961,7 +970,7 @@ peer additionally requires stable independently localized literal text inside th
 observation, and cannot have a shared component cut by the replacement boundary.
 Native-text conflicts and incomplete peer samples abstain.
 
-The schema 10 report retains the original observation identity, all considered extensions and contractions,
+The schema 11 report retains the original observation identity, all considered extensions and contractions,
 conditional CTC evidence, common-raster run counts, peer evidence, transactions and
 conflicts. Strictly nested candidates can supersede a shorter candidate only if all added
 foreground is bound to tokens, the larger component chain and crop contain the
