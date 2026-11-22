@@ -23,8 +23,9 @@ struct Args {
     experimental_draft: PathBuf,
     #[arg(long, default_value_t = 600)]
     dpi: u32,
-    #[arg(long, default_value_t = 100)]
-    padding_pixels: u32,
+    /// Override geometry-scaled padding with a uniform pixel margin.
+    #[arg(long)]
+    padding_pixels: Option<u32>,
     #[arg(long, default_value_t = 2_000_000)]
     max_line_pixels: u64,
     #[arg(long, default_value_t = 32_000_000)]

@@ -109,7 +109,7 @@ impl SourcePlan {
                 let Point(u, v) = mapper.to_raster(p);
                 (-1e-8..=1.0 + 1e-8).contains(&u) && (-1e-8..=1.0 + 1e-8).contains(&v)
             },
-            0,
+            [0; 4],
             policy.max_line_pixels,
         )?;
         let bounds = QuadBounds::new(&frame.corners);

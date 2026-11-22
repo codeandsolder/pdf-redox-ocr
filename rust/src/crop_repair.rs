@@ -239,7 +239,7 @@ fn crop_evidence(
     let window = SampleWindow::new(
         frame,
         inside,
-        frame.height.saturating_mul(2),
+        [frame.height.saturating_mul(2); 4],
         MAX_LINE_PIXELS,
     )
     .ok()?;
