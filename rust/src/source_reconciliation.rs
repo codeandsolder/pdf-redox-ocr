@@ -354,8 +354,8 @@ mod tests {
             .zip(clean)
             .enumerate()
             .map(|(run, (&character, &editable))| Slot {
-                run,
                 character,
+                run,
                 editable,
             })
             .collect()
@@ -469,7 +469,7 @@ mod tests {
             }
         }
         let summarize = |index: usize| {
-            let bits = paths.iter().map(|p| [p.0, p.1][index]);
+            let bits = paths.iter().map(|p| <[usize; 2]>::from(*p)[index]);
             let (possible, required) = bits.fold((0, usize::MAX), |(p, r), b| (p | b, r & b));
             ChangePositions {
                 possible: (0..size).filter(|i| possible & (1 << i) != 0).collect(),
