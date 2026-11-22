@@ -1,5 +1,6 @@
-//! Candidate-specific localization of CTC evidence on independently measured
-//! source ink. All horizontal views use one segmentation of the unmodified
+//! Candidate-specific localization of CTC evidence on measured source ink.
+//!
+//! All horizontal views use one segmentation of the unmodified
 //! reading-order crop, so alternative hypotheses cannot create new pixels.
 
 use image::{Pixel, RgbImage};
@@ -192,9 +193,11 @@ impl SourceInk {
             .into_iter()
             .zip(cells)
             .map(|(mut anchor, cell)| {
-                if !cell.character.is_whitespace()
-                    && !(cell.interval[0] >= 0.0 && cell.interval[1] < f64::from(self.dimensions.0))
-                {
+                let inside = cell
+                    .interval
+                    .iter()
+                    .all(|x| (0.0..f64::from(self.dimensions.0)).contains(x));
+                if !cell.character.is_whitespace() && !inside {
                     // Even when the modal entry falls inside the source, an
                     // interval extending into padding cannot prove a visible run.
                     anchor.alignment = RunAlignment::Padding;
