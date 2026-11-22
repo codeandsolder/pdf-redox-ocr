@@ -109,7 +109,7 @@ struct Args {
     /// Upper Poppler renderer DPI for native-resolution mosaic crops.
     #[arg(long, default_value_t = 2400)]
     max_mosaic_dpi: u32,
-    /// Maximum aggregate decoded pixels per page (including repeated source checks in Hayro).
+    /// Maximum aggregate decoded pixels per page (including distinct context checks in Hayro).
     #[arg(long, default_value_t = 64_000_000)]
     max_native_extraction_pixels: u64,
 }

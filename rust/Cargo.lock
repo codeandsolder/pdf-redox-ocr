@@ -1048,7 +1048,6 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.9.0"
-source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56fe01b6186132#e7ada1354dff4041cdeed3d8ba56fe01b6186132"
 dependencies = [
  "bitflags",
  "hayro-cmap",

@@ -157,7 +157,7 @@ half-turn. The same vertices are retained; raw detector and crop-repair audits
 keep the original detector ordering. Native-only documents still need no model
 session.
 
-The optional `--report audit.json` writes a separate schema-13 diagnostic
+The optional `--report audit.json` writes a separate schema-14 diagnostic
 report bound to the original PDF digest and model provenance. It includes
 the validated policy, raw native-image observations in source-pixel
 coordinates, original paint paths and native-only blockers, the per-page
@@ -419,7 +419,7 @@ At least one draft, searchable PDF or audit must be requested.
 Retaining a draft with processing requires `--optimized-pdf`, because
 its SHA and user-space geometry bind to the exact prepared PDF, not the
 original source. The optimizer report and actual configuration are recorded
-under `preparation` in schema-13 CLI audits, alongside both input hashes;
+under `preparation` in schema-14 CLI audits, alongside both input hashes;
 the existing `pdf_sha256` refers to the OCR input. Reverify the original
 and prepared source hashes before applying or publishing results.
 Processing is intentionally not lossless in every case (microstroke
@@ -507,7 +507,7 @@ retained, not invented. Failed or conflicting crops leave original
 observations unchanged. Failed repair attempts prevent caching the incomplete
 raster result; successful exact RGB reuse includes the confirmed repairs.
 
-Pipeline audit schema 13 records original pixel-space observations, sample
+Pipeline audit schema 14 records original pixel-space observations, sample
 frame, component bounds, typed crop reason, proposed quad and each actual
 prediction/decision by exact RGB SHA-256 and dimensions. Full-raster inference
 calls remain separate from recognition-only batch counters. Disable the stage
@@ -537,7 +537,7 @@ substitutions are encoded. Accepted crop geometry and model confidence
 replace the original; failures prevent exact-RGB result caching. The
 experimental flag is off by default until broader representative validation.
 All repair kinds share a 2M-pixel per-window and 16M-pixel per-raster sampling
-budget, prioritizing terminal-leader candidates, and schema-13 `crop_repairs` records the original prediction,
+budget, prioritizing terminal-leader candidates, and schema-14 `crop_repairs` records the original prediction,
 actual geometry, type-specific evidence and independent prediction/outcome.
 `recognition.crop_batches` counts actual recognition-only batches (leader and boundary batches are separate to preserve existing leader inference ordering);
 leader/boundary candidate/accepted counters are independent.
@@ -583,7 +583,7 @@ sorted detector index (not final draft index), exact rectified RGB crop
 hash/dimensions, padding geometry, raw CTC column indices, projected ink
 and alignment candidates. Component indices address the entry's component
 array. Positions and ink bounds are in the **rectified recognition-crop
-frame**. schema 13 additionally records a reconstructible projective crop
+frame**. schema 14 additionally records a reconstructible projective crop
 mapping for actual detector quadrilaterals, verified against returned crop
 dimensions and the OAR rotation contract. Full-page raster occurrences have
 explicit SHA-bound page transforms. This permits vector association without
@@ -724,8 +724,10 @@ for controlled A/B comparisons.
 
 The direct path only decodes requested indirect image sources with
 matched native dimensions and image placement transforms. It independently
-resolves their occurrences, retains one RGB raster per source only when
-all checked appearances match exactly, and rejects compositing-dependent
+resolves every occurrence and reuses decoded pixels only for an exact
+previously verified interpreter decoding context. It retains one RGB
+raster per source only when all distinct decoded appearances match exactly,
+and rejects compositing-dependent
 images, missing or conflicting occurrences, and exhausted decode budgets.
 Default device-color-space overrides are not supported by the pinned
 interpreter; these paints require the existing page fallback. A rejected
@@ -733,9 +735,10 @@ source is not retried through object-ID-only extraction. Source visibility
 proofs, source-local coordinates, OCR recognition, cache and overlay gates
 remain unchanged.
 
-Schema-13 `source_rasters` records RGB SHA256 and native dimensions for
+Schema-14 `source_rasters` records RGB SHA256 and native dimensions for
 both backends, and `direct_decode` records requested sources, matched and
-decoded occurrences, targeted pixel work, and rejection reasons. The
+decoded and reused occurrences, decoded and reused pixel counts, and rejection
+reasons. The
 existing extraction ceiling limits attempted target pixels per page in
 the direct path, not unrelated images. It is a decoded-pixel policy, not
 a hard bound on interpreter or compressed-stream allocation.
