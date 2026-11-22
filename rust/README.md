@@ -631,9 +631,14 @@ Use `--ctc-audit --report audit.json` to additionally inspect actual CTC class
 probabilities (including blank) at the primary greedy emission columns and
 five competing sequence hypotheses. This opts into full model output from
 the **same** recognition inference, not a second recognition or a different
-crop. The bounded prefix search retains 12 prefixes and the top 8 classes
-per column plus blank. Its reported log mass is a lower bound on retained
-CTC path mass, **not** a calibrated character or sequence correctness
+crop. The bounded prefix search retains 12 prefixes and considers all
+transitions into retained prefixes. For new children, the strongest 14
+classes per column suffice to reproduce a full-vocabulary beam step
+(blank and the repeated last class are the only exceptional transitions).
+Subnormal products fall back to bounded full-vocabulary selection to preserve
+the deterministic tie break. The audit displays only the top 8 classes
+plus blank at each greedy emission. Its reported log mass is a lower bound
+on CTC path mass, **not** a calibrated character or sequence correctness
 probability. It never changes the greedy prediction, line confidence,
 confirmation policy or OCR admission. It also captures alternative-model
 evidence when confirmation is requested. Each retained class sequence is

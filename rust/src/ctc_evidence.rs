@@ -2,8 +2,9 @@
 //!
 //! The greedy path remains the production observation. Prefix search sums
 //! distinct retained blank/nonblank paths rather than ranking single frames.
-//! Row-level pruning limits new prefixes, not transitions into retained
-//! prefixes. Beam pruning still omits probability mass, so weights are lower bounds, not
+//! Every beam step retains the strongest successors of the previous beam,
+//! without an additional vocabulary-pruning approximation. Earlier beam
+//! pruning still omits probability mass, so weights are lower bounds, not
 //! calibrated probabilities of transcription correctness.
 
 use std::collections::BTreeMap;
@@ -15,8 +16,11 @@ use crate::{
     ctc_alignment::{SequenceAlignment, align},
 };
 
-const ROW_CLASSES: usize = 8;
+const EMISSION_CLASSES: usize = 8;
 const BEAM_WIDTH: usize = 12;
+// One blank and one repeated last class can have different transition
+// weights. All remaining classes share the same parent mass.
+const SEARCH_CLASSES: usize = BEAM_WIDTH + 2;
 const REPORTED_HYPOTHESES: usize = 5;
 
 /// An actual model class at one CTC timestep; class zero is blank.
@@ -52,6 +56,7 @@ pub struct SequenceHypothesis {
 pub struct CtcEvidence {
     pub sequence_length: usize,
     pub vocabulary_size: usize,
+    /// Maximum number of classes listed per greedy emission, not a beam cutoff.
     pub row_class_limit: usize,
     pub beam_width: usize,
     pub greedy_text: String,
@@ -80,7 +85,7 @@ fn top_classes(row: &[f32], labels: &[char]) -> Result<Vec<ClassScore>, Error> {
     if row.len() != labels.len() || row.len() < 2 {
         return Err(invalid("CTC vocabulary does not match model output"));
     }
-    let mut top = Vec::with_capacity(ROW_CLASSES);
+    let mut top = Vec::with_capacity(SEARCH_CLASSES);
     let mut sum = 0.0;
     for (class_index, (&probability, &label)) in row.iter().zip(labels).enumerate() {
         if !(0.0..=1.0).contains(&probability) {
@@ -92,12 +97,14 @@ fn top_classes(row: &[f32], labels: &[char]) -> Result<Vec<ClassScore>, Error> {
             character: (class_index != 0).then_some(label),
             probability,
         };
-        if top.len() == ROW_CLASSES && top.last().is_some_and(|&last| !stronger(score, last)) {
+        if top.len() == SEARCH_CLASSES && top.last().is_some_and(|&last| !stronger(score, last)) {
             continue;
+        }
+        if top.len() == SEARCH_CLASSES {
+            top.pop();
         }
         let position = top.partition_point(|&current| stronger(current, score));
         top.insert(position, score);
-        top.truncate(ROW_CLASSES);
     }
     if (sum - 1.0).abs() > 0.01 {
         return Err(invalid("CTC output is not a probability distribution"));
@@ -118,6 +125,30 @@ impl Mass {
 
     fn extension(self, repeated: bool) -> f64 {
         if repeated { self.blank } else { self.total() }
+    }
+
+    // Select by the actual rounded product when probability order alone
+    // cannot establish the lexical tie break. Keep only BEAM_WIDTH entries
+    // even if the vocabulary has thousands of tied subnormal products.
+    fn strongest_rounded_extensions(self, row: &[f32], last: Option<usize>) -> Vec<(usize, f64)> {
+        let mut top: Vec<(usize, f64)> = Vec::with_capacity(BEAM_WIDTH);
+        for (index, &probability) in row.iter().enumerate().skip(1) {
+            let weight = self.extension(last == Some(index)) * f64::from(probability);
+            if weight == 0.0 {
+                continue;
+            }
+            // Visit classes in ascending index order. Existing ties precede
+            // this class, so insertion after equal weights is deterministic.
+            let position = top.partition_point(|&(_, existing)| existing >= weight);
+            if position >= BEAM_WIDTH {
+                continue;
+            }
+            if top.len() == BEAM_WIDTH {
+                top.pop();
+            }
+            top.insert(position, (index, weight));
+        }
+        top
     }
 }
 
@@ -161,23 +192,45 @@ impl PrefixBeam {
                 },
             );
         }
-        // Only the creation of previously unretained prefixes needs the
-        // row-class limit. Contributions from distinct parents cannot
-        // overlap: removing the final class identifies the unique parent.
+        // An unretained child has exactly one parent. Of the strongest
+        // BEAM_WIDTH + 2 classes, at least BEAM_WIDTH are ordinary extensions
+        // (neither blank nor repeat). An omitted child therefore has at
+        // least BEAM_WIDTH siblings ahead of it, including the deterministic
+        // class-index tie break. Existing children only gain mass.
         for (prefix, &mass) in &self.paths {
-            for class in classes {
-                let index = class.class_index;
-                if index == 0 || class.probability == 0.0 {
-                    continue;
-                }
-                let extend = mass.extension(prefix.last() == Some(&index));
-                if extend > 0.0 {
+            let mut add = |index, weight| {
+                if weight > 0.0 {
                     let mut longer = prefix.clone();
                     longer.push(index);
-                    next.entry(longer).or_insert_with(|| Mass {
+                    next.entry(longer).or_insert(Mass {
                         blank: 0.0,
-                        nonblank: extend * f64::from(class.probability),
+                        nonblank: weight,
                     });
+                }
+            };
+            // Distinct positive f32 probabilities multiplied by a common
+            // f64 mass remain distinguishable in the normal range. For
+            // subnormal products, rounding can introduce new ties; enumerate
+            // the full row rather than break those ties by probability.
+            let subnormal_cutoff = classes.len() == SEARCH_CLASSES
+                && classes.last().is_some_and(|class| {
+                    class.probability > 0.0
+                        && mass.total() * f64::from(class.probability) < f64::MIN_POSITIVE
+                });
+            if subnormal_cutoff {
+                for (index, weight) in
+                    mass.strongest_rounded_extensions(row, prefix.last().copied())
+                {
+                    add(index, weight);
+                }
+            } else {
+                for class in classes.iter().filter(|class| class.class_index != 0) {
+                    let index = class.class_index;
+                    add(
+                        index,
+                        mass.extension(prefix.last() == Some(&index))
+                            * f64::from(class.probability),
+                    );
                 }
             }
         }
@@ -249,12 +302,13 @@ impl CtcEvidence {
         let mut previous = 0;
         let mut sequence_length = 0;
         for (column, &row) in rows.iter().enumerate() {
-            let classes = top_classes(row, labels)?;
+            let mut classes = top_classes(row, labels)?;
             let winner = classes.first().ok_or_else(|| invalid("empty CTC column"))?;
             let index = winner.class_index;
             beam.step(row, &classes)?;
             if index != 0 && previous != index {
                 greedy_text.push(labels[index]);
+                classes.truncate(EMISSION_CLASSES);
                 emissions.push(EmissionEvidence {
                     column,
                     classes,
@@ -276,7 +330,7 @@ impl CtcEvidence {
         Ok(Self {
             sequence_length,
             vocabulary_size: labels.len(),
-            row_class_limit: ROW_CLASSES,
+            row_class_limit: EMISSION_CLASSES,
             beam_width: BEAM_WIDTH,
             greedy_text,
             emissions,
@@ -325,11 +379,16 @@ mod tests {
 
     #[test]
     fn row_pruning_preserves_all_transitions_into_retained_prefixes() -> Result<(), Error> {
-        let labels = ['\0', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
-        let first = [0.2, 0.8, 0., 0., 0., 0., 0., 0., 0., 0., 0.];
-        let second = [
-            0.2, 0.008, 0.088, 0.088, 0.088, 0.088, 0.088, 0.088, 0.088, 0.088, 0.088,
+        let labels = [
+            '\0', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P',
+            'Q',
         ];
+        let mut first = [0.; 18];
+        first[0] = 0.2;
+        first[1] = 0.8;
+        let mut second = [0.0495; 18];
+        second[0] = 0.2;
+        second[1] = 0.008;
         let classes = top_classes(&second, &labels)?;
         assert!(classes.iter().all(|class| class.class_index != 1));
 
@@ -354,10 +413,13 @@ mod tests {
 
     #[test]
     fn retained_repeat_only_extends_from_parent_blank_mass() -> Result<(), Error> {
-        let labels = ['\0', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
-        let row = [
-            0.2, 0.008, 0.088, 0.088, 0.088, 0.088, 0.088, 0.088, 0.088, 0.088, 0.088,
+        let labels = [
+            '\0', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P',
+            'Q',
         ];
+        let mut row = [0.0495; 18];
+        row[0] = 0.2;
+        row[1] = 0.008;
         let mut beam = PrefixBeam {
             paths: BTreeMap::from([
                 (
@@ -371,7 +433,7 @@ mod tests {
                     vec![1, 1],
                     Mass {
                         blank: 0.1,
-                        nonblank: 0.2,
+                        nonblank: 0.8,
                     },
                 ),
             ]),
@@ -383,11 +445,133 @@ mod tests {
             .get(&[1, 1][..])
             .ok_or_else(|| invalid("retained AA missing"))?;
         let scale = beam.log_scale.exp();
-        let expected_blank = 0.3 * f64::from(row[0]);
-        let expected_nonblank = 0.4 * f64::from(row[1]);
+        let expected_blank = 0.9 * f64::from(row[0]);
+        let expected_nonblank = f64::from(row[1]);
         assert!(mass.blank.mul_add(scale, -expected_blank).abs() < 1e-12);
         assert!(mass.nonblank.mul_add(scale, -expected_nonblank).abs() < 1e-12);
         assert!(!beam.paths.contains_key(&[1, 1, 1][..]));
+        Ok(())
+    }
+
+    fn full_step(paths: &Prefixes, row: &[f32]) -> Result<(Prefixes, f64), Error> {
+        let mut all = std::collections::BTreeSet::new();
+        for prefix in paths.keys() {
+            all.insert(prefix.clone());
+            for index in 1..row.len() {
+                let mut child = prefix.clone();
+                child.push(index);
+                all.insert(child);
+            }
+        }
+        let mut ranked = all
+            .into_iter()
+            .filter_map(|prefix| {
+                let prior = paths.get(&prefix).copied().unwrap_or_default();
+                let blank = (prior.blank + prior.nonblank) * f64::from(row[0]);
+                let nonblank = prefix.split_last().map_or(0.0, |(&last, parent)| {
+                    let parent_mass = paths.get(parent).copied().unwrap_or_default();
+                    let extend = if parent.last() == Some(&last) {
+                        parent_mass.blank
+                    } else {
+                        parent_mass.blank + parent_mass.nonblank
+                    };
+                    (prior.nonblank + extend) * f64::from(row[last])
+                });
+                let mass = Mass { blank, nonblank };
+                (mass.total() > 0.0).then_some((prefix, mass))
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_unstable_by(|(a, x), (b, y)| {
+            y.total().total_cmp(&x.total()).then_with(|| a.cmp(b))
+        });
+        ranked.truncate(BEAM_WIDTH);
+        let scale = ranked
+            .first()
+            .ok_or_else(|| invalid("empty reference beam"))?
+            .1
+            .total();
+        let normalized = ranked
+            .into_iter()
+            .map(|(prefix, mass)| {
+                (
+                    prefix,
+                    Mass {
+                        blank: mass.blank / scale,
+                        nonblank: mass.nonblank / scale,
+                    },
+                )
+            })
+            .collect();
+        Ok((normalized, scale.ln()))
+    }
+
+    fn compare_complete_step(
+        beam: &mut PrefixBeam,
+        row: &[f32],
+        labels: &[char],
+    ) -> Result<(), Error> {
+        let (expected, log_scale) = full_step(&beam.paths, row)?;
+        let expected_log = beam.log_scale + log_scale;
+        beam.step(row, &top_classes(row, labels)?)?;
+        assert!(beam.paths.keys().eq(expected.keys()));
+        for (actual, expected) in beam.paths.values().zip(expected.values()) {
+            assert_eq!(actual.blank.to_bits(), expected.blank.to_bits());
+            assert_eq!(actual.nonblank.to_bits(), expected.nonblank.to_bits());
+        }
+        assert_eq!(beam.log_scale.to_bits(), expected_log.to_bits());
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_expansion_matches_full_vocabulary_beam() -> Result<(), Error> {
+        let labels = ['a'; 33];
+        let mut beam = PrefixBeam::new();
+        let mut state = 1_u32;
+        for step in 0..96 {
+            let mut weights = [0_u16; 33];
+            for weight in &mut weights {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *weight = u16::try_from((state >> 24) % 31)
+                    .map_err(|_| invalid("fixture weight overflow"))?;
+            }
+            if step % 3 == 0 {
+                weights.fill(1); // equal-probability cutoff and lexical ties
+            } else if step % 3 == 1 {
+                weights[0] = 300; // substantial blank mass
+            }
+            let sum = f32::from(weights.iter().sum::<u16>());
+            let row = weights.map(|weight| f32::from(weight) / sum);
+            compare_complete_step(&mut beam, &row, &labels)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn subnormal_products_preserve_full_vocabulary_tie_break() -> Result<(), Error> {
+        let labels = ['a'; 33];
+        let mut beam = PrefixBeam {
+            paths: BTreeMap::from([(
+                vec![1],
+                Mass {
+                    blank: f64::from_bits(100),
+                    nonblank: 0.0,
+                },
+            )]),
+            log_scale: 0.0,
+        };
+        let mut row = [0.0325; 33];
+        row[0] = 0.0;
+        row[1..17].fill(0.03);
+        // All child products round to three units of the smallest positive
+        // subnormal: the lower-probability classes win by lexical order.
+        assert!(
+            top_classes(&row, &labels)?
+                .iter()
+                .all(|class| class.class_index > 16)
+        );
+        compare_complete_step(&mut beam, &row, &labels)?;
+        assert!(beam.paths.contains_key(&[1, 1][..]));
+        assert!(!beam.paths.contains_key(&[1, 17][..]));
         Ok(())
     }
 
