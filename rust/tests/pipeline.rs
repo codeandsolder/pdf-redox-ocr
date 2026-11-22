@@ -1049,8 +1049,14 @@ impl RecognitionBackend for CompositedRecognizer {
 
 fn root_group_image_fixture() -> Vec<u8> {
     let mut samples = vec![255_u8; 400 * 200 * 3];
-    for row in samples.chunks_exact_mut(400 * 3).skip(50).take(100) {
-        for pixel in row.chunks_exact_mut(3).skip(100).take(200) {
+    for row in samples
+        .as_chunks_mut::<{ 400 * 3 }>()
+        .0
+        .iter_mut()
+        .skip(50)
+        .take(100)
+    {
+        for pixel in row.as_chunks_mut::<3>().0.iter_mut().skip(100).take(200) {
             pixel.copy_from_slice(&[255, 0, 0]);
         }
     }
