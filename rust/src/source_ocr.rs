@@ -1,7 +1,7 @@
 //! Source-native recognition for PDF pages with image-only visible content.
 //!
 //! A single source `XObject` may be painted repeatedly. Recognition is cached
-//! per source and geometrically projected separately per paint invocation.
+//! per appearance and geometrically projected separately per paint invocation.
 //! Admission always uses the conservative actual-paint inspection evidence.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,6 +13,7 @@ use crate::{
     hybrid::{ImagePaintEvidence, RasterPageEvidence, approve_raster_only_pages},
     paint_scan::{ImagePaint, PaintReport, PdfMatrix},
     polygon::area,
+    source_appearances::PaintAppearances,
 };
 
 /// One native image's OCR observations in the image's own user-space frame.
@@ -130,7 +131,7 @@ pub struct SourceOnlyResult {
 /// Returns an error for invalid page numbering; unusable source observations trigger page fallback.
 pub fn source_only_pages(
     report: &PaintReport,
-    recognized: &BTreeMap<String, SourceObservation>,
+    recognized: &PaintAppearances<SourceObservation>,
 ) -> Result<SourceOnlyResult, Error> {
     let mut result = SourceOnlyResult::default();
     for summary in &report.pages {
@@ -146,9 +147,9 @@ pub fn source_only_pages(
         let mut lines = Vec::new();
         let mut evidence = Vec::with_capacity(paints.len());
         for paint in paints {
-            let known_source = recognized.get(&paint.source_id);
+            let known_source = recognized.get(paint);
             let mut safe = paint.unsafe_reasons.is_empty() && known_source.is_some();
-            if safe && let Some(observation) = known_source {
+            if safe && let Some((_, observation)) = known_source {
                 match map_observations_to_paint(observation, paint) {
                     Ok(mapped) => {
                         safe &= mapped
@@ -197,6 +198,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{SourceObservation, source_only_pages};
+    use crate::source_appearances::PaintAppearances;
     use crate::{
         draft::OcrLine,
         geometry::Point,
@@ -266,7 +268,13 @@ mod tests {
             ],
             placements: vec![paint(1, 20.0), paint(2, 120.0)],
         };
-        let result = source_only_pages(&report, &BTreeMap::from([("9:0".into(), source)]))?;
+        let result = source_only_pages(
+            &report,
+            &PaintAppearances::from_object_inventory(
+                BTreeMap::from([("9:0".into(), source)]),
+                &report.placements,
+            ),
+        )?;
         assert_eq!(result.approved_pages.len(), 2);
         let first = &result.pages[&crate::PageNumber::new(1)?][0];
         let second = &result.pages[&crate::PageNumber::new(2)?][0];
@@ -309,7 +317,7 @@ mod tests {
     #[test]
     fn missing_or_invalid_source_observation_never_approves_page() -> Result<(), crate::Error> {
         let report = single_paint_report();
-        let result = source_only_pages(&report, &BTreeMap::new())?;
+        let result = source_only_pages(&report, &PaintAppearances::default())?;
         assert!(result.approved_pages.is_empty());
 
         let invalid_source = SourceObservation {
@@ -323,7 +331,13 @@ mod tests {
             }],
         };
         assert!(super::map_observations_to_paint(&invalid_source, &report.placements[0]).is_err());
-        let result = source_only_pages(&report, &BTreeMap::from([("9:0".into(), invalid_source)]))?;
+        let result = source_only_pages(
+            &report,
+            &PaintAppearances::from_object_inventory(
+                BTreeMap::from([("9:0".into(), invalid_source)]),
+                &report.placements,
+            ),
+        )?;
         assert!(result.approved_pages.is_empty());
         assert!(result.pages.is_empty());
 
@@ -332,7 +346,13 @@ mod tests {
             height: 100,
             lines: Vec::new(),
         };
-        let result = source_only_pages(&report, &BTreeMap::from([("9:0".into(), wrong_size)]))?;
+        let result = source_only_pages(
+            &report,
+            &PaintAppearances::from_object_inventory(
+                BTreeMap::from([("9:0".into(), wrong_size)]),
+                &report.placements,
+            ),
+        )?;
         assert!(result.approved_pages.is_empty());
 
         let mut uninformative = OcrLine {
@@ -354,7 +374,13 @@ mod tests {
                 height: 100,
                 lines: vec![uninformative.clone()],
             };
-            let result = source_only_pages(&report, &BTreeMap::from([("9:0".into(), source)]))?;
+            let result = source_only_pages(
+                &report,
+                &PaintAppearances::from_object_inventory(
+                    BTreeMap::from([("9:0".into(), source)]),
+                    &report.placements,
+                ),
+            )?;
             assert!(
                 result.approved_pages.is_empty(),
                 "uninformative line {text:?} with confidence {confidence} approved source-only OCR"
@@ -371,9 +397,21 @@ mod tests {
             }],
         };
         assert!(super::map_observations_to_paint(&degenerate, &report.placements[0]).is_err());
-        let result = source_only_pages(&report, &BTreeMap::from([("9:0".into(), degenerate)]))?;
+        let result = source_only_pages(
+            &report,
+            &PaintAppearances::from_object_inventory(
+                BTreeMap::from([("9:0".into(), degenerate)]),
+                &report.placements,
+            ),
+        )?;
         assert!(result.approved_pages.is_empty());
 
+        Ok(())
+    }
+
+    #[test]
+    fn blank_line_does_not_prevent_valid_source_admission() -> Result<(), crate::Error> {
+        let report = single_paint_report();
         let meaningful = OcrLine {
             text: "CAPACITOR".into(),
             confidence: 0.99,
@@ -391,7 +429,13 @@ mod tests {
             height: 100,
             lines: vec![blank, meaningful],
         };
-        let result = source_only_pages(&report, &BTreeMap::from([("9:0".into(), source)]))?;
+        let result = source_only_pages(
+            &report,
+            &PaintAppearances::from_object_inventory(
+                BTreeMap::from([("9:0".into(), source)]),
+                &report.placements,
+            ),
+        )?;
         let admitted = result
             .pages
             .get(&crate::PageNumber::new(1)?)

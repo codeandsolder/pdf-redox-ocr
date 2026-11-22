@@ -317,7 +317,10 @@ fn native_cli_needs_no_model_cache_or_onnx_session() -> Result<(), Box<dyn std::
     assert_eq!(audit["recognition"]["inference_calls"], 0);
     assert_eq!(audit["recognition"]["cache_hits"], 0);
     assert_eq!(audit["routes"]["13"], "native_only");
-    assert_eq!(audit["source_observations"], serde_json::json!({}));
+    assert_eq!(
+        audit["source_observations"],
+        serde_json::json!({"variants":{},"paint_bindings":{}})
+    );
     assert_eq!(fs::read(cache)?, b"a file is not a model-cache directory");
     Ok(())
 }

@@ -24,6 +24,7 @@ use crate::{
     paint_scan::{ImagePaint, PaintReport, PdfMatrix},
     pdf_metadata::PdfMetadata,
     rasterize::{RenderPolicy, render_rgb_page},
+    source_appearances::{AppearanceId, PaintAppearances},
     source_mask::{MaskedSourceObject, mask_candidate, mask_source_object, mask_source_subset},
     source_ocr::{SourceObservation, map_observations_to_paint},
 };
@@ -37,6 +38,8 @@ pub struct SourceVisibilityAudit {
     pub source_id: String,
     /// Actual expanded paint invocation.
     pub paint_index: u32,
+    /// Decoded appearance used for recognition.
+    pub appearance_id: AppearanceId,
     /// Number of source-local model detections considered.
     pub candidate_lines: usize,
     /// Number of source labels proven visible by differential rendering.
@@ -77,7 +80,7 @@ pub fn prove_mixed_source_text(
     original_pdf: &Path,
     document: &PdfMetadata,
     painted: &PaintReport,
-    recognized: &BTreeMap<String, SourceObservation>,
+    recognized: &PaintAppearances<SourceObservation>,
     selected: &[PageNumber],
     policy: RenderPolicy,
     minimum_confidence: f64,
@@ -147,10 +150,10 @@ pub(crate) struct MixedVerifier<'a> {
     original_pdf: &'a Path,
     document: &'a PdfMetadata,
     relevant: BTreeMap<PageNumber, Vec<&'a ImagePaint>>,
-    recognized: &'a BTreeMap<String, SourceObservation>,
+    recognized: &'a PaintAppearances<SourceObservation>,
     policy: RenderPolicy,
     minimum_confidence: f64,
-    masked_cache: BTreeMap<String, Option<MaskedSourceObject>>,
+    masked_cache: BTreeMap<AppearanceId, Option<MaskedSourceObject>>,
 }
 
 impl<'a> MixedVerifier<'a> {
@@ -158,7 +161,7 @@ impl<'a> MixedVerifier<'a> {
         original_pdf: &'a Path,
         document: &'a PdfMetadata,
         painted: &'a PaintReport,
-        recognized: &'a BTreeMap<String, SourceObservation>,
+        recognized: &'a PaintAppearances<SourceObservation>,
         policy: RenderPolicy,
         minimum_confidence: f64,
     ) -> Result<Self, Error> {
@@ -169,7 +172,7 @@ impl<'a> MixedVerifier<'a> {
         }
         let mut relevant = BTreeMap::<PageNumber, Vec<&ImagePaint>>::new();
         for paint in &painted.placements {
-            if paint.unsafe_reasons.is_empty() && recognized.contains_key(&paint.source_id) {
+            if paint.unsafe_reasons.is_empty() && recognized.get(paint).is_some() {
                 relevant
                     .entry(PageNumber::new(paint.page)?)
                     .or_default()
@@ -207,9 +210,9 @@ impl<'a> MixedVerifier<'a> {
         let mut residual = ResidualBuilder::default();
         let mut variants = BTreeMap::new();
         for &paint in relevant {
-            let source = self
+            let (appearance_id, source) = self
                 .recognized
-                .get(&paint.source_id)
+                .get(paint)
                 .ok_or_else(|| Error::Invalid("source recognition vanished during proof".into()))?;
             if source.width == 0
                 || source.height == 0
@@ -219,7 +222,7 @@ impl<'a> MixedVerifier<'a> {
                 continue;
             }
             let id = ObjectId::new(paint.object_number, i32::from(paint.generation));
-            if !self.masked_cache.contains_key(&paint.source_id) {
+            if !self.masked_cache.contains_key(&appearance_id) {
                 let masked = match mask_source_object(
                     self.document.source(),
                     id,
@@ -230,16 +233,16 @@ impl<'a> MixedVerifier<'a> {
                     Err(Error::Invalid(_)) => None,
                     Err(error) => return Err(error),
                 };
-                self.masked_cache.insert(paint.source_id.clone(), masked);
+                self.masked_cache.insert(appearance_id, masked);
             }
             let Some(masked) = self
                 .masked_cache
-                .get(&paint.source_id)
+                .get(&appearance_id)
                 .and_then(Option::as_ref)
             else {
                 continue;
             };
-            if let Some(proven) = probe.examine(paint, source, masked)? {
+            if let Some(proven) = probe.examine(paint, source, masked, appearance_id)? {
                 if !proven.proofs.is_empty() {
                     evidence.proven_pages.insert(page);
                 }
@@ -263,7 +266,7 @@ impl<'a> MixedVerifier<'a> {
                     );
                     if !chosen.is_empty() {
                         let key = MaskKey {
-                            source_id: paint.source_id.clone(),
+                            appearance_id,
                             indices: chosen.indices.clone(),
                         };
                         if chosen.indices.len() == audit.candidate_lines {
@@ -300,7 +303,7 @@ impl<'a> MixedVerifier<'a> {
 /// since reused images may be suppressed differently at different paint sites.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct MaskKey {
-    source_id: String,
+    appearance_id: AppearanceId,
     indices: Vec<usize>,
 }
 
@@ -505,7 +508,10 @@ impl PageProbe<'_> {
                     .flatten()
             })
             .as_ref()?;
-        let proof = self.examine(paint, &subset, masked).ok().flatten()?;
+        let proof = self
+            .examine(paint, &subset, masked, key.appearance_id)
+            .ok()
+            .flatten()?;
         if proof.proofs.len() != subset.lines.len() {
             return None;
         }
@@ -517,6 +523,7 @@ impl PageProbe<'_> {
         paint: &ImagePaint,
         source: &SourceObservation,
         masked: &MaskedSourceObject,
+        appearance_id: AppearanceId,
     ) -> Result<Option<ProbedSource>, Error> {
         if source.width == 0 || source.height == 0 {
             return Err(Error::Invalid("invalid source OCR dimensions".into()));
@@ -599,6 +606,7 @@ impl PageProbe<'_> {
             });
         }
         let audit = SourceVisibilityAudit {
+            appearance_id,
             page: self.page,
             source_id: paint.source_id.clone(),
             paint_index: paint.paint_index,
@@ -753,8 +761,8 @@ mod tests {
     use image::{Rgb, RgbImage};
 
     use super::{
-        MixedVerifier, ResidualRaster, changed_raster_pixels, combine_disjoint_changes,
-        unchanged_outside_source_masks,
+        MixedVerifier, PaintAppearances, ResidualRaster, changed_raster_pixels,
+        combine_disjoint_changes, unchanged_outside_source_masks,
     };
     use crate::{
         PageNumber, paint_scan::enumerate_image_paints, pdf_metadata::PdfMetadata,
@@ -840,7 +848,10 @@ mod tests {
                 reviewed: false,
             }],
         };
-        let recognized = BTreeMap::from([(scan.placements[0].source_id.clone(), source)]);
+        let recognized = PaintAppearances::from_object_inventory(
+            BTreeMap::from([(scan.placements[0].source_id.clone(), source)]),
+            &scan.placements,
+        );
         let mut verifier = MixedVerifier::new(
             &path,
             &doc,

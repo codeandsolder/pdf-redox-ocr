@@ -5,6 +5,7 @@
 
 use std::{collections::BTreeMap, fs};
 
+use pdf_redox_ocr::source_appearances::PaintAppearances;
 use pdf_redox_ocr::{
     PageNumber, draft::OcrLine, geometry::Point, mixed_visibility::prove_mixed_source_text,
     paint_scan::enumerate_image_paints, pdf_metadata::PdfMetadata, rasterize::RenderPolicy,
@@ -66,7 +67,7 @@ fn attributes_repeated_direct_form_and_nested_form_paints() -> Result<(), Box<dy
         &pdf,
         &document,
         &painted,
-        &recognized,
+        &PaintAppearances::from_object_inventory(recognized, &painted.placements),
         &pages,
         RenderPolicy {
             max_side: 1600,

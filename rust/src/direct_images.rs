@@ -1,11 +1,10 @@
 //! Native raster extraction from the already parsed document's interpreter.
 //!
-//! A source-ID keyed consumer may reuse a decoded image only if every scanned
-//! occurrence is accounted for and has the same opaque native RGB pixels.
+//! Bind each matched paint to its distinct, opaque native RGB appearance.
 //! Equal resolved decoding inputs reuse a previously verified raster.
 //! The interpreter, not this module, resolves filters, color and Decode arrays.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, btree_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, HashMap, btree_map::Entry};
 
 use hayro_interpret::{
     BlendMode, ClipPath, Context, Device, DrawMode, DrawProps, Image, ImageData, ImageDrawProps,
@@ -14,7 +13,11 @@ use hayro_interpret::{
     interpret_page,
     kurbo::{Affine, BezPath, Rect},
 };
-use hayro_syntax::{content::UntypedIter, object::Stream, page::Page};
+use hayro_syntax::{
+    content::UntypedIter,
+    object::{ObjectIdentifier, Stream},
+    page::Page,
+};
 use image::RgbImage;
 
 use crate::{
@@ -22,6 +25,7 @@ use crate::{
     native_images::NativeImageBudget,
     paint_scan::{ImagePaint, page_content},
     pdf_metadata::PdfMetadata,
+    source_appearances::{AppearanceId, PaintAppearances, SourceAppearance},
 };
 
 #[derive(Debug, Default, serde::Serialize)]
@@ -33,12 +37,15 @@ pub struct DirectDecodeStats {
     pub reused_occurrences: usize,
     pub reused_pixels: u64,
     pub accepted_sources: usize,
-    pub rejected_sources: BTreeMap<String, &'static str>,
+    pub accepted_appearances: usize,
+    pub accepted_occurrences: usize,
+    pub rejected_paints: BTreeMap<u32, BTreeMap<u32, &'static str>>,
+    pub rejected_pages: BTreeMap<u32, &'static str>,
 }
 
 #[derive(Default)]
 pub struct DirectImages {
-    pub images: BTreeMap<String, RgbImage>,
+    pub appearances: PaintAppearances<RgbImage>,
     pub stats: DirectDecodeStats,
 }
 
@@ -47,7 +54,8 @@ struct Collector<'a> {
     budget: NativeImageBudget,
     result: DirectImages,
     stored_pixels: u64,
-    verified_contexts: BTreeMap<String, HashSet<RasterDecodeContext>>,
+    verified_contexts: HashMap<RasterDecodeContext, AppearanceId>,
+    next_appearance: usize,
 }
 
 struct Expected<'a> {
@@ -57,42 +65,122 @@ struct Expected<'a> {
 
 struct PageDevice<'a, 'b> {
     collector: &'a mut Collector<'b>,
+    page: PageNumber,
     expected: BTreeMap<&'b [u32], Expected<'b>>,
     groups: Vec<bool>,
     blocked_groups: usize,
     attempted_pixels: u64,
-    malformed_groups: bool,
+    invalid_page: Option<&'static str>,
 }
 
 impl Collector<'_> {
-    fn reject(&mut self, id: &str, reason: &'static str) {
-        self.result
-            .stats
-            .rejected_sources
-            .entry(id.into())
-            .or_insert(reason);
-        self.verified_contexts.remove(id);
-        if let Some(image) = self.result.images.remove(id) {
-            self.stored_pixels -= u64::from(image.width()) * u64::from(image.height());
+    fn reject(&mut self, paint: &ImagePaint, reason: &'static str) {
+        if self.wanted.contains(&paint.source_id) {
+            self.result
+                .stats
+                .rejected_paints
+                .entry(paint.page)
+                .or_default()
+                .entry(paint.paint_index)
+                .or_insert(reason);
         }
     }
 
-    fn retain(&mut self, id: &str, rgb: RgbImage, context: Option<RasterDecodeContext>) {
-        if let Some(previous) = self.result.images.get(id) {
-            if previous != &rgb {
-                self.reject(id, "resolved_pixels_differ");
-                return;
+    fn reject_page(
+        &mut self,
+        page: PageNumber,
+        expected: &BTreeMap<&[u32], Expected<'_>>,
+        reason: &'static str,
+    ) {
+        self.result
+            .stats
+            .rejected_pages
+            .entry(page.get())
+            .or_insert(reason);
+        for entry in expected.values() {
+            self.reject(entry.paint, reason);
+        }
+        self.result.appearances.paint_bindings.remove(&page.get());
+
+        let referenced = self.result.appearances.referenced_ids();
+        self.result.appearances.variants.retain(|id, appearance| {
+            if referenced.contains(id) {
+                true
+            } else {
+                self.stored_pixels -=
+                    u64::from(appearance.value.width()) * u64::from(appearance.value.height());
+                false
             }
+        });
+        self.verified_contexts
+            .retain(|_, id| referenced.contains(id));
+    }
+
+    fn resident_capacity(&self, pixels: u64) -> bool {
+        self.result.appearances.len() < self.budget.sources
+            && pixels <= self.budget.total_pixels.saturating_sub(self.stored_pixels)
+    }
+
+    fn has_source(&self, id: &str) -> bool {
+        self.result
+            .appearances
+            .variants
+            .values()
+            .any(|appearance| appearance.source_id == id)
+    }
+
+    fn retain(
+        &mut self,
+        paint: &ImagePaint,
+        rgb: RgbImage,
+        context: Option<RasterDecodeContext>,
+    ) -> Option<AppearanceId> {
+        let existing = self
+            .result
+            .appearances
+            .variants
+            .iter()
+            .find_map(|(&id, appearance)| {
+                (appearance.source_id == paint.source_id && appearance.value == rgb).then_some(id)
+            });
+        let id = if let Some(id) = existing {
+            id
         } else {
-            self.stored_pixels += u64::from(rgb.width()) * u64::from(rgb.height());
-            self.result.images.insert(id.into(), rgb);
-        }
+            let pixels = u64::from(rgb.width()) * u64::from(rgb.height());
+            if !self.resident_capacity(pixels) {
+                self.reject(paint, "resident_appearance_budget");
+                return None;
+            }
+            let id = AppearanceId(self.next_appearance);
+            self.next_appearance += 1;
+            self.stored_pixels += pixels;
+            self.result.appearances.variants.insert(
+                id,
+                SourceAppearance {
+                    source_id: paint.source_id.clone(),
+                    value: rgb,
+                },
+            );
+            id
+        };
         if let Some(context) = context {
-            self.verified_contexts
-                .entry(id.into())
-                .or_default()
-                .insert(context);
+            self.verified_contexts.insert(context, id);
         }
+        Some(id)
+    }
+
+    fn finalize(mut self) -> DirectImages {
+        let appearances = &self.result.appearances;
+        self.result.stats.accepted_sources = appearances
+            .variants
+            .values()
+            .map(|appearance| appearance.source_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len();
+        self.result.stats.accepted_appearances = appearances.len();
+        self.result.stats.accepted_occurrences =
+            appearances.paint_bindings.values().map(BTreeMap::len).sum();
+        self.result
     }
 }
 
@@ -134,52 +222,47 @@ fn transform_matches(paint: &ImagePaint, transform: Affine) -> bool {
         })
 }
 
-impl PageDevice<'_, '_> {
+impl<'b> PageDevice<'_, 'b> {
     fn match_paint(
         &mut self,
-        id: &str,
+        id: ObjectIdentifier,
         path: Option<&[u32]>,
         dimensions: (u32, u32),
         transform: Affine,
-    ) -> bool {
-        let Some(entry) = path.and_then(|path| self.expected.get_mut(path)) else {
-            return false;
-        };
+    ) -> Option<&'b ImagePaint> {
+        let entry = path.and_then(|path| self.expected.get_mut(path))?;
         if entry.seen
-            || entry.paint.source_id != id
+            || entry.paint.object_number != id.obj_number
+            || i32::from(entry.paint.generation) != id.gen_number
             || (entry.paint.width, entry.paint.height) != dimensions
             || !transform_matches(entry.paint, transform)
         {
-            return false;
+            return None;
         }
         entry.seen = true;
-        self.collector.result.stats.matched_occurrences += 1;
-        true
+        Some(entry.paint)
     }
 
-    fn can_decode(&mut self, id: &str, dimensions: (u32, u32)) -> bool {
+    fn can_decode(&mut self, paint: &ImagePaint, dimensions: (u32, u32)) -> bool {
         let pixels = u64::from(dimensions.0) * u64::from(dimensions.1);
         let budget = self.collector.budget;
-        if pixels == 0 || pixels > budget.source_pixels {
-            self.collector.reject(id, "source_pixel_budget");
-            return false;
-        }
-        if !self.collector.result.images.contains_key(id)
-            && (self.collector.result.images.len() >= budget.sources
-                || pixels
-                    > budget
-                        .total_pixels
-                        .saturating_sub(self.collector.stored_pixels))
+        let reason = if pixels == 0 || pixels > budget.source_pixels {
+            Some("source_pixel_budget")
+        } else if !self.collector.has_source(&paint.source_id)
+            && !self.collector.resident_capacity(pixels)
         {
-            self.collector.reject(id, "resident_source_budget");
-            return false;
-        }
-        if pixels
+            Some("resident_appearance_budget")
+        } else if pixels
             > budget
                 .extraction_pixels
                 .saturating_sub(self.attempted_pixels)
         {
-            self.collector.reject(id, "page_decode_budget");
+            Some("page_decode_budget")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            self.collector.reject(paint, reason);
             return false;
         }
         self.attempted_pixels += pixels;
@@ -192,11 +275,23 @@ impl PageDevice<'_, '_> {
         true
     }
 
+    fn bind(&mut self, paint: &ImagePaint, id: AppearanceId) {
+        if !self.collector.result.appearances.bind(paint, id) {
+            self.invalid_page
+                .get_or_insert("ambiguous_appearance_binding");
+        }
+    }
+
     fn finish(self) {
+        if let Some(reason) = self.invalid_page {
+            self.collector
+                .reject_page(self.page, &self.expected, reason);
+            return;
+        }
         for entry in self.expected.values() {
-            if self.malformed_groups || !entry.seen {
+            if !entry.seen {
                 self.collector
-                    .reject(&entry.paint.source_id, "unmatched_scanned_occurrence");
+                    .reject(entry.paint, "unmatched_scanned_occurrence");
             }
         }
     }
@@ -229,38 +324,37 @@ impl Device<'_> for PageDevice<'_, '_> {
         if let Some(blocked) = self.groups.pop() {
             self.blocked_groups -= usize::from(blocked);
         } else {
-            self.malformed_groups = true;
+            self.invalid_page
+                .get_or_insert("malformed_interpreter_groups");
         }
     }
 
     fn draw_image(&mut self, image: Image<'_, '_>, props: ImageDrawProps<'_>) {
+        if self.invalid_page.is_some() {
+            return;
+        }
         let stream = match &image {
             Image::Stencil(stencil) => stencil.stream(),
             Image::Raster(raster) => raster.stream(),
         };
+        let path = props.page_xobject_path.as_deref();
         let Some(id) = stream.dict().obj_id() else {
+            if path.is_some() {
+                self.invalid_page = Some("unmatched_interpreter_occurrence");
+            }
             return;
         };
-        let id = format!("{}:{}", id.obj_number, id.gen_number);
-        if !self.collector.wanted.contains(&id)
-            || self
-                .collector
-                .result
-                .stats
-                .rejected_sources
-                .contains_key(&id)
-        {
+        let dimensions = (image.width(), image.height());
+        let Some(paint) = self.match_paint(id, path, dimensions, props.transform) else {
+            self.invalid_page = Some("unmatched_interpreter_occurrence");
+            return;
+        };
+        if !self.collector.wanted.contains(&paint.source_id) {
             return;
         }
-        let dimensions = (image.width(), image.height());
-        if !self.match_paint(
-            &id,
-            props.page_xobject_path.as_deref(),
-            dimensions,
-            props.transform,
-        ) {
-            self.collector
-                .reject(&id, "unmatched_interpreter_occurrence");
+        self.collector.result.stats.matched_occurrences += 1;
+        if !paint.unsafe_reasons.is_empty() {
+            self.collector.reject(paint, "unsafe_scanned_occurrence");
             return;
         }
         if self.blocked_groups != 0
@@ -270,28 +364,27 @@ impl Device<'_> for PageDevice<'_, '_> {
                 .iter()
                 .any(|key| stream.dict().contains_key(*key))
         {
-            self.collector.reject(&id, "requires_compositing");
+            self.collector.reject(paint, "requires_compositing");
             return;
         }
         let Image::Raster(raster) = image else {
-            self.collector.reject(&id, "stencil");
+            self.collector.reject(paint, "stencil");
             return;
         };
         let context = raster.decode_context(None);
-        if context.as_ref().is_some_and(|context| {
-            self.collector
-                .verified_contexts
-                .get(&id)
-                .is_some_and(|verified| verified.contains(context))
-        }) {
+        if let Some(&id) = context
+            .as_ref()
+            .and_then(|context| self.collector.verified_contexts.get(context))
+        {
             let stats = &mut self.collector.result.stats;
             stats.reused_occurrences += 1;
             stats.reused_pixels = stats
                 .reused_pixels
                 .saturating_add(u64::from(dimensions.0) * u64::from(dimensions.1));
+            self.bind(paint, id);
             return;
         }
-        if !self.can_decode(&id, dimensions) {
+        if !self.can_decode(paint, dimensions) {
             return;
         }
         let mut decoded = None;
@@ -305,10 +398,12 @@ impl Device<'_> for PageDevice<'_, '_> {
         );
         if let Some(rgb) = decoded {
             self.collector.result.stats.decoded_occurrences += 1;
-            self.collector.retain(&id, rgb, context);
+            if let Some(id) = self.collector.retain(paint, rgb, context) {
+                self.bind(paint, id);
+            }
         } else {
             self.collector
-                .reject(&id, "unsupported_or_nonopaque_decode");
+                .reject(paint, "unsupported_or_nonopaque_decode");
         }
     }
 }
@@ -348,32 +443,29 @@ fn index_expected_paints<'a>(
     pages: &BTreeSet<PageNumber>,
     paints: &'a [ImagePaint],
 ) -> Result<PageExpectations<'a>, Error> {
-    // Index exact invocation paths before decoding any pixels. A
-    // known unsafe occurrence invalidates shared source reuse immediately.
     let mut expected_pages = PageExpectations::new();
-    for paint in paints
-        .iter()
-        .filter(|paint| collector.wanted.contains(&paint.source_id))
-    {
+    let mut indices = BTreeSet::new();
+    for paint in paints {
         let page = PageNumber::new(paint.page)?;
         if !pages.contains(&page) {
-            collector.reject(&paint.source_id, "occurrence_outside_selection");
             continue;
         }
         if !paint.unsafe_reasons.is_empty() {
-            collector.reject(&paint.source_id, "unsafe_scanned_occurrence");
+            collector.reject(paint, "unsafe_scanned_occurrence");
         }
-        match expected_pages
-            .entry(page)
-            .or_default()
-            .entry(&paint.paint_path)
-        {
+        let expected = expected_pages.entry(page).or_default();
+        if !indices.insert((page, paint.paint_index)) {
+            collector.reject_page(page, expected, "duplicate_scanned_occurrence");
+            collector.reject(paint, "duplicate_scanned_occurrence");
+            continue;
+        }
+        match expected.entry(&paint.paint_path) {
             Entry::Vacant(entry) => {
                 entry.insert(Expected { paint, seen: false });
             }
-            Entry::Occupied(entry) => {
-                collector.reject(&entry.get().paint.source_id, "duplicate_scanned_occurrence");
-                collector.reject(&paint.source_id, "duplicate_scanned_occurrence");
+            Entry::Occupied(_) => {
+                collector.reject_page(page, expected, "duplicate_scanned_occurrence");
+                collector.reject(paint, "duplicate_scanned_occurrence");
             }
         }
     }
@@ -386,8 +478,6 @@ fn preflight_pages(
     pages: &BTreeSet<PageNumber>,
     expected_pages: &PageExpectations<'_>,
 ) -> Result<(), Error> {
-    // Preflight all selected page contexts before interpreting any of them.
-    // A later incompatible occurrence must not consume earlier decode budgets.
     let pdf = metadata.source().syntax();
     for &page in pages {
         let index = usize::try_from(page.get() - 1)
@@ -399,17 +489,14 @@ fn preflight_pages(
         let Some(expected) = expected_pages.get(&page) else {
             continue;
         };
-        // interpret_page does not wrap the root page in its declared
-        // transparency group. Do not assume that space is equivalent to
-        // independently decoded source RGB.
-        let reason = if source_page.raw().contains_key(b"Group".as_slice()) {
+        // Root transparency color conversion is not implemented by interpret_page.
+        let reason = if let Some(&reason) = collector.result.stats.rejected_pages.get(&page.get()) {
+            Some(reason)
+        } else if source_page.raw().contains_key(b"Group".as_slice()) {
             Some("page_transparency_group")
         } else if expected.values().any(|entry| {
-            !collector
-                .result
-                .stats
-                .rejected_sources
-                .contains_key(&entry.paint.source_id)
+            collector.wanted.contains(&entry.paint.source_id)
+                && entry.paint.unsafe_reasons.is_empty()
         }) && !equivalent_page_program(metadata, source_page)?
         {
             Some("page_content_path_mismatch")
@@ -417,9 +504,7 @@ fn preflight_pages(
             None
         };
         if let Some(reason) = reason {
-            for entry in expected.values() {
-                collector.reject(&entry.paint.source_id, reason);
-            }
+            collector.reject_page(page, expected, reason);
         }
     }
     Ok(())
@@ -427,8 +512,7 @@ fn preflight_pages(
 
 /// Decode selected source images without extracting unrelated page images.
 ///
-/// Reuse requires full occurrence correspondence and either equal decoded
-/// RGB or a previously verified exact interpreter decoding context.
+/// Bind each exact, independently safe occurrence to its decoded appearance.
 ///
 /// # Errors
 /// Rejects invalid budgets and page selections.
@@ -444,7 +528,8 @@ pub fn direct_native_images(
         budget: budget.validate()?,
         result: DirectImages::default(),
         stored_pixels: 0,
-        verified_contexts: BTreeMap::new(),
+        verified_contexts: HashMap::new(),
+        next_appearance: 0,
     };
     collector.result.stats.requested_sources = wanted.len();
     if wanted.is_empty() {
@@ -458,13 +543,16 @@ pub fn direct_native_images(
     let expected_pages = index_expected_paints(&mut collector, &pages, paints)?;
     preflight_pages(metadata, &mut collector, &pages, &expected_pages)?;
     for (page, expected) in expected_pages {
-        if expected.values().all(|entry| {
-            collector
-                .result
-                .stats
-                .rejected_sources
-                .contains_key(&entry.paint.source_id)
-        }) {
+        if collector
+            .result
+            .stats
+            .rejected_pages
+            .contains_key(&page.get())
+            || !expected.values().any(|entry| {
+                collector.wanted.contains(&entry.paint.source_id)
+                    && entry.paint.unsafe_reasons.is_empty()
+            })
+        {
             continue;
         }
         let index = usize::try_from(page.get() - 1)
@@ -490,23 +578,20 @@ pub fn direct_native_images(
         );
         let mut device = PageDevice {
             collector: &mut collector,
+            page,
             expected,
             groups: Vec::new(),
             blocked_groups: 0,
             attempted_pixels: 0,
-            malformed_groups: false,
+            invalid_page: None,
         };
         interpret_page(source_page, &mut context, &mut device);
-        device.malformed_groups |= !device.groups.is_empty();
+        if !device.groups.is_empty() {
+            device
+                .invalid_page
+                .get_or_insert("malformed_interpreter_groups");
+        }
         device.finish();
     }
-    for id in wanted {
-        if !collector.result.images.contains_key(id)
-            && !collector.result.stats.rejected_sources.contains_key(id)
-        {
-            collector.reject(id, "no_decoded_occurrence");
-        }
-    }
-    collector.result.stats.accepted_sources = collector.result.images.len();
-    Ok(collector.result)
+    Ok(collector.finalize())
 }

@@ -5,6 +5,7 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
 use pdf_redox::{ObjectId, SourcePdf};
+use pdf_redox_ocr::source_appearances::PaintAppearances;
 use pdf_redox_ocr::{
     PageNumber,
     draft::OcrLine,
@@ -149,7 +150,7 @@ fn native_formats_admit_exclusively_pixel_verified_source_labels()
         &pdf,
         &document,
         &painted,
-        &recognized,
+        &PaintAppearances::from_object_inventory(recognized, &painted.placements),
         &pages,
         RenderPolicy {
             dpi: 72,

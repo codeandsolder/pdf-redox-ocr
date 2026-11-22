@@ -91,10 +91,10 @@ struct Args {
     /// Maximum pixels allowed in a single decoded native-image OCR source.
     #[arg(long, default_value_t = 8_000_000)]
     max_native_source_pixels: u64,
-    /// Maximum aggregate pixels held by distinct native source images.
+    /// Maximum aggregate pixels held by distinct native image appearances.
     #[arg(long, default_value_t = 16_000_000)]
     max_native_total_pixels: u64,
-    /// Maximum number of unique image sources recognized.
+    /// Maximum number of distinct native image appearances recognized.
     #[arg(long, default_value_t = 12)]
     max_native_sources: usize,
     /// Largest native-resolution mosaic crop, in pixels.

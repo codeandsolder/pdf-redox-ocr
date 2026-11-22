@@ -13,6 +13,15 @@ use std::{collections::BTreeSet, fs};
 
 mod support;
 
+fn image<'a>(result: &'a DirectImages, source: &str) -> Option<&'a image::RgbImage> {
+    result
+        .appearances
+        .variants
+        .values()
+        .find(|v| v.source_id == source)
+        .map(|v| &v.value)
+}
+
 fn extract(
     bytes: &[u8],
     pages: &[PageNumber],
@@ -42,7 +51,7 @@ fn repeated_source_matches_poppler_and_validates_every_context()
     assert_eq!(actual.stats.reused_pixels, 1_800_000);
     assert_eq!(actual.stats.decoded_pixels, 360_000);
     assert_eq!(actual.stats.accepted_sources, 1);
-    assert!(actual.stats.rejected_sources.is_empty());
+    assert!(actual.stats.rejected_paints.is_empty());
     let dir = tempfile::tempdir()?;
     let file = dir.path().join("fixture.pdf");
     fs::write(&file, bytes)?;
@@ -52,7 +61,7 @@ fn repeated_source_matches_poppler_and_validates_every_context()
         &BTreeSet::from(["9:0".into()]),
         NativeImageBudget::default(),
     )?;
-    assert_eq!(actual.images, previous);
+    assert_eq!(image(&actual, "9:0"), previous.get("9:0"));
     Ok(())
 }
 
@@ -92,17 +101,23 @@ fn unrelated_inline_image_does_not_consume_targeted_decode_budget()
                 ..NativeImageBudget::default()
             },
             0,
-            Some("resident_source_budget"),
+            Some("resident_appearance_budget"),
         ),
     ] {
         let actual = extract(bytes, &pages, budget)?;
-        assert_eq!(actual.images.len(), expected, "{:?}", actual.stats);
+        assert_eq!(actual.appearances.len(), expected, "{:?}", actual.stats);
         assert_eq!(
             actual.stats.decoded_pixels,
             if expected == 1 { 360_000 } else { 0 }
         );
         assert_eq!(
-            actual.stats.rejected_sources.values().next().copied(),
+            actual
+                .stats
+                .rejected_paints
+                .values()
+                .flat_map(|p| p.values())
+                .next()
+                .copied(),
             reason
         );
     }
@@ -129,25 +144,21 @@ fn native_color_decode_and_compositing_rejection() -> Result<(), Box<dyn std::er
     let bytes = color_fixture();
     let pages = [PageNumber::new(1)?];
     let actual = extract(&bytes, &pages, NativeImageBudget::default())?;
-    assert_eq!(actual.images.len(), 4, "{:?}", actual.stats);
+    assert_eq!(actual.appearances.len(), 4, "{:?}", actual.stats);
     for (id, expected) in [
         ("5:0", [255, 255, 255, 0, 0, 0]),
         ("6:0", [255, 0, 0, 0, 255, 0]),
         ("7:0", [0, 0, 255, 255, 255, 255]),
     ] {
         assert_eq!(
-            actual
-                .images
-                .get(id)
-                .ok_or("missing decoded image")?
-                .as_raw(),
+            image(&actual, id).ok_or("missing decoded image")?.as_raw(),
             &expected,
             "{id}"
         );
     }
-    assert!(actual.images.contains_key("8:0"));
-    assert!(!actual.images.contains_key("9:0"));
-    assert!(!actual.images.contains_key("10:0"));
+    assert!(image(&actual, "8:0").is_some());
+    assert!(image(&actual, "9:0").is_none());
+    assert!(image(&actual, "10:0").is_none());
     Ok(())
 }
 
@@ -165,7 +176,7 @@ fn context_fixture(
     } else {
         b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec()
     };
-    let second_content = "q 1 0 0 1 120 10 cm /B Do Q ".repeat(repeats);
+    let second_content = "q 1 0 0 1 10 10 cm /B Do Q ".repeat(repeats);
     let mut content = "q 1 0 0 1 10 10 cm /A Do Q ".repeat(repeats);
     if same_page {
         content.push_str(&second_content);
@@ -205,9 +216,7 @@ fn different_resolved_resource_contexts_do_not_share_pixels()
             NativeImageBudget::default(),
         )?;
         assert_eq!(
-            single
-                .images
-                .get("9:0")
+            image(&single, "9:0")
                 .ok_or("context source missing")?
                 .as_raw(),
             &expected
@@ -217,18 +226,35 @@ fn different_resolved_resource_contexts_do_not_share_pixels()
         let pages = (1..=if same_page { 1 } else { 2 })
             .map(PageNumber::new)
             .collect::<Result<Vec<_>, _>>()?;
-        let actual = extract(
+        let bytes = context_fixture(same_page, "0000ffffffff", [0, 1], 2);
+        let actual = extract(&bytes, &pages, NativeImageBudget::default())?;
+        let doc = PdfMetadata::from_bytes(bytes)?;
+        let paints = enumerate_image_paints(&doc, &pages)?;
+        assert_eq!(actual.stats.decoded_occurrences, 2);
+        assert_eq!(actual.stats.reused_occurrences, 2);
+        assert_eq!(actual.stats.accepted_appearances, 2);
+        assert_eq!(actual.stats.accepted_occurrences, 4);
+        assert!(actual.stats.rejected_paints.is_empty());
+        for (index, paint) in paints.placements.iter().enumerate() {
+            let (_, rgb) = actual.appearances.get(paint).ok_or("binding missing")?;
+            let expected = if index < 2 {
+                [255, 0, 0, 0, 255, 0]
+            } else {
+                [0, 0, 255, 255, 255, 255]
+            };
+            assert_eq!(rgb.as_raw(), &expected);
+        }
+        assert_eq!(paints.placements[0].ctm, paints.placements[2].ctm);
+        let limited = extract(
             &context_fixture(same_page, "0000ffffffff", [0, 1], 2),
             &pages,
-            NativeImageBudget::default(),
+            NativeImageBudget {
+                sources: 1,
+                ..NativeImageBudget::default()
+            },
         )?;
-        assert_eq!(actual.stats.decoded_occurrences, 2, "{:?}", actual.stats);
-        assert_eq!(actual.stats.reused_occurrences, 1);
-        assert!(actual.images.is_empty());
-        assert_eq!(
-            actual.stats.rejected_sources.get("9:0"),
-            Some(&"resolved_pixels_differ")
-        );
+        assert_eq!(limited.stats.accepted_occurrences, 2);
+        assert_eq!(limited.stats.accepted_appearances, 1);
     }
     Ok(())
 }
@@ -258,9 +284,9 @@ fn each_distinct_equal_pixel_context_is_decoded_only_once() -> Result<(), Box<dy
                 result.stats.decoded_occurrences + result.stats.reused_occurrences,
                 4
             );
-            assert!(result.stats.rejected_sources.is_empty());
+            assert!(result.stats.rejected_paints.is_empty());
             assert_eq!(
-                result.images.get("9:0").ok_or("source missing")?.as_raw(),
+                image(&result, "9:0").ok_or("source missing")?.as_raw(),
                 &[255, 0, 0, 255, 0, 0]
             );
         }
@@ -307,7 +333,10 @@ fn unsupported_root_color_contexts_cannot_publish_independent_rgb()
             NativeImageBudget::default(),
         )?;
         assert_eq!(result.stats.decoded_occurrences, 0);
-        assert_eq!(result.stats.rejected_sources.get("5:0"), Some(&reason));
+        assert_eq!(
+            result.stats.rejected_paints.get(&1).and_then(|p| p.get(&0)),
+            Some(&reason)
+        );
     }
     Ok(())
 }
@@ -326,10 +355,10 @@ fn unmatched_geometry_cannot_publish_a_source() -> Result<(), Box<dyn std::error
         &paints,
         NativeImageBudget::default(),
     )?;
-    assert!(actual.images.is_empty());
+    assert!(actual.appearances.is_empty());
     assert_eq!(actual.stats.decoded_occurrences, 0);
     assert_eq!(
-        actual.stats.rejected_sources.get("9:0"),
+        actual.stats.rejected_pages.get(&1),
         Some(&"unmatched_interpreter_occurrence")
     );
     Ok(())
@@ -353,23 +382,22 @@ fn later_incompatible_page_does_not_starve_independent_source()
         &bytes,
         &pages,
         NativeImageBudget {
-            sources: 1,
-            total_pixels: 1,
-            extraction_pixels: 1,
+            sources: 2,
+            total_pixels: 2,
+            extraction_pixels: 2,
             ..NativeImageBudget::default()
         },
     )?;
     assert_eq!(
-        result.stats.rejected_sources.get("7:0"),
+        result.stats.rejected_pages.get(&2),
         Some(&"page_transparency_group")
     );
-    assert_eq!(result.stats.decoded_pixels, 1);
-    assert_eq!(result.stats.decoded_occurrences, 1);
-    assert_eq!(result.stats.accepted_sources, 1);
+    assert_eq!(result.stats.decoded_pixels, 2);
+    assert_eq!(result.stats.decoded_occurrences, 2);
+    assert_eq!(result.stats.accepted_sources, 2);
+    assert_eq!(result.stats.accepted_occurrences, 2);
     assert_eq!(
-        result
-            .images
-            .get("8:0")
+        image(&result, "8:0")
             .ok_or("independent source missing")?
             .as_raw(),
         &[0, 255, 0]
@@ -405,13 +433,13 @@ fn exact_do_paths_disambiguate_equal_transforms_after_skipped_operations()
     assert_eq!(actual.stats.matched_occurrences, 2);
     assert_eq!(actual.stats.decoded_occurrences, 1);
     assert_eq!(actual.stats.reused_occurrences, 1);
-    assert!(actual.images.contains_key("6:0"));
+    assert!(image(&actual, "6:0").is_some());
 
     paints[0].paint_path = vec![1];
     let missing =
         direct_native_images(&doc, &pages, &wanted, &paints, NativeImageBudget::default())?;
     assert_eq!(
-        missing.stats.rejected_sources.get("6:0"),
+        missing.stats.rejected_pages.get(&1),
         Some(&"unmatched_interpreter_occurrence")
     );
     assert_eq!(missing.stats.decoded_occurrences, 0);
@@ -420,7 +448,7 @@ fn exact_do_paths_disambiguate_equal_transforms_after_skipped_operations()
     let duplicate =
         direct_native_images(&doc, &pages, &wanted, &paints, NativeImageBudget::default())?;
     assert_eq!(
-        duplicate.stats.rejected_sources.get("6:0"),
+        duplicate.stats.rejected_pages.get(&1),
         Some(&"duplicate_scanned_occurrence")
     );
     assert_eq!(duplicate.stats.decoded_occurrences, 0);
@@ -436,10 +464,10 @@ fn divergent_content_array_programs_are_rejected_before_decode()
     assert_eq!(enumerate_image_paints(&doc, &pages)?.placements.len(), 2);
     let actual = extract(&bytes, &pages, NativeImageBudget::default())?;
     assert_eq!(
-        actual.stats.rejected_sources.get("6:0"),
+        actual.stats.rejected_pages.get(&1),
         Some(&"page_content_path_mismatch")
     );
     assert_eq!(actual.stats.decoded_occurrences, 0);
-    assert!(actual.images.is_empty());
+    assert!(actual.appearances.is_empty());
     Ok(())
 }
