@@ -26,6 +26,8 @@ pub struct ImageObservation {
     pub source_id: String,
     /// Required zero-based expanded PDF paint invocation ordinal.
     pub paint_index: u32,
+    /// Original detector identity within this recognized raster.
+    pub detection_index: usize,
     /// OCR line in the page's PDF user-space frame.
     pub line: OcrLine,
 }
@@ -39,6 +41,8 @@ pub struct VisibilityProof {
     pub source_id: String,
     /// Exact expanded paint invocation.
     pub paint_index: u32,
+    /// Original detector identity within this recognized raster.
+    pub detection_index: usize,
     /// Recognized text, bound to a specific visible polygon.
     pub text: String,
     /// Recognized PDF-space polygon.
@@ -129,6 +133,8 @@ pub struct MergeProposal {
     pub source_id: String,
     /// Expanded paint invocation identity.
     pub paint_index: u32,
+    /// Original detector identity within this recognized raster.
+    pub detection_index: usize,
     /// Raw recognition confidence.
     pub raster_confidence: f64,
     /// Maximum overlap with text/confidence-qualified page observations.
@@ -164,9 +170,9 @@ pub struct MergeStats {
     pub raster_candidates_kept_in_audit_only: usize,
 }
 
-/// Index by exact page, source object, paint invocation, and Unicode text.
+/// Index by exact page, source object, paint invocation, detector ID, and text.
 /// Geometry remains a second-stage match to preserve fractional-pixel proofs.
-type ProofIndex<'a> = BTreeMap<(u32, &'a str, u32, &'a str), Vec<&'a VisibilityProof>>;
+type ProofIndex<'a> = BTreeMap<(u32, &'a str, u32, usize, &'a str), Vec<&'a VisibilityProof>>;
 
 fn proof_geometry_matches(first: &Quad, second: &Quad) -> bool {
     first.iter().zip(second).all(|(a, b)| {
@@ -182,6 +188,7 @@ fn proof_matches(image: &ImageObservation, proof: &VisibilityProof) -> bool {
         && proof.page == image.page
         && proof.source_id == image.source_id
         && proof.paint_index == image.paint_index
+        && proof.detection_index == image.detection_index
         && proof.text == image.line.text
         && proof_geometry_matches(&proof.quad, &image.line.quad)
 }
@@ -223,6 +230,7 @@ fn index_merge_evidence<'a>(
                     proof.page,
                     proof.source_id.as_str(),
                     proof.paint_index,
+                    proof.detection_index,
                     proof.text.as_str(),
                 ))
                 .or_default()
@@ -468,6 +476,7 @@ fn merge_fallback_page(
                     image.page,
                     image.source_id.as_str(),
                     image.paint_index,
+                    image.detection_index,
                     image.line.text.as_str(),
                 ))
                 .is_some_and(|candidates| {
@@ -488,6 +497,7 @@ fn merge_fallback_page(
             raster_text: image.line.text.clone(),
             source_id: image.source_id.clone(),
             paint_index: image.paint_index,
+            detection_index: image.detection_index,
             raster_confidence: image.line.confidence,
             page_overlap: round4(admission.page_overlap),
             raw_page_overlap: round4(admission.raw_page_overlap),
@@ -643,6 +653,7 @@ mod tests {
             page: 1,
             source_id: "9:0".into(),
             paint_index: 0,
+            detection_index: 999,
             line: line("forged OCR", rect(10.0, 20.0, 100.0, 12.0)),
         };
         assert!(
@@ -729,10 +740,12 @@ mod tests {
         let observations = second_page
             .lines
             .iter()
-            .map(|observation| ImageObservation {
+            .enumerate()
+            .map(|(detection_index, observation)| ImageObservation {
                 page: 2,
                 source_id: "8:0".into(),
                 paint_index: 1,
+                detection_index,
                 line: observation.clone(),
             })
             .collect::<Vec<_>>();
@@ -756,6 +769,7 @@ mod tests {
                 page: candidate.page,
                 source_id: candidate.source_id.clone(),
                 paint_index: candidate.paint_index,
+                detection_index: candidate.detection_index,
                 text: candidate.line.text.clone(),
                 quad: candidate.line.quad,
                 visible: true,
@@ -809,6 +823,7 @@ mod tests {
                 page: candidate.page,
                 source_id: candidate.source_id.clone(),
                 paint_index: candidate.paint_index,
+                detection_index: candidate.detection_index,
                 text: candidate.line.text.clone(),
                 quad: candidate.line.quad,
                 visible: true,
@@ -872,6 +887,7 @@ mod tests {
                     page: item.page,
                     source_id: item.source_id.clone(),
                     paint_index: item.paint_index,
+                    detection_index: item.detection_index,
                     text: item.line.text.clone(),
                     quad: item.line.quad,
                     visible: true,
@@ -932,6 +948,7 @@ mod tests {
             page: original.page,
             source_id: original.source_id.clone(),
             paint_index: original.paint_index,
+            detection_index: original.detection_index,
             text: original.line.text.clone(),
             quad: original.line.quad,
             visible: true,
@@ -966,9 +983,11 @@ mod tests {
         wrong_geometry.quad[0].0 += 0.001;
         let mut wrong_text = proof.clone();
         wrong_text.text.push('!');
+        let mut wrong_detection = proof.clone();
+        wrong_detection.detection_index += 1;
         let mut invisible = proof.clone();
         invisible.visible = false;
-        for rejected_proof in [wrong_geometry, wrong_text, invisible] {
+        for rejected_proof in [wrong_geometry, wrong_text, wrong_detection, invisible] {
             let (rejected, stats, audit) =
                 check(std::slice::from_ref(&original), &[rejected_proof])?;
             assert_eq!(rejected.pages[1].lines.len(), 1);

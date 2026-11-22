@@ -227,7 +227,7 @@ pub fn reconstruct_native_mosaics(
     plan: &MosaicPlan,
     paints: &[ImagePaint],
     budget: MosaicBudget,
-    mut recognize: impl FnMut(RgbImage, &dyn Fn(Point) -> Point) -> Result<Vec<OcrLine>, Error>,
+    mut recognize: impl FnMut(usize, RgbImage, &dyn Fn(Point) -> Point) -> Result<Vec<OcrLine>, Error>,
 ) -> Result<Option<Vec<OcrLine>>, Error> {
     let budget = budget.validate()?;
     if !disjoint_groups(plan, paints) {
@@ -236,7 +236,7 @@ pub fn reconstruct_native_mosaics(
     let mut lines = Vec::new();
     let mut total_pixels = 0_u64;
     let mut seen = HashSet::new();
-    for group in &plan.groups {
+    for (group_index, group) in plan.groups.iter().enumerate() {
         let Some(dpi) = group_dpi(group.pitch, budget.dpi) else {
             return Ok(None);
         };
@@ -277,7 +277,7 @@ pub fn reconstruct_native_mosaics(
             return Ok(None);
         }
         let pixel_to_pdf = |point| mapper.to_pdf(frame.to_input(point));
-        let mut result = recognize(oriented, &pixel_to_pdf)?;
+        let mut result = recognize(group_index, oriented, &pixel_to_pdf)?;
         lines.append(&mut result);
     }
     if seen.len() != paints.len() {

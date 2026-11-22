@@ -116,24 +116,24 @@ fn masks_preserve_exact_samples_of_neighboring_excluded_labels()
     let id = MaskSource::Object(ObjectId::new(5, 0));
     let selected = line("Selected", 0.99, 10.0, 50.0);
     let low_confidence = line("Neighbor", 0.5, 49.0, 80.0);
-    let thresholded = mask_source_object(&source, id, &[selected.clone(), low_confidence], 0.97)?
+    let thresholded = mask_source_object(&source, id, &[&selected, &low_confidence], 0.97)?
         .ok_or("no thresholded mask")?;
     let explicit = mask_source_subset(
         &source,
         id,
-        &[selected.clone(), line("Neighbor", 0.99, 49.0, 80.0)],
+        &[&selected, &line("Neighbor", 0.99, 49.0, 80.0)],
         &[0],
     )?
     .ok_or("no explicit mask")?;
     let short = mask_source_object(
         &source,
         id,
-        &[selected.clone(), line("N", 0.999, 49.0, 80.0)],
+        &[&selected, &line("N", 0.999, 49.0, 80.0)],
         0.97,
     )?
     .ok_or("no short-protected mask")?;
     let unprotected =
-        mask_source_object(&source, id, &[selected], 0.97)?.ok_or("no unprotected control")?;
+        mask_source_object(&source, id, &[&selected], 0.97)?.ok_or("no unprotected control")?;
     let data = |mask: pdf_redox_ocr::source_mask::MaskedSourceObject| {
         let OwnedObject::Stream {
             data: StreamData::Owned(bytes),
@@ -164,7 +164,13 @@ fn masks_preserve_exact_samples_of_neighboring_excluded_labels()
     assert_eq!(expected[16 * 96 + 30], 255);
     assert_eq!(expected[16 * 96 + 50], 0);
     assert!(
-        mask_source_subset(&source, id, &[line("Duplicate", 0.99, 10.0, 50.0)], &[0, 0]).is_err()
+        mask_source_subset(
+            &source,
+            id,
+            &[&line("Duplicate", 0.99, 10.0, 50.0)],
+            &[0, 0]
+        )
+        .is_err()
     );
     assert!(mask_source_subset(&source, id, &[], &[0]).is_err());
     Ok(())

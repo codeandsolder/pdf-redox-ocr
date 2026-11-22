@@ -50,16 +50,19 @@ fn attributes_repeated_direct_form_and_nested_form_paints() -> Result<(), Box<dy
         SourceObservation {
             width: 1200,
             height: 300,
-            lines: vec![OcrLine {
-                text: "CAPACITOR 47uF 16V".to_owned(),
-                confidence: 0.99,
-                quad: [
-                    Point(75.0, 120.0),
-                    Point(1060.0, 120.0),
-                    Point(1060.0, 200.0),
-                    Point(75.0, 200.0),
-                ],
-                reviewed: false,
+            lines: vec![pdf_redox_ocr::source_ocr::SourceLine {
+                detection_index: 0,
+                line: OcrLine {
+                    text: "CAPACITOR 47uF 16V".to_owned(),
+                    confidence: 0.99,
+                    quad: [
+                        Point(75.0, 120.0),
+                        Point(1060.0, 120.0),
+                        Point(1060.0, 200.0),
+                        Point(75.0, 200.0),
+                    ],
+                    reviewed: false,
+                },
             }],
         },
     )]);
@@ -146,7 +149,7 @@ fn isolated_paint_does_not_modify_other_visible_uses_or_reserved_aliases()
         let masked = mask_source_object(
             metadata.source(),
             MaskSource::Paint(first),
-            std::slice::from_ref(&original_line),
+            &[&original_line],
             0.97,
         )?
         .ok_or("source image could not be masked")?;

@@ -94,7 +94,7 @@ pub fn mask_source_text(
     let Some(masked) = mask_source_object(
         doc.source(),
         MaskSource::Object(source_id),
-        lines,
+        &lines.iter().collect::<Vec<_>>(),
         min_confidence,
     )?
     else {
@@ -116,7 +116,7 @@ pub fn mask_source_text(
 pub fn mask_source_object(
     source: &SourcePdf,
     image: MaskSource<'_>,
-    lines: &[OcrLine],
+    lines: &[&OcrLine],
     min_confidence: f64,
 ) -> Result<Option<MaskedSourceObject>, Error> {
     if !min_confidence.is_finite() || !(0.0..=1.0).contains(&min_confidence) {
@@ -147,7 +147,7 @@ pub(crate) fn mask_candidate(line: &OcrLine, min_confidence: f64) -> bool {
 pub fn mask_source_subset(
     source: &SourcePdf,
     image: MaskSource<'_>,
-    lines: &[OcrLine],
+    lines: &[&OcrLine],
     selected: &[usize],
 ) -> Result<Option<MaskedSourceObject>, Error> {
     if selected.is_empty() {
@@ -162,7 +162,7 @@ pub fn mask_source_subset(
     }
     let eligible = selected
         .iter()
-        .map(|&index| &lines[index])
+        .map(|&index| lines[index])
         .collect::<Vec<_>>();
     let object = source.materialize(image.object_id())?;
     let Some(mut image) = decode_native_samples(source, image, &object)? else {

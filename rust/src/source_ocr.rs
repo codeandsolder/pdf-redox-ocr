@@ -16,6 +16,14 @@ use crate::{
     source_appearances::PaintAppearances,
 };
 
+/// One actual detector identity and its source-local OCR line.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceLine {
+    pub detection_index: usize,
+    #[serde(flatten)]
+    pub line: OcrLine,
+}
+
 /// One native image's OCR observations in the image's own user-space frame.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SourceObservation {
@@ -24,7 +32,15 @@ pub struct SourceObservation {
     /// Original native image height.
     pub height: u32,
     /// OCR observation on an unrotated image with bottom-left origin.
-    pub lines: Vec<OcrLine>,
+    pub lines: Vec<SourceLine>,
+}
+
+impl SourceObservation {
+    /// Borrow the source-local polygons in the original detector output order.
+    #[must_use]
+    pub fn local_lines(&self) -> Vec<&OcrLine> {
+        self.lines.iter().map(|entry| &entry.line).collect()
+    }
 }
 
 /// Project PDF image-source space into each original PDF paint occurrence.
@@ -51,7 +67,8 @@ pub fn map_observations_to_paint(
     let mapped = source
         .lines
         .iter()
-        .map(|line| {
+        .map(|source| {
+            let line = &source.line;
             if !line.confidence.is_finite()
                 || !(0.0..=1.0).contains(&line.confidence)
                 || area(&line.quad) <= 1e-9
@@ -111,6 +128,9 @@ pub fn source_only_candidates(report: &PaintReport, max_pixels: u64) -> BTreeSet
         .collect()
 }
 
+/// Exact detector IDs accepted at each expanded source paint occurrence.
+pub(crate) type SourceAdmissions = BTreeMap<(PageNumber, u32), BTreeSet<usize>>;
+
 /// The subset of selected pages proven to be safe source-only OCR targets.
 #[derive(Debug, Default)]
 pub struct SourceOnlyResult {
@@ -118,6 +138,7 @@ pub struct SourceOnlyResult {
     pub pages: BTreeMap<PageNumber, Vec<OcrLine>>,
     /// Fully source-only pages, eligible to skip regular page OCR.
     pub approved_pages: BTreeSet<PageNumber>,
+    pub(crate) admissions: SourceAdmissions,
 }
 
 /// Decide whether source OCR can replace ordinary page OCR.
@@ -146,6 +167,7 @@ pub fn source_only_pages(
             .filter(|paint| paint.page == summary.page)
             .collect::<Vec<_>>();
         let mut lines = Vec::new();
+        let mut admissions = SourceAdmissions::new();
         let mut evidence = Vec::with_capacity(paints.len());
         for paint in paints {
             let known_source = recognized.get(paint);
@@ -161,9 +183,13 @@ pub fn source_only_pages(
                             .iter()
                             .all(|line| paint.wholly_visible_in_clip(&line.quad));
                         if safe {
-                            lines.extend(mapped.into_iter().filter(|line| {
-                                !line.text.trim().is_empty() && line.confidence > 0.0
-                            }));
+                            let admitted = admissions.entry((page, paint.paint_index)).or_default();
+                            for (projected, source) in mapped.into_iter().zip(&observation.lines) {
+                                if !projected.text.trim().is_empty() && projected.confidence > 0.0 {
+                                    admitted.insert(source.detection_index);
+                                    lines.push(projected);
+                                }
+                            }
                         }
                     }
                     Err(Error::Invalid(_)) => safe = false,
@@ -184,6 +210,7 @@ pub fn source_only_pages(
         if decisions.first().is_some_and(|decision| decision.approved) {
             result.approved_pages.insert(page);
             result.pages.insert(page, lines);
+            result.admissions.extend(admissions);
         }
     }
     Ok(result)
@@ -202,7 +229,7 @@ pub fn source_image_mapper(width: u32, height: u32) -> Result<DisplayMapper, Err
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{SourceObservation, source_only_pages};
+    use super::{SourceLine, SourceObservation, source_only_pages};
     use crate::source_appearances::PaintAppearances;
     use crate::{
         draft::OcrLine,
@@ -225,11 +252,14 @@ mod tests {
         let source = SourceObservation {
             width: 200,
             height: 100,
-            lines: vec![OcrLine {
-                text: "Capacitor 47uF".into(),
-                confidence: 0.99,
-                quad: quad(10.0, 10.0),
-                reviewed: false,
+            lines: vec![SourceLine {
+                detection_index: 0,
+                line: OcrLine {
+                    text: "Capacitor 47uF".into(),
+                    confidence: 0.99,
+                    quad: quad(10.0, 10.0),
+                    reviewed: false,
+                },
             }],
         };
         let paint = |page, tx| ImagePaint {
@@ -330,11 +360,14 @@ mod tests {
         let invalid_source = SourceObservation {
             width: 200,
             height: 100,
-            lines: vec![OcrLine {
-                text: "Outside image".into(),
-                confidence: 0.99,
-                quad: quad(150.0, 90.0),
-                reviewed: false,
+            lines: vec![SourceLine {
+                detection_index: 0,
+                line: OcrLine {
+                    text: "Outside image".into(),
+                    confidence: 0.99,
+                    quad: quad(150.0, 90.0),
+                    reviewed: false,
+                },
             }],
         };
         assert!(super::map_observations_to_paint(&invalid_source, &report.placements[0]).is_err());
@@ -379,7 +412,10 @@ mod tests {
             let source = SourceObservation {
                 width: 200,
                 height: 100,
-                lines: vec![uninformative.clone()],
+                lines: vec![SourceLine {
+                    detection_index: 0,
+                    line: uninformative.clone(),
+                }],
             };
             let result = source_only_pages(
                 &report,
@@ -396,11 +432,14 @@ mod tests {
         let degenerate = SourceObservation {
             width: 200,
             height: 100,
-            lines: vec![OcrLine {
-                text: "Degenerate geometry".into(),
-                confidence: 0.99,
-                quad: [Point(10.0, 20.0); 4],
-                reviewed: false,
+            lines: vec![SourceLine {
+                detection_index: 0,
+                line: OcrLine {
+                    text: "Degenerate geometry".into(),
+                    confidence: 0.99,
+                    quad: [Point(10.0, 20.0); 4],
+                    reviewed: false,
+                },
             }],
         };
         assert!(super::map_observations_to_paint(&degenerate, &report.placements[0]).is_err());
@@ -434,7 +473,16 @@ mod tests {
         let source = SourceObservation {
             width: 200,
             height: 100,
-            lines: vec![blank, meaningful],
+            lines: vec![
+                SourceLine {
+                    detection_index: 0,
+                    line: blank,
+                },
+                SourceLine {
+                    detection_index: 1,
+                    line: meaningful,
+                },
+            ],
         };
         let result = source_only_pages(
             &report,

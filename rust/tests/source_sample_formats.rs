@@ -140,7 +140,10 @@ fn native_formats_admit_exclusively_pixel_verified_source_labels()
                 SourceObservation {
                     width: paint.width,
                     height: paint.height,
-                    lines: vec![original_line()],
+                    lines: vec![pdf_redox_ocr::source_ocr::SourceLine {
+                        detection_index: 0,
+                        line: original_line(),
+                    }],
                 },
             )
         })
@@ -286,16 +289,19 @@ fn contextual_observations(
                         value: SourceObservation {
                             width: 96,
                             height: 32,
-                            lines: vec![OcrLine {
-                                text: text.into(),
-                                confidence: 0.99,
-                                reviewed: false,
-                                quad: [
-                                    Point(12., 6.),
-                                    Point(76., 6.),
-                                    Point(76., 26.),
-                                    Point(12., 26.),
-                                ],
+                            lines: vec![pdf_redox_ocr::source_ocr::SourceLine {
+                                detection_index: 0,
+                                line: OcrLine {
+                                    text: text.into(),
+                                    confidence: 0.99,
+                                    reviewed: false,
+                                    quad: [
+                                        Point(12., 6.),
+                                        Point(76., 6.),
+                                        Point(76., 26.),
+                                        Point(12., 26.),
+                                    ],
+                                },
                             }],
                         },
                     },
@@ -326,7 +332,7 @@ fn assert_isolated_contextual_masks(
         let masked = mask_source_object(
             doc.source(),
             MaskSource::Paint(paint),
-            &observation.lines,
+            &observation.local_lines(),
             0.97,
         )?
         .ok_or("contextual sample mask unavailable")?;
@@ -444,7 +450,10 @@ fn check_palette_contrast(noisy_background: bool) -> Result<(), Box<dyn std::err
             SourceObservation {
                 width: 96,
                 height: 32,
-                lines: vec![line],
+                lines: vec![pdf_redox_ocr::source_ocr::SourceLine {
+                    detection_index: 0,
+                    line,
+                }],
             },
         )]),
         &report.placements,

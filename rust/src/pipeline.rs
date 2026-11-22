@@ -14,7 +14,7 @@ use crate::{
     catalog_evidence::CatalogEvidence,
     direct_images::{DirectDecodeStats, direct_native_images},
     draft::{DraftPage, OcrDraft, OcrLine, sha256_file},
-    geometry::{DisplayMapper, Quad},
+    geometry::{DisplayMapper, Point, Quad},
     hybrid::{
         MergeInput, MergeProposal, MergeStats, PageRoute, masked_source_conflicts, merge_ocr,
     },
@@ -29,18 +29,18 @@ use crate::{
     native_images::{NativeImageBudget, native_source_images},
     native_words::native_words_for_pages,
     page_selection::parse_page_selection,
-    paint_scan::{PaintReport, enumerate_image_paints},
+    paint_scan::{PaintReport, PdfMatrix, enumerate_image_paints},
     pdf_metadata::PdfMetadata,
     rasterize::{RenderPolicy, render_rgb_page},
     recognition::{
-        RasterCharacterAudit, RasterCharacterMapping, RasterRepairAudit, RecognitionBackend,
-        RecognitionCacheBudget, RecognitionSession, RecognitionStats,
+        RasterCharacterAudit, RasterCharacterMapping, RasterMappingScope, RasterRepairAudit,
+        RecognitionBackend, RecognitionCacheBudget, RecognitionSession, RecognitionStats,
     },
     region_ocr::{RegionAudit, RegionPass},
     source_appearances::{PaintAppearances, SourceAppearance},
     source_ocr::{
-        SourceObservation, SourceOnlyResult, source_image_mapper, source_only_candidates,
-        source_only_pages,
+        SourceAdmissions, SourceLine, SourceObservation, SourceOnlyResult, source_image_mapper,
+        source_only_candidates, source_only_pages,
     },
     source_selection::{ImagePlacement, SourcePolicy, choose_mixed_raster_sources},
 };
@@ -401,7 +401,7 @@ impl PipelineResult {
     #[must_use]
     pub const fn audit(&self) -> PipelineAudit<'_> {
         PipelineAudit {
-            schema_version: 17,
+            schema_version: 18,
             preparation: None,
             pdf_sha256: self.draft.pdf_sha256.as_str(),
             model: self.draft.model.as_str(),
@@ -449,6 +449,84 @@ struct NativePreparation {
     fallback_pages: Vec<PageNumber>,
 }
 
+fn record_source_mappings(
+    engine: &mut RecognitionSession<'_, impl RecognitionBackend>,
+    scanned: &PaintReport,
+    recognized: &PaintAppearances<SourceObservation>,
+    identities: &PaintAppearances<SourceRasterIdentity>,
+    admitted: &SourceAdmissions,
+) -> Result<(), Error> {
+    for paint in &scanned.placements {
+        let page = PageNumber::new(paint.page)?;
+        let Some(detections) = admitted.get(&(page, paint.paint_index)) else {
+            continue;
+        };
+        if detections.is_empty() {
+            continue;
+        }
+        let (appearance, source) = recognized
+            .get(paint)
+            .ok_or_else(|| Error::Invalid("admitted source has no recognition".into()))?;
+        let (identity_id, identity) = identities
+            .get(paint)
+            .ok_or_else(|| Error::Invalid("admitted source has no raster identity".into()))?;
+        let dimensions = (identity.width, identity.height);
+        let source_dimensions = (source.width, source.height);
+        if identity_id != appearance
+            || dimensions != source_dimensions
+            || !detections.iter().all(|index| {
+                source
+                    .lines
+                    .iter()
+                    .any(|line| line.detection_index == *index)
+            })
+        {
+            return Err(Error::Invalid(
+                "inconsistent admitted source observation".into(),
+            ));
+        }
+        let transform = PdfMatrix(paint.ctm);
+        engine.record_character_mapping(RasterCharacterMapping {
+            page,
+            rgb_sha256: identity.rgb_sha256.clone(),
+            dimensions,
+            scope: RasterMappingScope::NativeImage {
+                paint_index: paint.paint_index,
+                admitted_detection_indices: detections.clone(),
+            },
+            raster_corners: [Point(0., 1.), Point(1., 1.), Point(1., 0.), Point(0., 0.)]
+                .map(|point| transform.point(point)),
+        });
+    }
+    Ok(())
+}
+
+impl NativePreparation {
+    fn record_mixed_source_mappings(
+        &self,
+        engine: &mut RecognitionSession<'_, impl RecognitionBackend>,
+        proposals: &[MergeProposal],
+    ) -> Result<(), Error> {
+        let mut admitted = SourceAdmissions::new();
+        for proposal in proposals
+            .iter()
+            .filter(|proposal| proposal.included_as_extra)
+        {
+            admitted
+                .entry((PageNumber::new(proposal.page)?, proposal.paint_index))
+                .or_default()
+                .insert(proposal.detection_index);
+        }
+        record_source_mappings(
+            engine,
+            &self.scanned,
+            &self.recognized,
+            &self.source_rasters,
+            &admitted,
+        )
+    }
+}
+
 #[derive(Default)]
 struct RecognizedPages {
     raster: Vec<DraftPage>,
@@ -492,6 +570,29 @@ fn model_provenance(profile: &str, stage: &str, render: RenderPolicy) -> String 
         "{profile} {stage} page-raster-max-side={} page-raster-dpi={}",
         render.max_side, render.dpi
     )
+}
+
+fn report_routes(
+    observer: &mut impl PipelineObserver,
+    stats: &MergeStats,
+    regional_ocr: &[RegionAudit],
+    residual_page_count: usize,
+) {
+    observer.message(format!(
+        "composited regions: {} attempts, {} additional labels",
+        regional_ocr.len(),
+        stats.nonoverlapping_region_lines_added
+    ));
+    observer.message(format!(
+            "OCR merge: {} native-only pages, {} source-only pages, {} fallback pages, {} verified native labels added",
+            stats.native_only_pages,
+            stats.image_source_only_pages,
+            stats.page_fallback_pages,
+            stats.nonoverlapping_image_lines_added,
+        ));
+    observer.message(format!(
+        "verified residual rasters used on {residual_page_count} pages"
+    ));
 }
 
 fn report_recognition(recognition: RecognitionStats, observer: &mut impl PipelineObserver) {
@@ -631,6 +732,7 @@ impl PreparedOcr {
             visibility_proofs: &visibility.proofs,
             threshold: self.policy.minimum_confidence,
         })?;
+        prepared.record_mixed_source_mappings(&mut session, &proposals)?;
         let regional_ocr = RegionPass {
             pdf: &self.pdf,
             document: &self.doc,
@@ -641,22 +743,7 @@ impl PreparedOcr {
         .recognize(&mut session, &mut draft)?;
         stats.nonoverlapping_region_lines_added =
             regional_ocr.iter().map(RegionAudit::admitted).sum();
-        observer.message(format!(
-            "composited regions: {} attempts, {} additional labels",
-            regional_ocr.len(),
-            stats.nonoverlapping_region_lines_added
-        ));
-        observer.message(format!(
-            "OCR merge: {} native-only pages, {} source-only pages, {} fallback pages, {} verified native labels added",
-            stats.native_only_pages,
-            stats.image_source_only_pages,
-            stats.page_fallback_pages,
-            stats.nonoverlapping_image_lines_added,
-        ));
-        observer.message(format!(
-            "verified residual rasters used on {} pages",
-            residual_pages.len()
-        ));
+        report_routes(&mut observer, &stats, &regional_ocr, residual_pages.len());
         let recognition = session.stats();
         report_recognition(recognition, &mut observer);
         self.verify_source()?;
@@ -1034,8 +1121,18 @@ impl PreparedOcr {
         {
             let (width, height) = (rgb.width(), rgb.height());
             let mapper = source_image_mapper(width, height)?;
-            match engine.recognize_page(rgb, mapper) {
-                Ok(lines) => {
+            match engine.recognize_pixels(rgb) {
+                Ok(pixels) => {
+                    let lines = pixels
+                        .lines
+                        .into_iter()
+                        .map(|pixel| SourceLine {
+                            detection_index: pixel.detection_index,
+                            line: pixel.into_pdf(&|Point(x, y)| {
+                                mapper.to_pdf(x / f64::from(width), y / f64::from(height))
+                            }),
+                        })
+                        .collect::<Vec<_>>();
                     progress(format!(
                         "source {source_id}: {} OCR observations",
                         lines.len()
@@ -1075,15 +1172,49 @@ impl PreparedOcr {
                 .filter(|paint| paint.page == page.get())
                 .cloned()
                 .collect::<Vec<_>>();
+            let mut mappings = Vec::new();
             match reconstruct_native_mosaics(
                 &self.pdf,
                 self.doc.mapper(page)?,
                 plan,
                 &paints,
                 self.policy.mosaic_budget,
-                |rgb, mapper| engine.recognize_mapped(rgb, mapper),
+                |group_index, rgb, mapper| {
+                    let raster = engine.recognize_pixels(rgb)?;
+                    let (width, height) = raster.dimensions;
+                    let admitted_detection_indices = raster
+                        .lines
+                        .iter()
+                        .map(|line| line.detection_index)
+                        .collect();
+                    let corners = [
+                        Point(0., 0.),
+                        Point(f64::from(width), 0.),
+                        Point(f64::from(width), f64::from(height)),
+                        Point(0., f64::from(height)),
+                    ]
+                    .map(mapper);
+                    mappings.push(RasterCharacterMapping {
+                        page,
+                        rgb_sha256: raster.rgb_sha256,
+                        dimensions: raster.dimensions,
+                        scope: RasterMappingScope::Mosaic {
+                            group_index,
+                            admitted_detection_indices,
+                        },
+                        raster_corners: corners,
+                    });
+                    Ok(raster
+                        .lines
+                        .into_iter()
+                        .map(|line| line.into_pdf(mapper))
+                        .collect())
+                },
             ) {
                 Ok(Some(lines)) => {
+                    for mapping in mappings {
+                        engine.record_character_mapping(mapping);
+                    }
                     progress(format!(
                         "page {} native mosaic: {} OCR lines from {} groups",
                         page.get(),
@@ -1129,6 +1260,16 @@ impl PreparedOcr {
             source_only.approved_pages.remove(&page);
             source_only.pages.remove(&page);
         }
+        source_only
+            .admissions
+            .retain(|(page, _), _| !composited.contains(page));
+        record_source_mappings(
+            engine,
+            &scanned,
+            &recognized,
+            &source_rasters,
+            &source_only.admissions,
+        )?;
         let mosaics =
             self.add_reconstructed_mosaics(engine, &scanned, &plans, &mut source_only, progress)?;
         progress(format!(

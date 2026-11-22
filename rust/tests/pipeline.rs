@@ -2,7 +2,7 @@
 
 #![cfg(feature = "pdf-integration")]
 
-use std::{cell::RefCell, fs};
+use std::{cell::RefCell, collections::BTreeSet, fs};
 
 use image::RgbImage;
 use pdf_redox_ocr::{
@@ -16,7 +16,10 @@ use pdf_redox_ocr::{
     pipeline::{PipelineObserver, PipelinePolicy, PreparedOcr, RasterMode, ResidualInput},
     rasterize::RenderPolicy,
     rasterize::render_rgb_page,
-    recognition::{PixelLine, RasterRecognition, RecognitionBackend, RecognitionCacheBudget},
+    recognition::{
+        PixelLine, RasterMappingScope, RasterRecognition, RecognitionBackend,
+        RecognitionCacheBudget,
+    },
 };
 use sha2::{Digest, Sha256};
 
@@ -87,6 +90,109 @@ impl RecognitionBackend for Recognizer {
         }]
         .into())
     }
+}
+
+/// Supply real image-crop evidence for the fixture predictions; the synthetic
+/// CTC positions are used only to exercise detector identity and mapping.
+struct Audited<B>(B);
+
+impl<B: RecognitionBackend> RecognitionBackend for Audited<B> {
+    fn model_profile(&self) -> &str {
+        self.0.model_profile()
+    }
+
+    fn recognize_pixels(&self, rgb: RgbImage) -> Result<RasterRecognition, Error> {
+        use num_traits::ToPrimitive;
+        let mut result = self.0.recognize_pixels(rgb.clone())?;
+        for line in &mut result.lines {
+            line.detection_index = line.detection_index * 7 + 11;
+            let [bottom_left, bottom_right, top_right, top_left] = line.quad;
+            let left = top_left
+                .0
+                .floor()
+                .to_u32()
+                .ok_or_else(|| Error::Invalid("invalid fixture crop".into()))?;
+            let top = top_left
+                .1
+                .floor()
+                .to_u32()
+                .ok_or_else(|| Error::Invalid("invalid fixture crop".into()))?;
+            let width = (top_right.0 - top_left.0)
+                .round()
+                .to_u32()
+                .ok_or_else(|| Error::Invalid("invalid fixture crop".into()))?;
+            let height = (bottom_left.1 - top_left.1)
+                .round()
+                .to_u32()
+                .ok_or_else(|| Error::Invalid("invalid fixture crop".into()))?;
+            assert!(bottom_right.0 >= bottom_left.0);
+            let crop = image::imageops::crop_imm(&rgb, left, top, width, height).to_image();
+            let batch = BatchGeometry::new([crop.dimensions()])?;
+            let columns = (0..line.text.chars().count()).collect::<Vec<_>>();
+            let measured = result
+                .character_audit
+                .observe(line, &crop, batch, &columns, batch.tensor_width)
+                .ok_or_else(|| Error::Invalid("no fixture character audit".into()))?;
+            measured.geometry = pdf_redox_ocr::crop_geometry::CropGeometry::from_quad(
+                line.quad,
+                rgb.dimensions(),
+                crop.dimensions(),
+            );
+        }
+        Ok(result)
+    }
+}
+
+fn check_mapped_observations(
+    result: &pdf_redox_ocr::pipeline::PipelineResult,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for mapping in &result.raster_character_mappings {
+        let audit = result
+            .character_audits
+            .iter()
+            .find(|audit| {
+                audit.rgb_sha256 == mapping.rgb_sha256 && audit.dimensions == mapping.dimensions
+            })
+            .ok_or("mapping without actual raster audit")?;
+        let (RasterMappingScope::NativeImage {
+            admitted_detection_indices: admitted,
+            ..
+        }
+        | RasterMappingScope::Mosaic {
+            admitted_detection_indices: admitted,
+            ..
+        }) = &mapping.scope
+        else {
+            continue;
+        };
+        let page = result
+            .draft
+            .pages
+            .iter()
+            .find(|p| p.page == mapping.page.get())
+            .ok_or("mapped page")?;
+        for id in admitted {
+            let observed = audit
+                .report
+                .lines
+                .iter()
+                .find(|line| line.detection_index == *id)
+                .ok_or("mapped detection")?;
+            let actual = mapping.to_pdf(observed.original.quad);
+            assert!(
+                page.lines
+                    .iter()
+                    .any(|line| line.text == observed.original.text
+                        && line
+                            .quad
+                            .iter()
+                            .zip(actual)
+                            .all(|(a, b)| (a.0 - b.0).abs() < 1e-8 && (a.1 - b.1).abs() < 1e-8)),
+                "admitted mapping lost its exact occurrence geometry"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -272,16 +378,19 @@ fn residual_conflict_or_inference_failure_retries_exact_ordinary_raster()
     let observation = pdf_redox_ocr::source_ocr::SourceObservation {
         width: 1200,
         height: 300,
-        lines: vec![OcrLine {
-            text: "CAPACITOR 47uF 16V".into(),
-            confidence: 0.99,
-            quad: [
-                Point(75.0, 120.0),
-                Point(1060.0, 120.0),
-                Point(1060.0, 200.0),
-                Point(75.0, 200.0),
-            ],
-            reviewed: false,
+        lines: vec![pdf_redox_ocr::source_ocr::SourceLine {
+            detection_index: 0,
+            line: OcrLine {
+                text: "CAPACITOR 47uF 16V".into(),
+                confidence: 0.99,
+                quad: [
+                    Point(75.0, 120.0),
+                    Point(1060.0, 120.0),
+                    Point(1060.0, 200.0),
+                    Point(75.0, 200.0),
+                ],
+                reviewed: false,
+            },
         }],
     };
     let conflict =
@@ -729,7 +838,7 @@ fn audit_binds_raw_source_observations_paints_and_admission_to_original_pdf()
     let result = PreparedOcr::open(&pdf, None, policy)?
         .recognize(&SelectiveRecognizer::default(), |_| {})?;
     let audit = serde_json::to_value(result.audit())?;
-    assert_eq!(audit["schema_version"], 17);
+    assert_eq!(audit["schema_version"], 18);
     assert_eq!(audit["pdf_sha256"], result.draft.pdf_sha256);
     assert_eq!(audit["model"], result.draft.model);
     assert_eq!(audit["policy"]["render"]["max_side"], 600);
@@ -1005,7 +1114,7 @@ fn distinct_appearances_are_bound_but_require_actual_renderer_visibility()
             .source_observations
             .get(paint)
             .ok_or("missing appearance")?;
-        assert_eq!(source.lines[0].text, expected);
+        assert_eq!(source.lines[0].line.text, expected);
     }
     assert!(result.draft.pages.iter().all(|page| page.lines.is_empty()));
     assert!(result.visibility.proofs.is_empty());
@@ -1219,9 +1328,7 @@ impl RecognitionBackend for MixedRegionRecognizer {
 #[test]
 fn mixed_composited_regions_admit_only_complete_nonoverlapping_lines()
 -> Result<(), Box<dyn std::error::Error>> {
-    use pdf_redox_ocr::{
-        pipeline::NativeImageDecoder, recognition::RasterMappingScope, region_ocr::RegionOutcome,
-    };
+    use pdf_redox_ocr::{pipeline::NativeImageDecoder, region_ocr::RegionOutcome};
     // Root-group image covers 40×20 points at 800×400 source pixels.
     // Vector paint elsewhere prevents image-only composited replacement.
     let bytes = support::pdf(&[
@@ -1313,5 +1420,217 @@ fn mixed_composited_regions_admit_only_complete_nonoverlapping_lines()
             assert!((32.0..=41.0).contains(&point.1), "{point:?}");
         }
     }
+    Ok(())
+}
+
+#[test]
+fn native_source_character_evidence_tracks_each_visible_paint_and_final_admission()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("selective.pdf");
+    fs::write(&path, selective_fixture())?;
+    let engine = Audited(SelectiveRecognizer::default());
+    let result = PreparedOcr::open(
+        &path,
+        None,
+        PipelinePolicy {
+            render: RenderPolicy {
+                max_side: 600,
+                dpi: 72,
+            },
+            ..policy()
+        },
+    )?
+    .recognize(&engine, |_| {})?;
+    assert_eq!(result.stats.nonoverlapping_image_lines_added, 3);
+    assert_eq!(result.character_audits.len(), 1);
+    assert_eq!(result.raster_character_mappings.len(), 3);
+    assert!(
+        result
+            .raster_character_mappings
+            .iter()
+            .all(|m| matches!(m.scope, RasterMappingScope::NativeImage { .. }))
+    );
+    assert_eq!(
+        result
+            .proposals
+            .iter()
+            .filter(|p| p.included_as_extra)
+            .map(|p| (p.page, p.paint_index, p.detection_index))
+            .collect::<BTreeSet<_>>(),
+        result
+            .raster_character_mappings
+            .iter()
+            .flat_map(|m| match &m.scope {
+                RasterMappingScope::NativeImage {
+                    paint_index,
+                    admitted_detection_indices,
+                } => admitted_detection_indices
+                    .iter()
+                    .map(|&id| (m.page.get(), *paint_index, id))
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect()
+    );
+    assert_eq!(
+        result
+            .raster_character_mappings
+            .iter()
+            .map(|m| m.rgb_sha256.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        1
+    );
+    assert!(
+        result
+            .proposals
+            .iter()
+            .any(|p| p.detection_index == 18 && p.included_as_extra)
+    );
+    assert!(result.proposals.iter().any(|p| !p.included_as_extra));
+    check_mapped_observations(&result)?;
+    Ok(())
+}
+
+#[test]
+fn accepted_mosaic_mappings_reuse_rgb_evidence_but_preserve_occurrence_geometry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("mosaics.pdf");
+    fs::write(&path, translated_mosaics_fixture())?;
+    let engine = Audited(Recognizer {
+        recognize_fallback: true,
+        ..Recognizer::default()
+    });
+    let result = PreparedOcr::open(
+        &path,
+        None,
+        PipelinePolicy {
+            recognition_cache: RecognitionCacheBudget::default(),
+            ..policy()
+        },
+    )?
+    .recognize(&engine, |_| {})?;
+    assert_eq!(result.stats.image_source_only_pages, 4);
+    assert_eq!(result.character_audits.len(), 2);
+    assert_eq!(result.raster_character_mappings.len(), 4);
+    for mapping in &result.raster_character_mappings {
+        assert_eq!(
+            mapping.scope,
+            RasterMappingScope::Mosaic {
+                group_index: 0,
+                admitted_detection_indices: BTreeSet::from([11])
+            }
+        );
+    }
+    assert_eq!(
+        result.raster_character_mappings[0].rgb_sha256,
+        result.raster_character_mappings[1].rgb_sha256
+    );
+    assert_ne!(
+        result.raster_character_mappings[0].raster_corners,
+        result.raster_character_mappings[1].raster_corners
+    );
+    check_mapped_observations(&result)?;
+    Ok(())
+}
+
+#[test]
+fn reused_native_source_character_audit_maps_to_each_admitted_image_only_page()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("source-only.pdf");
+    let samples = vec![0u8; 1200 * 300];
+    let bytes = support::pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 600 600] /Resources << /XObject << /Im 7 0 R >> >> >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Contents 5 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Contents 6 0 R >>".to_vec(),
+        support::stream("", b"q 480 0 0 120 30 40 cm /Im Do Q"),
+        support::stream("", b"q 0 480 -120 0 420 40 cm /Im Do Q"),
+        support::stream("/Type /XObject /Subtype /Image /Width 1200 /Height 300 /BitsPerComponent 8 /ColorSpace /DeviceGray", &samples),
+    ]);
+    fs::write(&path, bytes)?;
+    let result = PreparedOcr::open(&path, None, policy())?
+        .recognize(&Audited(Recognizer::default()), |_| {})?;
+    assert_eq!(result.stats.image_source_only_pages, 2);
+    assert_eq!(result.recognition.inference_calls, 1);
+    assert_eq!(result.character_audits.len(), 1);
+    assert_eq!(result.raster_character_mappings.len(), 2);
+    for mapping in &result.raster_character_mappings {
+        assert_eq!(
+            mapping.scope,
+            RasterMappingScope::NativeImage {
+                paint_index: 0,
+                admitted_detection_indices: BTreeSet::from([11])
+            }
+        );
+    }
+    assert_ne!(
+        result.raster_character_mappings[0].raster_corners,
+        result.raster_character_mappings[1].raster_corners
+    );
+    check_mapped_observations(&result)?;
+    Ok(())
+}
+
+#[test]
+fn rejected_mosaic_never_publishes_partial_group_mappings() -> Result<(), Box<dyn std::error::Error>>
+{
+    struct FailSecond(Recognizer);
+    impl RecognitionBackend for FailSecond {
+        fn model_profile(&self) -> &'static str {
+            "fixture incomplete mosaic"
+        }
+
+        fn recognize_pixels(&self, rgb: RgbImage) -> Result<RasterRecognition, Error> {
+            if self.0.calls.borrow().len() == 1 {
+                self.0.calls.borrow_mut().push(rgb.dimensions());
+                return Err(Error::Inference("second group failed".into()));
+            }
+            self.0.recognize_pixels(rgb)
+        }
+    }
+
+    let bytes = support::pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 480 240] /Group << /S /Transparency /CS /DeviceGray >> /Resources << /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        support::stream("", b"q 100 0 0 50 30 30 cm /Im Do Q q 100 0 0 50 300 130 cm /Im Do Q"),
+        support::stream("/Type /XObject /Subtype /Image /Width 400 /Height 200 /BitsPerComponent 8 /ColorSpace /DeviceGray", &vec![0;400*200]),
+    ]);
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("two-groups.pdf");
+    fs::write(&path, bytes)?;
+    let engine = Audited(FailSecond(Recognizer {
+        recognize_fallback: true,
+        ..Recognizer::default()
+    }));
+    let result = PreparedOcr::open(
+        &path,
+        None,
+        PipelinePolicy {
+            raster_mode: RasterMode::All,
+            // The fallback already has at least native-pitch detail, so no
+            // additional region pass is needed for this rollback fixture.
+            render: RenderPolicy {
+                max_side: 1920,
+                dpi: 72,
+            },
+            recognition_cache: RecognitionCacheBudget::DISABLED,
+            ..policy()
+        },
+    )?
+    .recognize(&engine, |_| {})?;
+    assert_eq!(result.stats.page_fallback_pages, 1);
+    assert_eq!(result.stats.image_source_only_pages, 0);
+    assert!(result.character_audits.len() >= 2);
+    assert_eq!(engine.0.0.calls.borrow().len(), 3);
+    assert_eq!(result.raster_character_mappings.len(), 1);
+    assert!(matches!(
+        result.raster_character_mappings[0].scope,
+        RasterMappingScope::WholePage { residual: false }
+    ));
     Ok(())
 }

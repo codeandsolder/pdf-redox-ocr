@@ -37,16 +37,19 @@ fn source_isolation_accepts_visible_and_rejects_opaque_occlusion()
     let image = SourceObservation {
         width: 1200,
         height: 300,
-        lines: vec![OcrLine {
-            text: "CAPACITOR 47uF 16V".to_owned(),
-            confidence: 0.99,
-            quad: [
-                Point(75.0, 120.0),
-                Point(1060.0, 120.0),
-                Point(1060.0, 200.0),
-                Point(75.0, 200.0),
-            ],
-            reviewed: false,
+        lines: vec![pdf_redox_ocr::source_ocr::SourceLine {
+            detection_index: 0,
+            line: OcrLine {
+                text: "CAPACITOR 47uF 16V".to_owned(),
+                confidence: 0.99,
+                quad: [
+                    Point(75.0, 120.0),
+                    Point(1060.0, 120.0),
+                    Point(1060.0, 200.0),
+                    Point(75.0, 200.0),
+                ],
+                reviewed: false,
+            },
         }],
     };
     let recognized = BTreeMap::from([(first.source_id.clone(), image)]);
@@ -126,12 +129,18 @@ fn invalid_native_recognition_retains_page_fallback() -> Result<(), Box<dyn std:
         SourceObservation {
             width: 1200,
             height: 300,
-            lines: vec![invalid_line.clone()],
+            lines: vec![pdf_redox_ocr::source_ocr::SourceLine {
+                detection_index: 0,
+                line: invalid_line.clone(),
+            }],
         },
         SourceObservation {
             width: 1199,
             height: 300,
-            lines: vec![invalid_line],
+            lines: vec![pdf_redox_ocr::source_ocr::SourceLine {
+                detection_index: 0,
+                line: invalid_line,
+            }],
         },
     ] {
         let result = prove_mixed_source_text(
