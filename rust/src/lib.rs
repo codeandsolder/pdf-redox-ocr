@@ -10,6 +10,7 @@ pub mod catalog_evidence;
 pub mod character_alignment;
 pub mod crop_geometry;
 pub mod crop_repair;
+pub mod ctc_evidence;
 #[cfg(feature = "pdf-integration")]
 pub mod direct_images;
 mod disjoint_set;

@@ -8,6 +8,7 @@ use crate::{
     Error,
     crop_geometry::CropGeometry,
     crop_repair::BodyPrediction,
+    ctc_evidence::CtcOutcome,
     disjoint_set::DisjointSet,
     glyph_appearance::GlyphShape,
     glyph_confirmation::{ConfirmationDecision, ConfirmationPolicy},
@@ -118,6 +119,8 @@ pub struct CharacterLineAudit {
     pub tensor_width: usize,
     pub resized_width: usize,
     pub sequence_length: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ctc: Option<CtcOutcome>,
     pub polarity: PolarityEvidence,
     pub components: Vec<PixelRegion>,
     pub runs: Vec<InkGroup>,
@@ -131,6 +134,8 @@ pub struct ConfirmedPrediction {
     pub tensor_width: usize,
     pub resized_width: usize,
     pub sequence_length: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ctc: Option<CtcOutcome>,
     pub anchors: Vec<CharacterAnchor>,
     pub decision: ConfirmationDecision,
 }
@@ -385,6 +390,7 @@ impl CharacterLineAudit {
             tensor_width: batch.tensor_width,
             resized_width: batch.resized_width(self.crop_dimensions)?,
             sequence_length: length,
+            ctc: None,
             anchors,
             decision,
         })
@@ -443,6 +449,7 @@ impl CharacterLineAudit {
             tensor_width: batch.tensor_width,
             resized_width,
             sequence_length,
+            ctc: None,
             polarity,
             components: isolation.components,
             runs: isolation.groups,
