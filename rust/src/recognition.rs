@@ -94,6 +94,33 @@ pub enum RasterMappingScope {
     },
 }
 
+/// Location of one independently recognized raster within a PDF page.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RasterLocation {
+    WholePage { residual: bool },
+    Region { seed_paint_index: u32 },
+}
+
+impl RasterMappingScope {
+    /// The occurrence identity is independent of which detections were admitted.
+    #[must_use]
+    pub const fn location(&self) -> RasterLocation {
+        match self {
+            Self::WholePage { residual } => RasterLocation::WholePage {
+                residual: *residual,
+            },
+            Self::Region {
+                seed_paint_index, ..
+            } => RasterLocation::Region {
+                seed_paint_index: *seed_paint_index,
+            },
+        }
+    }
+}
+
 /// Identifies an actual page-space raster occurrence, including cached results.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct RasterCharacterMapping {

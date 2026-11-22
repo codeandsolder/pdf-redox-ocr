@@ -12,7 +12,7 @@ use crate::{
     character_alignment::RunAlignment,
     geometry::{Point, Quad, QuadBounds},
     polygon::{area, clip_convex},
-    recognition::{RasterCharacterAudit, RasterCharacterMapping},
+    recognition::{RasterCharacterAudit, RasterCharacterMapping, RasterLocation},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -25,6 +25,8 @@ pub struct OccurrenceId {
 #[derive(Clone, Debug, Serialize)]
 pub struct CharacterVote {
     pub occurrence: OccurrenceId,
+    pub raster_location: RasterLocation,
+    pub raster_sha256: String,
     pub detection_index: usize,
     pub character_index: usize,
     pub character: char,
@@ -222,6 +224,8 @@ fn collect_votes(
             };
             let vote = CharacterVote {
                 occurrence: occurrence.clone(),
+                raster_location: mapping.scope.location(),
+                raster_sha256: mapping.rgb_sha256.clone(),
                 detection_index: line.detection_index,
                 character_index,
                 character: anchor.character,

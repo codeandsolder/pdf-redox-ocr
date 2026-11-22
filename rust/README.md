@@ -712,9 +712,10 @@ are excluded. All minimum edit-distance alignments must agree on the
 reviewed label of an emitted scalar, and the original CTC/ink mapping
 must independently identify a unique unclipped ink group. Whitespace is
 excluded from scalar alignment without case folding. Each exported
-sample retains its source PDF and crop identity, actual prediction,
+sample retains its source PDF, scoped raster occurrence and crop identity, actual prediction,
 line score, page, ink geometry and 24x24 grayscale ink coverage together
-with the original dimensions. No reference text is applied to the draft.
+with the original dimensions. Schema 2 distinguishes raster-local detector
+identities across regional crops on the same page. No reference text is applied to the draft.
 
 Compare held-out pages using the model-free matcher:
 

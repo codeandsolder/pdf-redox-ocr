@@ -10,7 +10,7 @@ use crate::{
     geometry::Quad,
     glyph_appearance::GlyphShape,
     quality_eval::{GroundTruth, contains, validate},
-    recognition::{RasterCharacterAudit, RasterCharacterMapping, RasterMappingScope},
+    recognition::{RasterCharacterAudit, RasterCharacterMapping, RasterLocation},
 };
 
 /// One independently transcribed character and the primary model's actual
@@ -18,6 +18,8 @@ use crate::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReviewedGlyph {
     pub page: u32,
+    pub raster_location: RasterLocation,
+    pub raster_sha256: String,
     pub crop_sha256: String,
     pub detection_index: usize,
     pub character_index: usize,
@@ -150,7 +152,7 @@ fn collect_lines<'a>(
             }
             if page.iter().any(|entry| {
                 entry.mapping.rgb_sha256 == mapping.rgb_sha256
-                    && entry.mapping.scope == mapping.scope
+                    && entry.mapping.scope.location() == mapping.scope.location()
                     && entry.line.detection_index == line.detection_index
             }) {
                 continue;
@@ -209,6 +211,8 @@ fn collect_glyphs(
         };
         glyphs.push(ReviewedGlyph {
             page: mapped.mapping.page.get(),
+            raster_location: mapped.mapping.scope.location(),
+            raster_sha256: mapped.mapping.rgb_sha256.clone(),
             crop_sha256: line.crop_sha256.clone(),
             detection_index: line.detection_index,
             character_index,
@@ -242,8 +246,7 @@ impl ReviewedGlyphBank {
         };
         let mut glyphs = Vec::new();
         let mut matched =
-            BTreeMap::<(u32, &str, &RasterMappingScope, usize), Vec<(&MappedLine<'_>, &str)>>::new(
-            );
+            BTreeMap::<(u32, &str, RasterLocation, usize), Vec<(&MappedLine<'_>, &str)>>::new();
         for sample in &reference.samples {
             let mut candidates = pages
                 .get(&sample.page)
@@ -262,7 +265,7 @@ impl ReviewedGlyphBank {
                 .entry((
                     sample.page,
                     &line.mapping.rgb_sha256,
-                    &line.mapping.scope,
+                    line.mapping.scope.location(),
                     line.line.detection_index,
                 ))
                 .or_default()
@@ -278,7 +281,7 @@ impl ReviewedGlyphBank {
         }
         stats.labeled_glyphs = glyphs.len();
         Ok(Self {
-            schema_version: 1,
+            schema_version: 2,
             pdf_sha256: draft.pdf_sha256.clone(),
             model: draft.model.clone(),
             reference_provenance: reference.provenance.clone(),
