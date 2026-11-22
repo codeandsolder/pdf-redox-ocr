@@ -36,7 +36,7 @@ fn interpolate(a: Point, b: Point, t: f64) -> Point {
     Point((b.0 - a.0).mul_add(t, a.0), (b.1 - a.1).mul_add(t, a.1))
 }
 
-fn convex(quad: &Quad) -> bool {
+pub fn convex(quad: &Quad) -> bool {
     let mut positive = false;
     for index in 0..4 {
         let [a, b, c] = [quad[index], quad[(index + 1) % 4], quad[(index + 2) % 4]];

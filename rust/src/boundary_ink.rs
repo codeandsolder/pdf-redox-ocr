@@ -149,6 +149,197 @@ pub(crate) fn detect_boundaries(
         .collect()
 }
 
+// Unlike production compact-mark repair, this research path can propose
+// entire adjacent glyphs. It reports their geometry, not their ownership or
+// text. The caller must resolve every competing observation.
+struct EdgeRun {
+    bounds: InkBounds,
+    indices: Vec<usize>,
+    inside: bool,
+    outside: bool,
+}
+
+fn edge_runs(components: &[&PixelRegion], observation: InkBounds) -> Vec<EdgeRun> {
+    let h = height(observation);
+    let mut eligible = components
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            let b = c.bounds;
+            !c.touches_line_edge
+                && b.top >= observation.top
+                && b.bottom <= observation.bottom
+                && c.area_pixels >= 2
+                && width(b) <= h
+                && height(b) <= h
+        })
+        .collect::<Vec<_>>();
+    eligible.sort_unstable_by_key(|&(index, c)| (c.bounds.left, c.bounds.right, index));
+    let mut runs: Vec<EdgeRun> = Vec::new();
+    for (index, component) in eligible {
+        let inside = component.observation_support.inside_pixels > 0;
+        let outside = component.observation_support.outside_pixels > 0;
+        if let Some(run) = runs.last_mut()
+            && component.bounds.left < run.bounds.right
+        {
+            run.bounds = run.bounds.union(component.bounds);
+            run.indices.push(index);
+            run.inside |= inside;
+            run.outside |= outside;
+        } else {
+            runs.push(EdgeRun {
+                bounds: component.bounds,
+                indices: vec![index],
+                inside,
+                outside,
+            });
+        }
+    }
+    runs
+}
+
+// A positive outward axis for both edges, avoiding signed coordinate
+// conversions. All bounds are in the very same measured sample frame.
+const fn outward(bounds: InkBounds, edge: LeaderEdge, sample_width: u32) -> (u32, u32) {
+    match edge {
+        LeaderEdge::Left => (sample_width - bounds.right, sample_width - bounds.left),
+        LeaderEdge::Right => (bounds.left, bounds.right),
+    }
+}
+
+fn extension_margin(
+    components: &[&PixelRegion],
+    selected: &std::collections::BTreeSet<usize>,
+    observation: InkBounds,
+    edge: LeaderEdge,
+    sample_width: u32,
+    far: u32,
+) -> Option<u32> {
+    let (_, original_edge) = outward(observation, edge, sample_width);
+    let mut outer = far
+        .saturating_add(height(observation).div_ceil(6))
+        .min(sample_width);
+    for (index, c) in components.iter().enumerate() {
+        if selected.contains(&index)
+            || c.observation_support.inside_pixels > 0
+            || c.bounds.top >= observation.bottom
+            || c.bounds.bottom <= observation.top
+        {
+            continue;
+        }
+        let (near, end) = outward(c.bounds, edge, sample_width);
+        // Do not cross a wholly outside component that is not part of the
+        // proposed run chain. Already intersected components are context.
+        if near < far && end > original_edge {
+            return None;
+        }
+        if near >= far {
+            outer = outer.min(far + (near - far) / 2);
+        }
+    }
+    (outer > far).then_some(outer)
+}
+
+fn candidates_on_edge(
+    components: &[&PixelRegion],
+    runs: &[EdgeRun],
+    observation: InkBounds,
+    edge: LeaderEdge,
+    sample_width: u32,
+) -> Vec<BoundaryEvidence> {
+    let h = height(observation);
+    let (_, original_edge) = outward(observation, edge, sample_width);
+    let Some(body_end) = runs
+        .iter()
+        .filter(|run| run.inside)
+        .map(|run| outward(run.bounds, edge, sample_width).1)
+        .max()
+    else {
+        return Vec::new();
+    };
+    let mut candidates = runs
+        .iter()
+        .filter(|run| outward(run.bounds, edge, sample_width).1 > original_edge)
+        .collect::<Vec<_>>();
+    candidates.sort_unstable_by_key(|run| outward(run.bounds, edge, sample_width));
+    let mut previous = body_end.min(original_edge);
+    let mut selected = std::collections::BTreeSet::new();
+    let mut initial_gap = None;
+    let mut result = Vec::new();
+    for run in candidates {
+        let (near, far) = outward(run.bounds, edge, sample_width);
+        let gap = near.saturating_sub(previous);
+        if gap > h - h.div_ceil(4)
+            || far - original_edge > h.saturating_mul(2)
+            || width(run.bounds) > h
+        {
+            break;
+        }
+        if !run.outside {
+            continue;
+        }
+        let body_gap_pixels = *initial_gap.get_or_insert(gap);
+        selected.extend(run.indices.iter().copied());
+        previous = far;
+        let Some(outer) =
+            extension_margin(components, &selected, observation, edge, sample_width, far)
+        else {
+            continue;
+        };
+        let mut expanded = observation;
+        match edge {
+            LeaderEdge::Left => expanded.left = sample_width - outer,
+            LeaderEdge::Right => expanded.right = outer,
+        }
+        result.push(BoundaryEvidence {
+            edge,
+            component_indices: selected.iter().copied().collect(),
+            expanded,
+            body_gap_pixels,
+        });
+    }
+    result
+}
+
+/// Enumerate local source-ink expansions on either measured reading-axis edge.
+///
+/// Every proposal is a contiguous chain of local, fully sampled components
+/// with real outside ink, including full-size glyphs and detached marks.
+/// It is geometry-only research evidence: ownership and recognition are
+/// independent checks, and no expansion is automatically accepted.
+///
+/// Invalid or empty geometry yields no candidates.
+#[must_use]
+pub fn audit_edge_extensions<'a>(
+    components: impl IntoIterator<Item = &'a PixelRegion>,
+    observation: InkBounds,
+    sample_width: u32,
+) -> Vec<BoundaryEvidence> {
+    let components = components.into_iter().collect::<Vec<_>>();
+    if observation.left >= observation.right
+        || observation.top >= observation.bottom
+        || observation.right > sample_width
+        || height(observation) < 6
+        || components.iter().any(|c| {
+            let b = c.bounds;
+            b.left >= b.right || b.top >= b.bottom || b.right > sample_width
+        })
+    {
+        return Vec::new();
+    }
+    let runs = edge_runs(&components, observation);
+    if !runs
+        .iter()
+        .any(|run| run.inside && height(run.bounds) >= height(observation).div_ceil(2))
+    {
+        return Vec::new();
+    }
+    [LeaderEdge::Left, LeaderEdge::Right]
+        .into_iter()
+        .flat_map(|edge| candidates_on_edge(&components, &runs, observation, edge, sample_width))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,11 +357,79 @@ mod tests {
             touches_line_edge: false,
             observation_support: ObservationSupport {
                 inside_pixels: inside,
-                outside_pixels: 0,
+                outside_pixels: 8_u64.saturating_sub(inside),
                 touches_observation_edge: false,
             },
         }
     }
+    #[test]
+    fn full_glyph_extensions_stop_before_unrelated_components() {
+        let observation = InkBounds {
+            left: 100,
+            top: 100,
+            right: 185,
+            bottom: 160,
+        };
+        let components = [
+            mark(118, 109, 135, 152, 8),
+            mark(142, 109, 167, 152, 8),
+            mark(177, 146, 182, 152, 8),
+            mark(187, 109, 217, 152, 0),
+            mark(223, 131, 285, 154, 0),
+            mark(226, 119, 229, 122, 0),
+        ];
+        let candidates = audit_edge_extensions(&components, observation, 285);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].edge, LeaderEdge::Right);
+        assert_eq!(candidates[0].component_indices, [3]);
+        assert_eq!(candidates[0].expanded.right, 220);
+        // Reflect every bound, preserving the same physical proposal and gap.
+        let reflected = components.map(|mut c| {
+            let (l, r) = (c.bounds.left, c.bounds.right);
+            c.bounds.left = 285 - r;
+            c.bounds.right = 285 - l;
+            c
+        });
+        let reflected_observation = InkBounds {
+            left: 100,
+            right: 185,
+            ..observation
+        };
+        let left = audit_edge_extensions(&reflected, reflected_observation, 285);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].edge, LeaderEdge::Left);
+        assert_eq!(left[0].component_indices, [3]);
+        assert_eq!(left[0].expanded.left, 65);
+    }
+
+    #[test]
+    fn chain_preserves_multiple_edge_tokens_and_refuses_intervening_ink() {
+        let observation = InkBounds {
+            left: 100,
+            top: 100,
+            right: 181,
+            bottom: 160,
+        };
+        let base = [
+            mark(118, 112, 133, 157, 8),
+            mark(141, 109, 170, 157, 8),
+            mark(178, 151, 183, 157, 4),
+            mark(191, 109, 220, 157, 0),
+        ];
+        let both = audit_edge_extensions(&base, observation, 281);
+        assert_eq!(both.len(), 2);
+        assert_eq!(both[0].component_indices, [2]);
+        assert_eq!(both[0].expanded.right, 187);
+        assert_eq!(both[1].component_indices, [2, 3]);
+        assert_eq!(both[1].expanded.right, 230);
+        let mut blocked = base.to_vec();
+        blocked.push(mark(186, 80, 189, 180, 0));
+        let only_period = audit_edge_extensions(&blocked, observation, 281);
+        assert_eq!(only_period.len(), 1);
+        assert_eq!(only_period[0].component_indices, [2]);
+        assert_eq!(only_period[0].expanded.right, 184);
+    }
+
     #[test]
     fn local_ink_not_neighboring_label_authorizes_extension() {
         let b = InkBounds {
