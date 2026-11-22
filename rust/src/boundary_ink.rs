@@ -220,22 +220,23 @@ fn extension_margin(
         .saturating_add(height(observation).div_ceil(6))
         .min(sample_width);
     for (index, c) in components.iter().enumerate() {
-        if selected.contains(&index)
-            || c.observation_support.inside_pixels > 0
-            || c.bounds.top >= observation.bottom
-            || c.bounds.bottom <= observation.top
-        {
+        if selected.contains(&index) || c.observation_support.inside_pixels > 0 {
             continue;
         }
-        let (near, end) = outward(c.bounds, edge, sample_width);
-        // Do not cross a wholly outside component that is not part of the
-        // proposed run chain. Already intersected components are context.
-        if near < far && end > original_edge {
+        let near = match edge {
+            LeaderEdge::Left => c.band_neighbors.left.map(|x| sample_width - x),
+            LeaderEdge::Right => c.band_neighbors.right,
+        };
+        let Some(near) = near.filter(|&near| near >= original_edge) else {
+            continue;
+        };
+        // A table frame can surround the observation without putting ink
+        // anywhere in the extension. Only actual pixels in this band are
+        // obstacles; a component's bounding rectangle is not foreground.
+        if near < far {
             return None;
         }
-        if near >= far {
-            outer = outer.min(far + (near - far) / 2);
-        }
+        outer = outer.min(far + (near - far) / 2);
     }
     (outer > far).then_some(outer)
 }
@@ -355,6 +356,10 @@ mod tests {
             area_pixels: 8,
             centroid: [0., 0.],
             touches_line_edge: false,
+            band_neighbors: crate::pixel_regions::BandNeighbors {
+                left: Some(right),
+                right: Some(left),
+            },
             observation_support: ObservationSupport {
                 inside_pixels: inside,
                 outside_pixels: 8_u64.saturating_sub(inside),
@@ -388,6 +393,8 @@ mod tests {
             let (l, r) = (c.bounds.left, c.bounds.right);
             c.bounds.left = 285 - r;
             c.bounds.right = 285 - l;
+            c.band_neighbors.left = Some(285 - l);
+            c.band_neighbors.right = Some(285 - r);
             c
         });
         let reflected_observation = InkBounds {
@@ -428,6 +435,41 @@ mod tests {
         assert_eq!(only_period.len(), 1);
         assert_eq!(only_period[0].component_indices, [2]);
         assert_eq!(only_period[0].expanded.right, 184);
+    }
+
+    #[test]
+    fn enclosing_grid_does_not_obstruct_blank_band_but_real_stroke_does() -> Result<(), crate::Error>
+    {
+        let observation = InkBounds {
+            left: 15,
+            top: 10,
+            right: 30,
+            bottom: 30,
+        };
+        let raster = image::GrayImage::from_fn(60, 40, |x, y| {
+            let frame = x == 0 || x == 59 || y == 0 || y == 39;
+            let body = (18..26).contains(&x) && (12..28).contains(&y);
+            let next = (32..40).contains(&x) && (12..28).contains(&y);
+            image::Luma([if frame || body || next { 0 } else { 255 }])
+        });
+        let measure = |im: &image::GrayImage| {
+            crate::pixel_regions::regions(
+                im,
+                128,
+                crate::pixel_regions::PixelClass::Ink,
+                observation,
+            )
+        };
+        let result = audit_edge_extensions(&measure(&raster)?, observation, 60);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].edge, LeaderEdge::Right);
+        assert_eq!(result[0].expanded.right, 44);
+        let mut crossed = raster;
+        for y in 0..40 {
+            crossed.put_pixel(31, y, image::Luma([0]));
+        }
+        assert!(audit_edge_extensions(&measure(&crossed)?, observation, 60).is_empty());
+        Ok(())
     }
 
     #[test]
