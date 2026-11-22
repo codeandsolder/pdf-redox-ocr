@@ -93,6 +93,8 @@ pub enum RunAlignment {
     NoInk,
     /// More characters share the ink than can be separately identified.
     NoInjectiveAssignment,
+    /// A potentially visible neighboring hypothesis can also claim this run.
+    UncertainNeighbor,
     /// At least two ordered, injective assignments are possible.
     Ambiguous {
         first: usize,

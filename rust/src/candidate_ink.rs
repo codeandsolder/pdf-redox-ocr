@@ -39,6 +39,7 @@ pub struct SourceInk {
 pub struct CandidateAnchor {
     #[serde(flatten)]
     pub anchor: CharacterAnchor,
+    /// Outer envelope of the entry interval, mode, and monotone token order.
     pub entry_interval: [f64; 2],
 }
 
@@ -176,7 +177,7 @@ impl SourceInk {
                 reason: "inconsistent CTC token sequence",
             };
         }
-        let Some(cells) = hypothesis
+        let Some(mut cells) = hypothesis
             .text
             .chars()
             .zip(tokens)
@@ -187,20 +188,48 @@ impl SourceInk {
                 reason: "invalid CTC token interval",
             };
         };
+        // First-entry quantiles are monotone on complete paths, but the
+        // marginal modes need not be. Widen to a monotone outer envelope
+        // rather than invent spatial order from those modes.
+        for index in (1..cells.len()).rev() {
+            cells[index - 1].interval[0] =
+                cells[index - 1].interval[0].min(cells[index].interval[0]);
+        }
+        for index in 1..cells.len() {
+            cells[index].interval[1] = cells[index].interval[1].max(cells[index - 1].interval[1]);
+        }
         let mut anchors = anchor_candidates(&cells, &self.groups);
+        let width = f64::from(self.dimensions.0);
+        let mut possible_padding_claims = std::collections::BTreeSet::new();
+        let mut excluded = Vec::new();
+        for (anchor, cell) in anchors.iter_mut().zip(&cells) {
+            let inside = cell.interval.iter().all(|x| (0.0..width).contains(x));
+            if !cell.character.is_whitespace() && !inside {
+                // Do not force a partly padded token to consume a visible
+                // glyph. Its possible claim still prevents other tokens
+                // from presenting that same ink as uniquely identified.
+                let runs = std::mem::take(&mut anchor.candidate_runs);
+                if cell.interval[0] < width && cell.interval[1] >= 0.0 {
+                    possible_padding_claims.extend(runs.iter().copied());
+                }
+                excluded.push(Some(runs));
+            } else {
+                excluded.push(None);
+            }
+        }
         align_runs(&mut anchors, self.groups.len(), self.dimensions.0);
         let anchors = anchors
             .into_iter()
             .zip(cells)
-            .map(|(mut anchor, cell)| {
-                let inside = cell
-                    .interval
-                    .iter()
-                    .all(|x| (0.0..f64::from(self.dimensions.0)).contains(x));
-                if !cell.character.is_whitespace() && !inside {
-                    // Even when the modal entry falls inside the source, an
-                    // interval extending into padding cannot prove a visible run.
+            .zip(excluded)
+            .map(|((mut anchor, cell), excluded)| {
+                if let Some(runs) = excluded {
+                    anchor.candidate_runs = runs;
                     anchor.alignment = RunAlignment::Padding;
+                } else if let RunAlignment::Unique { run } = anchor.alignment
+                    && possible_padding_claims.contains(&run)
+                {
+                    anchor.alignment = RunAlignment::UncertainNeighbor;
                 }
                 CandidateAnchor {
                     anchor,
@@ -298,6 +327,29 @@ mod tests {
             return Err(Error::Invalid("fixture mapping".into()));
         };
         assert_eq!(anchors[0].anchor.alignment, RunAlignment::Padding);
+        Ok(())
+    }
+
+    #[test]
+    fn partially_padded_token_does_not_prove_or_steal_neighbor_ink() -> Result<(), Error> {
+        let source = source()?;
+        let geometry = ViewGeometry::new((100, 20), (100, 20), 80)
+            .ok_or_else(|| Error::Invalid("fixture geometry".into()))?;
+        let h = hypothesis(
+            "ABC",
+            vec![
+                token(1, 10, [9, 11]),
+                token(2, 45, [44, 46]),
+                token(3, 65, [45, 70]),
+            ],
+        );
+        let CandidateMapping::Mapped { anchors } = source.map_hypothesis(&geometry, &h) else {
+            return Err(Error::Invalid("fixture mapping".into()));
+        };
+        assert_eq!(anchors[0].anchor.alignment, RunAlignment::Unique { run: 0 });
+        assert_eq!(anchors[1].anchor.alignment, RunAlignment::UncertainNeighbor);
+        assert_eq!(anchors[2].anchor.alignment, RunAlignment::Padding);
+        assert!(anchors[2].anchor.candidate_runs.contains(&1));
         Ok(())
     }
 
