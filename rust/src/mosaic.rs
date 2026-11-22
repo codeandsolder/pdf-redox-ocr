@@ -156,7 +156,7 @@ fn native_axes(paint: &ImagePaint, mapper: DisplayMapper) -> Option<MosaicAxes> 
 
 /// Composite-only image effects can be rendered without interpreting
 /// the source samples ourselves. Unknown source geometry remains unsupported.
-fn compositor_handles_reason(reason: &str) -> bool {
+pub(crate) fn compositor_handles_reason(reason: &str) -> bool {
     matches!(
         reason,
         "source_alpha_or_color_key_requires_compositing"

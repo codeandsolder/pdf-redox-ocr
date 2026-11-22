@@ -36,6 +36,7 @@ use crate::{
         PageCharacterMapping, RasterCharacterAudit, RasterRepairAudit, RecognitionBackend,
         RecognitionCacheBudget, RecognitionSession, RecognitionStats,
     },
+    region_ocr::{RegionAudit, RegionPass},
     source_appearances::{PaintAppearances, SourceAppearance},
     source_ocr::{
         SourceObservation, SourceOnlyResult, source_image_mapper, source_only_candidates,
@@ -162,6 +163,8 @@ pub struct PipelineResult {
     pub source_observations: PaintAppearances<SourceObservation>,
     pub direct_decode: Option<DirectDecodeStats>,
     pub source_rasters: PaintAppearances<SourceRasterIdentity>,
+    /// Actual high-detail composited crop inputs and supplementary admission decisions.
+    pub regional_ocr: Vec<RegionAudit>,
 }
 
 /// The disposition of a fully verified source-suppression alternative.
@@ -359,6 +362,7 @@ pub struct PipelineAudit<'a> {
     paints: &'a PaintReport,
     visibility: &'a MixedVisibility,
     proposals: &'a [MergeProposal],
+    regional_ocr: &'a [RegionAudit],
 }
 
 impl<'a> PipelineAudit<'a> {
@@ -397,7 +401,7 @@ impl PipelineResult {
     #[must_use]
     pub const fn audit(&self) -> PipelineAudit<'_> {
         PipelineAudit {
-            schema_version: 15,
+            schema_version: 16,
             preparation: None,
             pdf_sha256: self.draft.pdf_sha256.as_str(),
             model: self.draft.model.as_str(),
@@ -417,6 +421,7 @@ impl PipelineResult {
             paints: &self.paints,
             visibility: &self.visibility,
             proposals: self.proposals.as_slice(),
+            regional_ocr: self.regional_ocr.as_slice(),
         }
     }
 }
@@ -615,7 +620,7 @@ impl PreparedOcr {
             ),
             fallback,
         );
-        let (draft, stats, proposals) = merge_ocr(MergeInput {
+        let (mut draft, mut stats, proposals) = merge_ocr(MergeInput {
             pdf: &self.pdf,
             selected: &self.selected,
             raster: &raster_draft,
@@ -626,6 +631,21 @@ impl PreparedOcr {
             visibility_proofs: &visibility.proofs,
             threshold: self.policy.minimum_confidence,
         })?;
+        let regional_ocr = RegionPass {
+            pdf: &self.pdf,
+            document: &self.doc,
+            paints: &prepared.scanned,
+            routes: &prepared.routes,
+            policy: self.policy,
+        }
+        .recognize(&mut session, &mut draft)?;
+        stats.nonoverlapping_region_lines_added =
+            regional_ocr.iter().map(RegionAudit::admitted).sum();
+        observer.message(format!(
+            "composited regions: {} attempts, {} additional labels",
+            regional_ocr.len(),
+            stats.nonoverlapping_region_lines_added
+        ));
         observer.message(format!(
             "OCR merge: {} native-only pages, {} source-only pages, {} fallback pages, {} verified native labels added",
             stats.native_only_pages,
@@ -658,6 +678,7 @@ impl PreparedOcr {
             source_observations: prepared.recognized,
             direct_decode: prepared.direct_decode,
             source_rasters: prepared.source_rasters,
+            regional_ocr,
         })
     }
 
