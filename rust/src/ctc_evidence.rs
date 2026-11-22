@@ -2,7 +2,8 @@
 //!
 //! The greedy path remains the production observation. Prefix search sums
 //! distinct retained blank/nonblank paths rather than ranking single frames.
-//! Pruning omits probability mass, so beam weights are lower bounds, not
+//! Row-level pruning limits new prefixes, not transitions into retained
+//! prefixes. Beam pruning still omits probability mass, so weights are lower bounds, not
 //! calibrated probabilities of transcription correctness.
 
 use std::collections::BTreeMap;
@@ -114,6 +115,10 @@ impl Mass {
     fn total(self) -> f64 {
         self.blank + self.nonblank
     }
+
+    fn extension(self, repeated: bool) -> f64 {
+        if repeated { self.blank } else { self.total() }
+    }
 }
 
 type Prefixes = BTreeMap<Vec<usize>, Mass>;
@@ -137,30 +142,42 @@ impl PrefixBeam {
         }
     }
 
-    fn step(&mut self, blank: f32, classes: &[ClassScore]) -> Result<(), Error> {
+    fn step(&mut self, row: &[f32], classes: &[ClassScore]) -> Result<(), Error> {
         let mut next = Prefixes::new();
-        for (prefix, mass) in std::mem::take(&mut self.paths) {
-            let retained = &mut next.entry(prefix.clone()).or_default().blank;
-            *retained = mass.total().mul_add(f64::from(blank), *retained);
+        // Keep every transition whose destination is an already retained
+        // prefix, even when its final class is outside the row's top classes.
+        for (prefix, &mass) in &self.paths {
+            let nonblank = prefix.split_last().map_or(0.0, |(&last, parent)| {
+                let extend = self.paths.get(parent).map_or(0.0, |parent_mass| {
+                    parent_mass.extension(parent.last() == Some(&last))
+                });
+                (mass.nonblank + extend) * f64::from(row[last])
+            });
+            next.insert(
+                prefix.clone(),
+                Mass {
+                    blank: mass.total() * f64::from(row[0]),
+                    nonblank,
+                },
+            );
+        }
+        // Only the creation of previously unretained prefixes needs the
+        // row-class limit. Contributions from distinct parents cannot
+        // overlap: removing the final class identifies the unique parent.
+        for (prefix, &mass) in &self.paths {
             for class in classes {
                 let index = class.class_index;
                 if index == 0 || class.probability == 0.0 {
                     continue;
                 }
-                let probability = f64::from(class.probability);
-                // A repeated nonblank class collapses unless preceded by blank.
-                let extend = if prefix.last() == Some(&index) {
-                    let retained = &mut next.entry(prefix.clone()).or_default().nonblank;
-                    *retained = mass.nonblank.mul_add(probability, *retained);
-                    mass.blank
-                } else {
-                    mass.total()
-                };
+                let extend = mass.extension(prefix.last() == Some(&index));
                 if extend > 0.0 {
                     let mut longer = prefix.clone();
                     longer.push(index);
-                    let retained = &mut next.entry(longer).or_default().nonblank;
-                    *retained = extend.mul_add(probability, *retained);
+                    next.entry(longer).or_insert_with(|| Mass {
+                        blank: 0.0,
+                        nonblank: extend * f64::from(class.probability),
+                    });
                 }
             }
         }
@@ -235,7 +252,7 @@ impl CtcEvidence {
             let classes = top_classes(row, labels)?;
             let winner = classes.first().ok_or_else(|| invalid("empty CTC column"))?;
             let index = winner.class_index;
-            beam.step(row[0], &classes)?;
+            beam.step(row, &classes)?;
             if index != 0 && previous != index {
                 greedy_text.push(labels[index]);
                 emissions.push(EmissionEvidence {
@@ -303,6 +320,74 @@ mod tests {
             assert!((entry.log_mass_lower_bound.exp() - mass[&entry.classes]).abs() < 1e-12);
         }
         assert!(evidence.hypotheses.iter().any(|h| h.text == "AA"));
+        Ok(())
+    }
+
+    #[test]
+    fn row_pruning_preserves_all_transitions_into_retained_prefixes() -> Result<(), Error> {
+        let labels = ['\0', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
+        let first = [0.2, 0.8, 0., 0., 0., 0., 0., 0., 0., 0., 0.];
+        let second = [
+            0.2, 0.008, 0.088, 0.088, 0.088, 0.088, 0.088, 0.088, 0.088, 0.088, 0.088,
+        ];
+        let classes = top_classes(&second, &labels)?;
+        assert!(classes.iter().all(|class| class.class_index != 1));
+
+        let evidence =
+            CtcEvidence::measure(&labels, [first.as_slice(), second.as_slice()], "A", &[0])?;
+        let candidate = evidence
+            .hypotheses
+            .iter()
+            .find(|candidate| candidate.text == "A")
+            .ok_or_else(|| invalid("retained A candidate missing"))?;
+        let expected = f64::from(first[1]).mul_add(
+            f64::from(second[0]),
+            (f64::from(first[1]) + f64::from(first[0])) * f64::from(second[1]),
+        );
+        assert!((candidate.log_mass_lower_bound.exp() - expected).abs() < 1e-12);
+        assert!(
+            matches!(candidate.alignment, SequenceAlignment::Measured { log_mass, .. }
+            if (log_mass.exp() - expected).abs() < 1e-12)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retained_repeat_only_extends_from_parent_blank_mass() -> Result<(), Error> {
+        let labels = ['\0', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
+        let row = [
+            0.2, 0.008, 0.088, 0.088, 0.088, 0.088, 0.088, 0.088, 0.088, 0.088, 0.088,
+        ];
+        let mut beam = PrefixBeam {
+            paths: BTreeMap::from([
+                (
+                    vec![1],
+                    Mass {
+                        blank: 0.2,
+                        nonblank: 0.5,
+                    },
+                ),
+                (
+                    vec![1, 1],
+                    Mass {
+                        blank: 0.1,
+                        nonblank: 0.2,
+                    },
+                ),
+            ]),
+            log_scale: 0.0,
+        };
+        beam.step(&row, &top_classes(&row, &labels)?)?;
+        let mass = beam
+            .paths
+            .get(&[1, 1][..])
+            .ok_or_else(|| invalid("retained AA missing"))?;
+        let scale = beam.log_scale.exp();
+        let expected_blank = 0.3 * f64::from(row[0]);
+        let expected_nonblank = 0.4 * f64::from(row[1]);
+        assert!(mass.blank.mul_add(scale, -expected_blank).abs() < 1e-12);
+        assert!(mass.nonblank.mul_add(scale, -expected_nonblank).abs() < 1e-12);
+        assert!(!beam.paths.contains_key(&[1, 1, 1][..]));
         Ok(())
     }
 
