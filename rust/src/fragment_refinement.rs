@@ -147,7 +147,7 @@ pub enum LineOutcome {
     },
     Audited {
         audit: Box<AuditedLine>,
-        peer_search: Option<PeerSearch>,
+        peer_search: Option<Box<PeerSearch>>,
         charged_ink_checks: u64,
         variants: Vec<VariantOutcome>,
         observation: ObservationMeasurements,
@@ -799,7 +799,7 @@ impl PageContext<'_> {
             self.recognize_original(&sampled, &mut budget, predictor, transactions)?;
         Ok(LineOutcome::Audited {
             audit: Box::new(sampled.audit),
-            peer_search,
+            peer_search: peer_search.map(Box::new),
             charged_ink_checks: self.policy.audit.max_ink_checks - budget,
             variants,
             observation,
