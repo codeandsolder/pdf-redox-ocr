@@ -35,7 +35,7 @@ struct Args {
     /// Optional page numbers and ranges.
     #[arg(long, conflicts_with = "lines")]
     pages: Option<String>,
-    /// Exact original draft observation PAGE:ZERO_BASED_INDEX; repeatable.
+    /// Exact original draft observation `PAGE:ZERO_BASED_INDEX`; repeatable.
     #[arg(long = "line", value_name = "PAGE:INDEX")]
     lines: Vec<String>,
     /// Maximum primary score when selecting by confidence.
