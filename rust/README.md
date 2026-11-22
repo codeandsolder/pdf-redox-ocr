@@ -900,6 +900,13 @@ longitudinal margin covers the maximum extension distance and its background
 margin, while each orthogonal margin covers one glyph height. An explicit
 `--padding-pixels` replaces this with a uniform diagnostic margin. Actual
 within-page sampled bounds are recorded per line.
+The observation band can widen orthogonally only to fully measured,
+glyph-sized components already supported predominantly inside the original
+box. Re-measure the expanded band and reject unrelated newly included body
+ink; original, longitudinal additions, orthogonal additions and outside
+foreground are counted separately. Added tokens must bind to longitudinal
+ink, not to repaired original glyph tops or bottoms. Competing peers in
+the orthogonal addition cause abstention.
 The padded RGB source is rectified once. Every expanded recognition window is an exact
 subimage of that raster, using the original observation's measured luminance normalization.
 Recognition runs are independently counted in the common raster, including how much

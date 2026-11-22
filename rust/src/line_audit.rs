@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Error, PageNumber,
-    boundary_ink::{BoundaryEvidence, audit_edge_extensions, search_padding},
+    boundary_ink::{BoundaryEvidence, audit_edge_extensions, measured_body_band, search_padding},
     draft::{DraftPage, OcrDraft, OcrLine, sha256_file},
     fragment_ink::Sample,
     geometry::{DisplayMapper, PageBox, Point, Quad, QuadBounds},
@@ -165,7 +165,8 @@ pub struct BoundaryOverlap {
 pub struct MappedBoundaryExtension {
     pub evidence: BoundaryEvidence,
     pub proposed_quad: Quad,
-    pub added_strip: Quad,
+    /// Disjoint regions newly included by the proposed observation.
+    pub added_strips: Vec<Quad>,
     /// Every peer overlapping the expanded observation, including original-only
     /// overlaps. An empty list
     /// does not establish that the new ink is a character.
@@ -433,7 +434,7 @@ impl SampledLine {
 
 fn boundary_overlap(
     expanded: &Quad,
-    strip: &Quad,
+    strips: &[Quad],
     candidate_components: &[(usize, &MappedComponent)],
     peer: BoundaryPeer,
     peer_quad: &Quad,
@@ -445,9 +446,12 @@ fn boundary_overlap(
     if !expanded_overlap.is_finite() || expanded_overlap <= 1e-9 {
         return None;
     }
-    let intersection = clip_convex(strip, peer_quad);
-    let overlap = area(&intersection);
-    let strip_area = area(strip);
+    let intersections = strips
+        .iter()
+        .map(|strip| clip_convex(strip, peer_quad))
+        .collect::<Vec<_>>();
+    let overlap = intersections.iter().map(|i| area(i)).sum::<f64>();
+    let strip_area = strips.iter().map(|q| area(q)).sum::<f64>();
     let peer_area = area(peer_quad);
     if !overlap.is_finite()
         || [strip_area, peer_area]
@@ -458,7 +462,11 @@ fn boundary_overlap(
     }
     let component_indices = candidate_components
         .iter()
-        .filter(|(_, c)| area(&clip_convex(&intersection, &c.ink_quad)) > 1e-9)
+        .filter(|(_, c)| {
+            intersections
+                .iter()
+                .any(|i| area(&clip_convex(i, &c.ink_quad)) > 1e-9)
+        })
         .map(|(i, _)| *i)
         .collect();
     Some(BoundaryOverlap {
@@ -470,6 +478,57 @@ fn boundary_overlap(
     })
 }
 
+/// The reading-axis strip covers the full proposed band. Top/bottom
+/// extensions are limited to the original reading-axis interval, so their
+/// union is exactly expanded minus original without overlapping areas.
+fn added_strips(original: InkBounds, expanded: InkBounds, edge: LeaderEdge) -> Vec<InkBounds> {
+    let side = match edge {
+        LeaderEdge::Left => InkBounds {
+            right: original.left,
+            ..expanded
+        },
+        LeaderEdge::Right => InkBounds {
+            left: original.right,
+            ..expanded
+        },
+    };
+    let mut strips = vec![side];
+    if expanded.top < original.top {
+        strips.push(InkBounds {
+            top: expanded.top,
+            bottom: original.top,
+            ..original
+        });
+    }
+    if expanded.bottom > original.bottom {
+        strips.push(InkBounds {
+            top: original.bottom,
+            bottom: expanded.bottom,
+            ..original
+        });
+    }
+    strips
+}
+
+fn boundary_candidates(
+    line: &AuditedLine,
+    sample: &Sample<'_>,
+) -> Result<Vec<BoundaryEvidence>, Error> {
+    let original = line.observation_bounds;
+    let components = line
+        .components
+        .iter()
+        .map(|c| &c.component)
+        .collect::<Vec<_>>();
+    if let Some((band, measured)) =
+        measured_body_band(sample.image, sample.threshold, original, &components)?
+    {
+        Ok(audit_edge_extensions(&measured, band, line.width))
+    } else {
+        Ok(audit_edge_extensions(components, original, line.width))
+    }
+}
+
 fn mapped_boundary_extensions(
     line: &AuditedLine,
     page: &DraftPage,
@@ -479,11 +538,7 @@ fn mapped_boundary_extensions(
     let observation = line.observation_bounds;
     let frame = sample.frame;
     let window = sample.window;
-    let candidates = audit_edge_extensions(
-        line.components.iter().map(|c| &c.component),
-        observation,
-        line.width,
-    );
+    let candidates = boundary_candidates(line, sample)?;
     if !candidates.is_empty()
         && page
             .lines
@@ -499,18 +554,11 @@ fn mapped_boundary_extensions(
     candidates
         .into_iter()
         .map(|evidence| {
-            let strip = match evidence.edge {
-                LeaderEdge::Left => InkBounds {
-                    right: observation.left,
-                    ..evidence.expanded
-                },
-                LeaderEdge::Right => InkBounds {
-                    left: observation.right,
-                    ..evidence.expanded
-                },
-            };
             let proposed_quad = window.quad(frame, evidence.expanded);
-            let added_strip = window.quad(frame, strip);
+            let added_strips = added_strips(observation, evidence.expanded, evidence.edge)
+                .into_iter()
+                .map(|b| window.quad(frame, b))
+                .collect::<Vec<_>>();
             let components = evidence
                 .component_indices
                 .iter()
@@ -530,7 +578,7 @@ fn mapped_boundary_extensions(
             let (overlaps, peer_quads): (Vec<_>, Vec<_>) = peers
                 .chain(native)
                 .filter_map(|(peer, quad)| {
-                    boundary_overlap(&proposed_quad, &added_strip, &components, peer, quad)
+                    boundary_overlap(&proposed_quad, &added_strips, &components, peer, quad)
                         .map(|overlap| (overlap, *quad))
                 })
                 .unzip();
@@ -539,7 +587,7 @@ fn mapped_boundary_extensions(
             Ok(MappedBoundaryExtension {
                 evidence,
                 proposed_quad,
-                added_strip,
+                added_strips,
                 overlaps,
                 ink_accounting,
             })
@@ -605,7 +653,7 @@ pub fn audit_lines(
         ));
     }
     Ok(LineAuditReport {
-        schema_version: 11,
+        schema_version: 12,
         pdf_sha256: draft.pdf_sha256.clone(),
         draft_model: draft.model.clone(),
         dpi: policy.dpi,
