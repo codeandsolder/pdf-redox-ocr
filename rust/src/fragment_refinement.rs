@@ -103,7 +103,7 @@ pub enum OrthogonalOutcome {
 pub struct StrokeMeasurements {
     pub original: Option<Box<Recognition>>,
     pub contractions: Vec<ContractionOutcome>,
-    pub orthogonal: Option<OrthogonalOutcome>,
+    pub orthogonal: Option<Box<OrthogonalOutcome>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -344,11 +344,11 @@ impl PageContext<'_> {
                         reason: Rejection::PixelBudgetExceeded,
                     })
                     .collect(),
-                orthogonal: (!strokes.orthogonal.is_empty()).then_some(
-                    OrthogonalOutcome::Skipped {
+                orthogonal: (!strokes.orthogonal.is_empty()).then(|| {
+                    Box::new(OrthogonalOutcome::Skipped {
                         reason: Rejection::PixelBudgetExceeded,
-                    },
-                ),
+                    })
+                }),
             });
         };
         let original = predictor.recognize_with_ink(&rgb, shared)?;
@@ -376,7 +376,9 @@ impl PageContext<'_> {
                 rejection,
             });
         }
-        let orthogonal = self.recognize_mask(sampled, budget, predictor)?;
+        let orthogonal = self
+            .recognize_mask(sampled, budget, predictor)?
+            .map(Box::new);
         Ok(StrokeMeasurements {
             original: Some(Box::new(original)),
             contractions: variants,
