@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     Error, PageNumber,
     draft::{DraftPage, OcrDraft, OcrLine},
-    geometry::{DisplayMapper, PageBox, Point, Quad, QuadBounds},
+    geometry::{DisplayMapper, PageBox, Point, QuadBounds},
     line_frame::{LineAxis, LineFrame, SampleWindow},
     pdf_metadata::PdfMetadata,
     rasterize::{calculate_crop, render_crop, sample_whitened},

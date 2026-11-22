@@ -570,7 +570,7 @@ mod tests {
         let image = RgbImage::from_fn(40, 24, |x, y| {
             if (4..20).contains(&x)
                 && (3..21).contains(&y)
-                && (x < 7 || x >= 17 || y < 6 || y >= 18 || (11..14).contains(&y))
+                && (!(7..17).contains(&x) || !(6..18).contains(&y) || (11..14).contains(&y))
             {
                 Rgb([0; 3])
             } else {
