@@ -908,7 +908,15 @@ ink; original, longitudinal additions, orthogonal additions and outside
 foreground are counted separately. Added tokens must bind to longitudinal
 ink, not to repaired original glyph tops or bottoms. Competing peers in
 the orthogonal addition cause abstention.
-The padded RGB source is rectified once. Every expanded recognition window is an exact
+When a measured local extension reaches a separate OCR peer and the peer
+exceeds the normal search horizon, a single bounded retry expands the common
+sample enough to measure that peer in full. Candidate chains must still obey
+local component/gap/obstruction constraints; additional peers cannot recursively
+extend the horizon. The ordinary sample is retained unless the retry can account
+for a previously incomplete peer, preserves all already complete peer evidence,
+and fits the same page and ink-check budgets. The report records the retry plan
+and total charged ink checks. Explicit diagnostic padding disables this retry.
+Every expanded recognition window is an exact
 subimage of that raster, using the original observation's measured luminance normalization.
 Recognition runs are independently counted in the common raster, including how much
 original and added foreground each contains and each peer's actual foreground count.

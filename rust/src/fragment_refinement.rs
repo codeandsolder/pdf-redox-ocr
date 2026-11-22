@@ -15,12 +15,13 @@ use crate::{
     Error, PageNumber,
     candidate_ink::SourceInk,
     draft::{DraftPage, OcrDraft},
-    fragment_ink::{InkAccounting, Sample},
+    fragment_ink::{InkAccounting, Sample, membership_checks},
     fragment_reconciliation::{conflicts, experimental_draft, propose, superseded},
     geometry::{DisplayMapper, Quad},
+    layout_leaders::LeaderEdge,
     line_audit::{
         AuditedLine, BoundaryPeer, LineAuditPolicy, MappedBoundaryExtension, SampledLine,
-        audit_line,
+        audit_line, inside_page,
     },
     pdf_metadata::PdfMetadata,
     refinement::{RefinementPolicy, RefinementScope, recognize_observation, refinement_plan},
@@ -76,8 +77,21 @@ pub enum LineOutcome {
     },
     Audited {
         audit: Box<AuditedLine>,
+        peer_search: Option<PeerSearch>,
+        charged_ink_checks: u64,
         variants: Vec<VariantOutcome>,
     },
+}
+
+/// One-hop extension of the local search to an already ink-supported peer.
+#[derive(Debug, Serialize)]
+pub struct PeerSearch {
+    peers: BTreeSet<usize>,
+    initial_sample_quad: Quad,
+    initial_normalized_sha256: String,
+    padding: [u32; 4],
+    horizon: [u32; 2],
+    used: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,7 +110,7 @@ pub struct FragmentReport {
     pub draft_model: String,
     pub secondary_model: &'static str,
     pub dpi: u32,
-    pub padding_pixels: Option<u32>,
+    pub padding_pixels: Option<[u32; 4]>,
     pub segmentation_threshold: u8,
     pub topology_thresholds: Vec<u8>,
     pub polarity: crate::ink_polarity::Polarity,
@@ -249,6 +263,108 @@ impl PageContext<'_> {
         })
     }
 
+    fn peer_search(&self, sampled: &SampledLine) -> Option<PeerSearch> {
+        if self.policy.audit.padding_pixels.is_some() {
+            return None;
+        }
+        let mut window = sampled.window;
+        let mut plan = PeerSearch {
+            peers: BTreeSet::new(),
+            initial_sample_quad: sampled.audit.sample_quad,
+            initial_normalized_sha256: sampled.audit.normalized_sha256.clone(),
+            padding: window.padding,
+            horizon: [0; 2],
+            used: false,
+        };
+        let complete = complete_peers(sampled);
+        let inside = inside_page(self.mapper);
+        for extension in &sampled.audit.boundary_extensions {
+            let InkAccounting::Measured { peers, .. } = &extension.ink_accounting else {
+                continue;
+            };
+            for (i, overlap) in extension.overlaps.iter().enumerate() {
+                let BoundaryPeer::OcrLine { line_index } = overlap.peer else {
+                    continue;
+                };
+                if complete.contains(&line_index)
+                    || peers.get(&i).is_none_or(|p| {
+                        p.axis_added == 0 || p.original != 0 || p.orthogonal_added != 0
+                    })
+                {
+                    continue;
+                }
+                let edge = extension.evidence.edge;
+                let Some((next, extent)) = window.cover_peer(
+                    sampled.frame,
+                    &inside,
+                    edge,
+                    &self.page.lines[line_index].quad,
+                    self.policy.audit.max_pixels,
+                ) else {
+                    continue;
+                };
+                if extent <= sampled.frame.height.saturating_mul(2) {
+                    continue;
+                }
+                let side = match edge {
+                    LeaderEdge::Left => 0,
+                    LeaderEdge::Right => 1,
+                };
+                plan.horizon[side] = plan.horizon[side].max(extent);
+                plan.peers.insert(line_index);
+                window = next;
+            }
+        }
+        plan.padding = window.padding;
+        (!plan.peers.is_empty()).then_some(plan)
+    }
+
+    fn retry_peer_search(
+        &mut self,
+        index: usize,
+        original: &SampledLine,
+        budget: &mut u64,
+        plan: &mut PeerSearch,
+    ) -> Result<Option<SampledLine>, Error> {
+        let reserve = variant_checks(original);
+        let Some(available) = budget.checked_sub(reserve) else {
+            return Ok(None);
+        };
+        let mut retry_budget = available;
+        let mut policy = self.policy.audit.clone();
+        policy.padding_pixels = Some(plan.padding);
+        let Ok(mut retry) = audit_line(
+            self.pdf,
+            self.metadata,
+            self.number,
+            index,
+            &self.page.lines[index],
+            &policy,
+            Some(&mut self.remaining_pixels),
+        ) else {
+            return Ok(None);
+        };
+        retry.measure_extensions(self.page, &policy, plan.horizon, &mut retry_budget)?;
+        *budget -= available - retry_budget;
+        // Retain the ordinary sample unless the larger sample can account
+        // for a complete previously unsupported peer. All candidates in a
+        // report share the chosen raster and never mix coordinate frames.
+        let complete = complete_peers(&retry);
+        if plan.peers.is_disjoint(&complete)
+            || !complete_peers(original).is_subset(&complete)
+            || variant_checks(&retry) > *budget
+            || retry
+                .audit
+                .boundary_extensions
+                .iter()
+                .any(|e| matches!(e.ink_accounting, InkAccounting::BudgetExceeded { .. }))
+        {
+            return Ok(None);
+        }
+        plan.used = true;
+        Ok(Some(retry))
+    }
+
     fn line(
         &mut self,
         index: usize,
@@ -273,23 +389,81 @@ impl PageContext<'_> {
                 });
             }
         };
-        sampled.measure_extensions(self.page, &self.policy.audit)?;
         let mut budget = self.policy.audit.max_ink_checks;
-        for extension in &sampled.audit.boundary_extensions {
-            if let InkAccounting::Measured { charged_checks, .. } = &extension.ink_accounting {
-                budget = budget
-                    .checked_sub(*charged_checks)
-                    .ok_or_else(|| Error::Invalid("inconsistent audit ink budget".into()))?;
-            }
+        sampled.measure_extensions(self.page, &self.policy.audit, [0; 2], &mut budget)?;
+        let mut peer_search = self.peer_search(&sampled);
+        if let Some(plan) = &mut peer_search
+            && let Some(retry) = self.retry_peer_search(index, &sampled, &mut budget, plan)?
+        {
+            sampled = retry;
         }
         let variants = (0..sampled.audit.boundary_extensions.len())
             .map(|i| self.recognize_variant(&sampled, i, &mut budget, predictor, transactions))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(LineOutcome::Audited {
             audit: Box::new(sampled.audit),
+            peer_search,
+            charged_ink_checks: self.policy.audit.max_ink_checks - budget,
             variants,
         })
     }
+}
+
+fn variant_checks(sampled: &SampledLine) -> u64 {
+    sampled
+        .audit
+        .boundary_extensions
+        .iter()
+        .filter_map(|extension| {
+            let InkAccounting::Measured { sample, .. } = &extension.ink_accounting else {
+                return None;
+            };
+            if sample.axis_added == 0 {
+                return None;
+            }
+            let b = extension.evidence.expanded;
+            Some(membership_checks(
+                b.right - b.left,
+                b.bottom - b.top,
+                extension.overlaps.len(),
+            ))
+        })
+        .fold(0, u64::saturating_add)
+}
+
+fn complete_peers(sampled: &SampledLine) -> BTreeSet<usize> {
+    sampled
+        .audit
+        .boundary_extensions
+        .iter()
+        .flat_map(|extension| {
+            extension
+                .overlaps
+                .iter()
+                .enumerate()
+                .filter_map(|(i, overlap)| {
+                    let BoundaryPeer::OcrLine { line_index } = overlap.peer else {
+                        return None;
+                    };
+                    let InkAccounting::Measured {
+                        peers,
+                        peers_fully_sampled,
+                        ..
+                    } = &extension.ink_accounting
+                    else {
+                        return None;
+                    };
+                    (peers_fully_sampled.get(i) == Some(&true)
+                        && peers.get(&i).is_some_and(|p| {
+                            p.axis_added > 0
+                                && p.outside_expansion == 0
+                                && p.original == 0
+                                && p.orthogonal_added == 0
+                        }))
+                    .then_some(line_index)
+                })
+        })
+        .collect()
 }
 
 /// Refine exact original observations with audited edge expansions.
@@ -366,7 +540,7 @@ pub fn reconcile_fragments(
     source.verify_pdf(pdf)?;
     Ok((
         FragmentReport {
-            schema_version: 5,
+            schema_version: 6,
             pdf_sha256: source.pdf_sha256.clone(),
             draft_model: source.model.clone(),
             secondary_model: RefinementModel::Consensus.label(),
