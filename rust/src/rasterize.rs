@@ -242,7 +242,7 @@ pub fn render_rgb_region(
     dpi: u32,
     max_pixels: u64,
 ) -> Result<RenderedCrop, Error> {
-    render_crop(pdf, page, calculate_crop(mapper, region, dpi, max_pixels)?)
+    render_crop(pdf, page, &calculate_crop(mapper, region, dpi, max_pixels)?)
 }
 
 impl CropRequest {
@@ -254,7 +254,7 @@ impl CropRequest {
 pub(crate) fn render_crop(
     pdf: &Path,
     page: PageNumber,
-    crop: CropRequest,
+    crop: &CropRequest,
 ) -> Result<RenderedCrop, Error> {
     let pixels = crop.pixels();
     let CropRequest {
@@ -262,7 +262,7 @@ pub(crate) fn render_crop(
         width,
         height,
         mapper,
-    } = crop;
+    } = *crop;
     let CropPixelMapper {
         origin_x, origin_y, ..
     } = mapper;

@@ -213,8 +213,12 @@ impl SourcePlan {
         })
     }
 
-    fn sample(self, pdf: &Path, page: PageNumber) -> Result<(RgbImage, SourceCropEvidence), Error> {
-        let crop = render_crop(pdf, page, self.render)?;
+    fn sample(
+        &self,
+        pdf: &Path,
+        page: PageNumber,
+    ) -> Result<(RgbImage, SourceCropEvidence), Error> {
+        let crop = render_crop(pdf, page, &self.render)?;
         let mapper = crop.pixel_mapper();
         let frame = self.frame;
         let image = RgbImage::from_fn(frame.width, frame.height, |x, y| {
@@ -691,9 +695,10 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn exact_pdf_second_pass_preserves_source_and_zeroes_all_hypothesis_confidences()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn source_fixture() -> Result<
+        (tempfile::TempDir, std::path::PathBuf, PdfMetadata, OcrDraft),
+        Box<dyn std::error::Error>,
+    > {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("mixed.pdf");
         fs::write(
@@ -722,40 +727,25 @@ mod tests {
                 native_text_regions: Vec::new(),
             }],
         );
+        Ok((temp, path, metadata, source))
+    }
+
+    #[test]
+    fn sampled_half_turn_and_page_budget_are_exact() -> Result<(), Box<dyn std::error::Error>> {
+        let (_temp, path, metadata, source) = source_fixture()?;
+        let mapper = metadata.mapper(PageNumber::new(1)?)?;
         let policy = RefinementPolicy {
             dpi: 144,
             ..RefinementPolicy::default()
         };
-        let mut calls = 0;
         let request = RefinementRequest {
             pdf: &path,
             metadata: &metadata,
             source: &source,
             scope: RefinementScope::ByConfidence { pages: None },
-            secondary_model: "medium-recognition",
+            secondary_model: "test",
             policy,
         };
-        let (report, experimental) = refine_draft(request, |image| {
-            calls += 1;
-            assert!(image.width() > 2 && image.height() > 2);
-            Ok(Recognition {
-                views: Vec::new(),
-                decision: RefinementDecision::Greedy {
-                    text: "CAPAC1TOR".into(),
-                },
-            })
-        })?;
-        assert_eq!(calls, 1);
-        assert_eq!(report.summary.selected_lines, 1);
-        assert_eq!(report.summary.revised_predictions, 1);
-        assert_eq!(report.proposals[0].line_index, 0);
-        assert_eq!(report.proposals[0].quad, quad);
-        assert_eq!(experimental.pages[0].lines[0].text, "CAPAC1TOR");
-        assert_eq!(experimental.pages[0].lines[0].confidence, 0.0);
-        assert!(!experimental.pages[0].lines[0].reviewed);
-        assert_eq!(source.pages[0].lines[0].text, "CAPACITOR");
-        assert!(source.pages[0].lines[0].reviewed);
-
         let plan = SourcePlan::new(&source.pages[0].lines[0], mapper, policy)?;
         let cost = plan.cost;
         let (forward, _) = plan.sample(&path, PageNumber::new(1)?)?;
@@ -798,6 +788,48 @@ mod tests {
             budget_report.proposals[1].outcome,
             super::RefinementOutcome::Skipped { .. }
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn exact_pdf_second_pass_preserves_source_and_zeroes_all_hypothesis_confidences()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_temp, path, metadata, source) = source_fixture()?;
+        let quad = source.pages[0].lines[0].quad;
+        let policy = RefinementPolicy {
+            dpi: 144,
+            ..RefinementPolicy::default()
+        };
+        let mut calls = 0;
+        let request = RefinementRequest {
+            pdf: &path,
+            metadata: &metadata,
+            source: &source,
+            scope: RefinementScope::ByConfidence { pages: None },
+            secondary_model: "medium-recognition",
+            policy,
+        };
+        let (report, experimental) = refine_draft(request, |image| {
+            calls += 1;
+            assert!(image.width() > 2 && image.height() > 2);
+            Ok(Recognition {
+                views: Vec::new(),
+                decision: RefinementDecision::Greedy {
+                    text: "CAPAC1TOR".into(),
+                },
+            })
+        })?;
+        assert_eq!(calls, 1);
+        assert_eq!(report.summary.selected_lines, 1);
+        assert_eq!(report.summary.revised_predictions, 1);
+        assert_eq!(report.proposals[0].line_index, 0);
+        assert_eq!(report.proposals[0].quad, quad);
+        assert_eq!(experimental.pages[0].lines[0].text, "CAPAC1TOR");
+        assert_eq!(experimental.pages[0].lines[0].confidence, 0.0);
+        assert!(!experimental.pages[0].lines[0].reviewed);
+        assert_eq!(source.pages[0].lines[0].text, "CAPACITOR");
+        assert!(source.pages[0].lines[0].reviewed);
 
         let (_, skipped) = refine_draft(
             RefinementRequest {
