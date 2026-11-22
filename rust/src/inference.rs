@@ -445,6 +445,7 @@ impl OcrModels {
                 if !text.trim().is_empty() {
                     let quad = image_polygon_to_quad(&bbox.points, width, height)?;
                     let line = PixelLine {
+                        detection_index: index,
                         text,
                         confidence: f64::from(confidence),
                         quad,
@@ -473,9 +474,7 @@ impl OcrModels {
                             .copied()
                             .unwrap_or_default();
                         let crop = &retained[batch_index];
-                        if let Some(entry) =
-                            audit.observe(index, &line, crop, batch, columns, length)
-                        {
+                        if let Some(entry) = audit.observe(&line, crop, batch, columns, length) {
                             entry.geometry = crop_geometry;
                             if unqualified {
                                 candidate_crops.insert(index, Arc::clone(crop));

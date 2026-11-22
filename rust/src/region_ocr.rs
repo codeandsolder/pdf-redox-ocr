@@ -19,7 +19,9 @@ use crate::{
     pipeline::{PipelinePolicy, RasterMode},
     polygon::area,
     rasterize::render_rgb_region,
-    recognition::{RecognitionBackend, RecognitionSession},
+    recognition::{
+        RasterCharacterMapping, RasterMappingScope, RecognitionBackend, RecognitionSession,
+    },
     source_selection::SourcePolicy,
 };
 
@@ -49,6 +51,7 @@ pub enum RegionOutcome {
 
 #[derive(Debug, serde::Serialize)]
 pub struct RegionObservation {
+    pub detection_index: usize,
     pub line: OcrLine,
     pub within_crop: bool,
     pub page_overlap: f64,
@@ -284,6 +287,7 @@ impl RegionPass<'_> {
                     .iter()
                     .all(|&Point(x, y)| x >= 3.0 && y >= 3.0 && x <= w - 3.0 && y <= h - 3.0)
                 && (0.0..=1.0).contains(&pixel.confidence);
+            let detection_index = pixel.detection_index;
             let line = pixel.into_pdf(&|point| mapper.to_pdf(point));
             let admission = SourceAdmission::evaluate(
                 &line,
@@ -301,11 +305,29 @@ impl RegionPass<'_> {
                 draft_page.lines.push(line.clone());
             }
             observations.push(RegionObservation {
+                detection_index,
                 line,
                 within_crop,
                 page_overlap: admission.page_overlap,
                 native_overlap: admission.native_overlap,
                 included_as_extra: admission.included,
+            });
+        }
+        let admitted_detection_indices = observations
+            .iter()
+            .filter(|o| o.included_as_extra)
+            .map(|o| o.detection_index)
+            .collect::<std::collections::BTreeSet<_>>();
+        if !admitted_detection_indices.is_empty() {
+            engine.record_character_mapping(RasterCharacterMapping {
+                page,
+                rgb_sha256: rgb_sha256.clone(),
+                dimensions,
+                scope: RasterMappingScope::Region {
+                    seed_paint_index: request.paint_index,
+                    admitted_detection_indices,
+                },
+                raster_corners: corners,
             });
         }
         Ok(RegionOutcome::Recognized {

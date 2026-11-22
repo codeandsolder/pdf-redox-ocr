@@ -10,7 +10,7 @@ use crate::{
     geometry::Quad,
     glyph_appearance::GlyphShape,
     quality_eval::{GroundTruth, contains, validate},
-    recognition::{PageCharacterMapping, RasterCharacterAudit},
+    recognition::{RasterCharacterAudit, RasterCharacterMapping, RasterLocation},
 };
 
 /// One independently transcribed character and the primary model's actual
@@ -18,6 +18,8 @@ use crate::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReviewedGlyph {
     pub page: u32,
+    pub raster_location: RasterLocation,
+    pub raster_sha256: String,
     pub crop_sha256: String,
     pub detection_index: usize,
     pub character_index: usize,
@@ -125,36 +127,32 @@ fn stable_labels(reference: &[char], prediction: &[char]) -> Option<Vec<Option<c
 }
 
 struct MappedLine<'a> {
-    mapping: &'a PageCharacterMapping,
+    mapping: &'a RasterCharacterMapping,
     line: &'a CharacterLineAudit,
     quad: Quad,
 }
 
 fn collect_lines<'a>(
     audits: &'a [RasterCharacterAudit],
-    mappings: &'a [PageCharacterMapping],
+    mappings: &'a [RasterCharacterMapping],
     residual_pages: &BTreeSet<PageNumber>,
 ) -> BTreeMap<u32, Vec<MappedLine<'a>>> {
     let mut pages = BTreeMap::<u32, Vec<MappedLine>>::new();
     for mapping in mappings {
-        if mapping.residual != residual_pages.contains(&mapping.page) {
+        if !mapping.selected(residual_pages) {
             continue;
         }
-        // A second execution with the same RGB key might have been necessary
-        // after incomplete recognition. Do not silently select one attempt.
-        let mut matching = audits
-            .iter()
-            .filter(|a| a.rgb_sha256 == mapping.rgb_sha256 && a.dimensions == mapping.dimensions);
-        let Some(audit) = matching.next() else {
+        let Some(audit) = mapping.unique_audit(audits) else {
             continue;
         };
-        if matching.next().is_some() {
-            continue;
-        }
         let page = pages.entry(mapping.page.get()).or_default();
         for line in &audit.report.lines {
+            if !mapping.includes_detection(line.detection_index) {
+                continue;
+            }
             if page.iter().any(|entry| {
                 entry.mapping.rgb_sha256 == mapping.rgb_sha256
+                    && entry.mapping.scope.location() == mapping.scope.location()
                     && entry.line.detection_index == line.detection_index
             }) {
                 continue;
@@ -213,6 +211,8 @@ fn collect_glyphs(
         };
         glyphs.push(ReviewedGlyph {
             page: mapped.mapping.page.get(),
+            raster_location: mapped.mapping.scope.location(),
+            raster_sha256: mapped.mapping.rgb_sha256.clone(),
             crop_sha256: line.crop_sha256.clone(),
             detection_index: line.detection_index,
             character_index,
@@ -235,7 +235,7 @@ impl ReviewedGlyphBank {
         reference: &GroundTruth,
         draft: &OcrDraft,
         audits: &[RasterCharacterAudit],
-        mappings: &[PageCharacterMapping],
+        mappings: &[RasterCharacterMapping],
         residual_pages: &BTreeSet<PageNumber>,
     ) -> Result<Self, Error> {
         validate(reference, draft)?;
@@ -245,7 +245,8 @@ impl ReviewedGlyphBank {
             ..Default::default()
         };
         let mut glyphs = Vec::new();
-        let mut matched = BTreeMap::<(u32, &str, usize), Vec<(&MappedLine<'_>, &str)>>::new();
+        let mut matched =
+            BTreeMap::<(u32, &str, RasterLocation, usize), Vec<(&MappedLine<'_>, &str)>>::new();
         for sample in &reference.samples {
             let mut candidates = pages
                 .get(&sample.page)
@@ -264,6 +265,7 @@ impl ReviewedGlyphBank {
                 .entry((
                     sample.page,
                     &line.mapping.rgb_sha256,
+                    line.mapping.scope.location(),
                     line.line.detection_index,
                 ))
                 .or_default()
@@ -279,7 +281,7 @@ impl ReviewedGlyphBank {
         }
         stats.labeled_glyphs = glyphs.len();
         Ok(Self {
-            schema_version: 1,
+            schema_version: 2,
             pdf_sha256: draft.pdf_sha256.clone(),
             model: draft.model.clone(),
             reference_provenance: reference.provenance.clone(),

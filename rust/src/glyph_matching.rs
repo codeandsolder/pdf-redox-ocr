@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::{
     Error,
+    recognition::RasterLocation,
     reviewed_glyphs::{ReviewedGlyph, ReviewedGlyphBank},
 };
 
@@ -38,6 +39,9 @@ pub struct DonorMatch<'a> {
     pub distance: f64,
     pub pdf_sha256: &'a str,
     pub page: u32,
+    pub raster_location: RasterLocation,
+    pub raster_sha256: &'a str,
+    pub detection_index: usize,
     pub crop_sha256: &'a str,
     pub character_index: usize,
 }
@@ -63,6 +67,9 @@ pub enum MatchDecision {
 #[derive(Debug, Serialize)]
 pub struct GlyphMatch<'a> {
     pub page: u32,
+    pub raster_location: RasterLocation,
+    pub raster_sha256: &'a str,
+    pub detection_index: usize,
     pub crop_sha256: &'a str,
     pub character_index: usize,
     pub reference: char,
@@ -168,6 +175,9 @@ fn classify<'a>(
                 distance: query.shape.distance(&donor.shape),
                 pdf_sha256: &bank.pdf_sha256,
                 page: donor.page,
+                raster_location: donor.raster_location,
+                raster_sha256: &donor.raster_sha256,
+                detection_index: donor.detection_index,
                 crop_sha256: &donor.crop_sha256,
                 character_index: donor.character_index,
             };
@@ -194,6 +204,9 @@ fn classify<'a>(
     let decision = decide(nearest.as_ref(), runner_up.as_ref(), policy);
     GlyphMatch {
         page: query.page,
+        raster_location: query.raster_location,
+        raster_sha256: &query.raster_sha256,
+        detection_index: query.detection_index,
         crop_sha256: &query.crop_sha256,
         character_index: query.character_index,
         reference: query.label,
@@ -231,20 +244,30 @@ impl MatchSummary {
 
 fn validate_bank(bank: &ReviewedGlyphBank) -> Result<(), Error> {
     let digest = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
-    if bank.schema_version != 1
+    if bank.schema_version != 2
         || !digest(&bank.pdf_sha256)
         || bank.reference_provenance.trim().is_empty()
     {
         return Err(Error::Invalid("invalid glyph bank provenance".into()));
     }
     let mut occurrences = BTreeSet::new();
+    let mut rasters = BTreeMap::new();
     for glyph in &bank.glyphs {
         if glyph.page == 0
+            || !digest(&glyph.raster_sha256)
             || !digest(&glyph.crop_sha256)
+            || rasters
+                .insert((glyph.page, glyph.raster_location), &glyph.raster_sha256)
+                .is_some_and(|prior| prior != &glyph.raster_sha256)
             || glyph.label.is_whitespace()
             || glyph.prediction.is_whitespace()
             || !(0.0..=1.0).contains(&glyph.line_score)
-            || !occurrences.insert((glyph.page, glyph.detection_index, glyph.character_index))
+            || !occurrences.insert((
+                glyph.page,
+                glyph.raster_location,
+                glyph.detection_index,
+                glyph.character_index,
+            ))
         {
             return Err(Error::Invalid(
                 "invalid or duplicated reviewed glyph occurrence".into(),
@@ -285,7 +308,7 @@ pub fn evaluate<'a>(
         })
         .collect();
     Ok(MatchReport {
-        schema_version: 1,
+        schema_version: 2,
         query_pdf_sha256: &query.pdf_sha256,
         donor_pdf_sha256: banks.iter().map(|b| b.pdf_sha256.as_str()).collect(),
         policy,
@@ -314,6 +337,8 @@ mod tests {
             });
             glyphs.push(ReviewedGlyph {
                 page,
+                raster_location: RasterLocation::WholePage { residual: false },
+                raster_sha256: format!("{page:064x}"),
                 crop_sha256: format!("{crop:064x}"),
                 detection_index: index,
                 character_index: 0,
@@ -333,7 +358,7 @@ mod tests {
             });
         }
         Ok(ReviewedGlyphBank {
-            schema_version: 1,
+            schema_version: 2,
             pdf_sha256: format!("{pdf:064x}"),
             model: "fixture".into(),
             reference_provenance: "fixture review".into(),
@@ -386,6 +411,31 @@ mod tests {
         )?;
         assert_eq!(report.matches[0].decision, MatchDecision::Ambiguous);
         assert_eq!(report.summary.candidates, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn raster_scopes_disambiguate_detector_ids_but_not_duplicate_occurrences() -> Result<(), Error>
+    {
+        let mut reviewed = bank(
+            1,
+            &[(1, 1, 'A', true), (1, 2, 'B', false), (1, 3, 'C', true)],
+        )?;
+        reviewed.glyphs[1].raster_location = RasterLocation::Region {
+            seed_paint_index: 4,
+        };
+        reviewed.glyphs[1].detection_index = 0;
+        reviewed.glyphs[2].raster_location = RasterLocation::Region {
+            seed_paint_index: 9,
+        };
+        reviewed.glyphs[2].detection_index = 0;
+        validate_bank(&reviewed)?;
+        reviewed.glyphs[2].raster_location = reviewed.glyphs[1].raster_location;
+        assert!(validate_bank(&reviewed).is_err());
+        reviewed.glyphs[2].detection_index = 1;
+        validate_bank(&reviewed)?;
+        reviewed.glyphs[2].raster_sha256 = "ab".repeat(32);
+        assert!(validate_bank(&reviewed).is_err());
         Ok(())
     }
 }

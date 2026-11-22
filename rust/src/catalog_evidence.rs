@@ -12,7 +12,7 @@ use crate::{
     character_alignment::RunAlignment,
     geometry::{Point, Quad, QuadBounds},
     polygon::{area, clip_convex},
-    recognition::{PageCharacterMapping, RasterCharacterAudit},
+    recognition::{RasterCharacterAudit, RasterCharacterMapping, RasterLocation},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -25,6 +25,8 @@ pub struct OccurrenceId {
 #[derive(Clone, Debug, Serialize)]
 pub struct CharacterVote {
     pub occurrence: OccurrenceId,
+    pub raster_location: RasterLocation,
+    pub raster_sha256: String,
     pub detection_index: usize,
     pub character_index: usize,
     pub character: char,
@@ -181,13 +183,16 @@ fn associate<'a>(ink: &Quad, placements: &'a [Placement<'a>]) -> Association<'a>
 }
 
 fn collect_votes(
-    mapping: &PageCharacterMapping,
+    mapping: &RasterCharacterMapping,
     audit: &RasterCharacterAudit,
     placements: &[Placement<'_>],
     stats: &mut MatchStats,
     by_occurrence: &mut BTreeMap<OccurrenceId, Vec<CharacterVote>>,
 ) {
     for line in &audit.report.lines {
+        if !mapping.includes_detection(line.detection_index) {
+            continue;
+        }
         for (character_index, anchor) in line.anchors.iter().enumerate() {
             let RunAlignment::Unique { run } = anchor.alignment else {
                 continue;
@@ -219,6 +224,8 @@ fn collect_votes(
             };
             let vote = CharacterVote {
                 occurrence: occurrence.clone(),
+                raster_location: mapping.scope.location(),
+                raster_sha256: mapping.rgb_sha256.clone(),
                 detection_index: line.detection_index,
                 character_index,
                 character: anchor.character,
@@ -268,10 +275,11 @@ fn summarize(votes: &[CharacterVote], min_score: f64) -> Vec<TemplateEvidence> {
 }
 
 impl CatalogEvidence {
-    /// Build source-bound evidence from the actual accepted full-page route.
+    /// Build source-bound evidence from the accepted page and regional routes.
     /// Cached rasters may map to multiple pages; each physical vector
     /// occurrence contributes at most one vote. Rejected residual attempts
-    /// and non-page source rasters do not participate.
+    /// and non-page source rasters do not participate. Regional mappings
+    /// contribute only admitted detector identities.
     ///
     /// # Errors
     /// Rejects mismatched catalog provenance or malformed placements.
@@ -279,7 +287,7 @@ impl CatalogEvidence {
         catalog: &GlyphCatalog,
         pdf_sha256: &str,
         audits: &[RasterCharacterAudit],
-        mappings: &[PageCharacterMapping],
+        mappings: &[RasterCharacterMapping],
         residual_pages: &BTreeSet<PageNumber>,
         minimum_score: f64,
     ) -> Result<Self, Error> {
@@ -287,16 +295,13 @@ impl CatalogEvidence {
         let mut stats = MatchStats::default();
         let mut by_occurrence = BTreeMap::<OccurrenceId, Vec<CharacterVote>>::new();
         for mapping in mappings {
-            if mapping.residual != residual_pages.contains(&mapping.page) {
+            if !mapping.selected(residual_pages) {
                 continue;
             }
             let Some(placements) = index.pages.get(&mapping.page) else {
                 continue;
             };
-            let Some(audit) = audits
-                .iter()
-                .find(|a| a.rgb_sha256 == mapping.rgb_sha256 && a.dimensions == mapping.dimensions)
-            else {
+            let Some(audit) = mapping.unique_audit(audits) else {
                 continue;
             };
             collect_votes(mapping, audit, placements, &mut stats, &mut by_occurrence);

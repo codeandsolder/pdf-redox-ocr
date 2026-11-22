@@ -7,6 +7,7 @@ use std::{cell::RefCell, fs};
 use image::RgbImage;
 use pdf_redox_ocr::{
     Error, PageNumber,
+    character_alignment::{BatchGeometry, CharacterAuditReport},
     draft::OcrLine,
     geometry::{Point, Quad},
     native_images::NativeImageBudget,
@@ -46,6 +47,7 @@ impl RecognitionBackend for Recognizer {
                 }
                 if let Some((quad, confidence)) = self.conflict_once {
                     return Ok(vec![PixelLine {
+                        detection_index: 0,
                         text: "Conflicting residual".into(),
                         confidence,
                         quad,
@@ -78,6 +80,7 @@ impl RecognitionBackend for Recognizer {
             return Ok(RasterRecognition::default());
         };
         Ok(vec![PixelLine {
+            detection_index: 0,
             text: "CAPACITOR 47uF 16V".into(),
             confidence: 0.99,
             quad,
@@ -573,7 +576,9 @@ impl RecognitionBackend for SelectiveRecognizer {
         }
         Ok([("ALPHA", 50.0, 250.0), ("BETA", 350.0, 550.0)]
             .into_iter()
-            .map(|(text, left, right)| PixelLine {
+            .enumerate()
+            .map(|(detection_index, (text, left, right))| PixelLine {
+                detection_index,
                 text: text.into(),
                 confidence: 0.99,
                 quad: [
@@ -724,7 +729,7 @@ fn audit_binds_raw_source_observations_paints_and_admission_to_original_pdf()
     let result = PreparedOcr::open(&pdf, None, policy)?
         .recognize(&SelectiveRecognizer::default(), |_| {})?;
     let audit = serde_json::to_value(result.audit())?;
-    assert_eq!(audit["schema_version"], 16);
+    assert_eq!(audit["schema_version"], 17);
     assert_eq!(audit["pdf_sha256"], result.draft.pdf_sha256);
     assert_eq!(audit["model"], result.draft.model);
     assert_eq!(audit["policy"]["render"]["max_side"], 600);
@@ -947,6 +952,7 @@ impl RecognitionBackend for PaletteRecognizer {
             other => return Err(Error::Inference(format!("unexpected palette {other:?}"))),
         };
         Ok(vec![PixelLine {
+            detection_index: 0,
             text: text.into(),
             confidence: 0.99,
             quad: [
@@ -1034,6 +1040,7 @@ impl RecognitionBackend for CompositedRecognizer {
         self.inputs.borrow_mut().push(rgb);
         let (w, h) = (f64::from(width), f64::from(height));
         Ok(vec![PixelLine {
+            detection_index: 0,
             text: "COMPOSITED LABEL".into(),
             confidence: 0.99,
             quad: [
@@ -1173,7 +1180,8 @@ impl RecognitionBackend for MixedRegionRecognizer {
         let (width, height) = rgb.dimensions();
         self.inputs.borrow_mut().push((width, height));
         let (w, h) = (f64::from(width), f64::from(height));
-        let line = |text: &str, x0: f64, y0: f64, x1: f64, y1: f64| PixelLine {
+        let line = |detection_index, text: &str, x0: f64, y0: f64, x1: f64, y1: f64| PixelLine {
+            detection_index,
             text: text.into(),
             confidence: 0.99,
             quad: [Point(x0, y1), Point(x1, y1), Point(x1, y0), Point(x0, y0)],
@@ -1181,22 +1189,39 @@ impl RecognitionBackend for MixedRegionRecognizer {
         let lines = if width == 1600 {
             // Duplicate of the first regional line (paint at [30,30] of
             // a 240×160 page, 1600px full-page raster).
-            vec![line("BASELINE", 220., 727., 280., 760.)]
+            vec![line(3, "BASELINE", 220., 727., 280., 760.)]
         } else {
             vec![
-                line("DUPLICATE", w * 0.10, h * 0.15, w * 0.30, h * 0.30),
-                line("NEW DETAIL", w * 0.50, h * 0.58, w * 0.85, h * 0.84),
-                line("TRUNCATED", 0., h * 0.2, w * 0.20, h * 0.3),
+                line(7, "DUPLICATE", w * 0.10, h * 0.15, w * 0.30, h * 0.30),
+                line(11, "NEW DETAIL", w * 0.50, h * 0.58, w * 0.85, h * 0.84),
+                line(19, "TRUNCATED", 0., h * 0.2, w * 0.20, h * 0.3),
             ]
         };
-        Ok(lines.into())
+        let crop = RgbImage::from_fn(100, 20, |x, y| {
+            image::Rgb(if (4..17).contains(&y) && x % 10 < 5 {
+                [0; 3]
+            } else {
+                [255; 3]
+            })
+        });
+        let batch = BatchGeometry::new([crop.dimensions()])?;
+        let mut audit = CharacterAuditReport::default();
+        for line in &lines {
+            let columns = (0..line.text.chars().count()).collect::<Vec<_>>();
+            assert!(audit.observe(line, &crop, batch, &columns, 64).is_some());
+        }
+        let mut result: RasterRecognition = lines.into();
+        result.character_audit = audit;
+        Ok(result)
     }
 }
 
 #[test]
 fn mixed_composited_regions_admit_only_complete_nonoverlapping_lines()
 -> Result<(), Box<dyn std::error::Error>> {
-    use pdf_redox_ocr::{pipeline::NativeImageDecoder, region_ocr::RegionOutcome};
+    use pdf_redox_ocr::{
+        pipeline::NativeImageDecoder, recognition::RasterMappingScope, region_ocr::RegionOutcome,
+    };
     // Root-group image covers 40×20 points at 800×400 source pixels.
     // Vector paint elsewhere prevents image-only composited replacement.
     let bytes = support::pdf(&[
@@ -1228,6 +1253,11 @@ fn mixed_composited_regions_admit_only_complete_nonoverlapping_lines()
             assert!(result.regional_ocr.is_empty());
             assert_eq!(result.draft.pages[0].lines.len(), 1);
             assert_eq!(engine.inputs.borrow().len(), 1);
+            assert_eq!(result.raster_character_mappings.len(), 1);
+            assert_eq!(
+                result.raster_character_mappings[0].scope,
+                RasterMappingScope::WholePage { residual: false }
+            );
             continue;
         }
         assert_eq!(result.regional_ocr.len(), 1);
@@ -1236,6 +1266,8 @@ fn mixed_composited_regions_admit_only_complete_nonoverlapping_lines()
         let RegionOutcome::Recognized {
             observations,
             dimensions,
+            rgb_sha256,
+            corners,
             ..
         } = &region.outcome
         else {
@@ -1243,6 +1275,32 @@ fn mixed_composited_regions_admit_only_complete_nonoverlapping_lines()
         };
         assert!(dimensions.0 >= 800 && dimensions.1 >= 400);
         assert_eq!(observations.len(), 3);
+        assert_eq!(result.raster_character_mappings.len(), 2);
+        let mapping = &result.raster_character_mappings[1];
+        assert_eq!(
+            mapping.scope,
+            RasterMappingScope::Region {
+                seed_paint_index: region.seed_paint_index,
+                admitted_detection_indices: std::collections::BTreeSet::from([11]),
+            }
+        );
+        assert_eq!(&mapping.rgb_sha256, rgb_sha256);
+        assert_eq!(&mapping.raster_corners, corners);
+        assert_eq!(&mapping.dimensions, dimensions);
+        let audit = result
+            .character_audits
+            .iter()
+            .find(|audit| audit.rgb_sha256 == *rgb_sha256)
+            .ok_or("missing regional character audit")?;
+        assert_eq!(
+            audit
+                .report
+                .lines
+                .iter()
+                .map(|line| line.detection_index)
+                .collect::<Vec<_>>(),
+            vec![7, 11, 19]
+        );
         assert!(!observations[0].included_as_extra, "{observations:#?}");
         assert!(observations[1].included_as_extra, "{observations:#?}");
         assert!(!observations[2].within_crop);

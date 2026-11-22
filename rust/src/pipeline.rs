@@ -33,7 +33,7 @@ use crate::{
     pdf_metadata::PdfMetadata,
     rasterize::{RenderPolicy, render_rgb_page},
     recognition::{
-        PageCharacterMapping, RasterCharacterAudit, RasterRepairAudit, RecognitionBackend,
+        RasterCharacterAudit, RasterCharacterMapping, RasterRepairAudit, RecognitionBackend,
         RecognitionCacheBudget, RecognitionSession, RecognitionStats,
     },
     region_ocr::{RegionAudit, RegionPass},
@@ -153,7 +153,7 @@ pub struct PipelineResult {
     pub recognition: RecognitionStats,
     pub crop_repairs: Vec<RasterRepairAudit>,
     pub character_audits: Vec<RasterCharacterAudit>,
-    pub page_character_mappings: Vec<PageCharacterMapping>,
+    pub raster_character_mappings: Vec<RasterCharacterMapping>,
     pub catalog_evidence: Option<CatalogEvidence>,
     /// Validated policy used for this complete recognition job.
     pub policy: PipelinePolicy,
@@ -350,7 +350,7 @@ pub struct PipelineAudit<'a> {
     recognition: RecognitionStats,
     crop_repairs: &'a [RasterRepairAudit],
     character_audits: &'a [RasterCharacterAudit],
-    page_character_mappings: &'a [PageCharacterMapping],
+    raster_character_mappings: &'a [RasterCharacterMapping],
     catalog_evidence: Option<&'a CatalogEvidence>,
     routes: &'a BTreeMap<PageNumber, PageRoute>,
     residual_pages: &'a BTreeSet<PageNumber>,
@@ -390,7 +390,7 @@ impl PipelineResult {
             catalog,
             &self.draft.pdf_sha256,
             &self.character_audits,
-            &self.page_character_mappings,
+            &self.raster_character_mappings,
             &self.residual_pages,
             self.policy.minimum_confidence,
         )?);
@@ -401,7 +401,7 @@ impl PipelineResult {
     #[must_use]
     pub const fn audit(&self) -> PipelineAudit<'_> {
         PipelineAudit {
-            schema_version: 16,
+            schema_version: 17,
             preparation: None,
             pdf_sha256: self.draft.pdf_sha256.as_str(),
             model: self.draft.model.as_str(),
@@ -409,7 +409,7 @@ impl PipelineResult {
             recognition: self.recognition,
             crop_repairs: self.crop_repairs.as_slice(),
             character_audits: self.character_audits.as_slice(),
-            page_character_mappings: self.page_character_mappings.as_slice(),
+            raster_character_mappings: self.raster_character_mappings.as_slice(),
             catalog_evidence: self.catalog_evidence.as_ref(),
             routes: &self.routes,
             residual_pages: &self.residual_pages,
@@ -671,7 +671,7 @@ impl PreparedOcr {
             recognition,
             crop_repairs: session.take_repair_audits(),
             character_audits: session.take_character_audits(),
-            page_character_mappings: session.take_page_character_mappings(),
+            raster_character_mappings: session.take_raster_character_mappings(),
             catalog_evidence: None,
             policy: self.policy,
             paints: prepared.scanned,

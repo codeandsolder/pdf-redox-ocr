@@ -106,6 +106,7 @@ impl RecognitionBackend for Recognizer {
             return Ok(RasterRecognition::default());
         }
         Ok(vec![PixelLine {
+            detection_index: 0,
             text: "Raster source".into(),
             confidence: 0.99,
             quad: [
