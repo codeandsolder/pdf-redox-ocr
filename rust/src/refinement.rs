@@ -54,7 +54,7 @@ impl RefinementPolicy {
     /// Validate thresholds before running or loading models.
     ///
     /// # Errors
-    /// Rejects invalid confidence, batch size, or render configuration.
+    /// Rejects invalid confidence, selection, or render configuration.
     pub fn validate(self) -> Result<Self, Error> {
         if !self.max_primary_score.is_finite()
             || !(0.0..=1.0).contains(&self.max_primary_score)
