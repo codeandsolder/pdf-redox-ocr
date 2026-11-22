@@ -35,6 +35,54 @@ pub struct ContractionEvidence {
     pub retained_pixels: u64,
 }
 
+/// The orthogonal profile uses source X as its cross-section coordinate.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrthogonalEdge {
+    Top,
+    Bottom,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrthogonalStroke {
+    pub edge: OrthogonalEdge,
+    pub stroke: EdgeStroke,
+}
+
+#[derive(Debug, Default)]
+pub struct StrokeAudit {
+    pub contractions: Vec<ContractionEvidence>,
+    pub orthogonal: Vec<OrthogonalStroke>,
+}
+
+/// Work in the reading axis or its exact transpose, without copying a raster.
+#[derive(Clone, Copy)]
+enum Axis {
+    Reading,
+    Orthogonal,
+}
+
+impl Axis {
+    const fn coordinates(self, x: u32, y: u32) -> (u32, u32) {
+        match self {
+            Self::Reading => (x, y),
+            Self::Orthogonal => (y, x),
+        }
+    }
+
+    const fn bounds(self, b: InkBounds) -> InkBounds {
+        match self {
+            Self::Reading => b,
+            Self::Orthogonal => InkBounds {
+                left: b.top,
+                right: b.bottom,
+                top: b.left,
+                bottom: b.right,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Column {
     top: u32,
@@ -75,11 +123,13 @@ fn profile(columns: &BTreeMap<u32, Column>, start: u32, end: u32) -> Option<Stri
     (result.common_rows[0] < result.common_rows[1]).then_some(result)
 }
 
-const fn candidate(c: &PixelRegion, o: InkBounds) -> bool {
+const fn candidate(c: &PixelRegion, o: InkBounds, axis: Axis) -> bool {
+    let b = axis.bounds(c.bounds);
+    let projected = axis.bounds(o);
     c.observation_support.inside_pixels > 0
         && c.observation_support.outside_pixels > c.observation_support.inside_pixels
-        && c.bounds.right - c.bounds.left > o.bottom - o.top
-        && (c.bounds.left < o.left || c.bounds.right > o.right)
+        && b.right - b.left > o.bottom - o.top
+        && (b.left < projected.left || b.right > projected.right)
 }
 
 struct ComponentColumns {
@@ -188,33 +238,83 @@ fn contraction(
     })
 }
 
-/// Measure separable edge stripes and preserve all other in-box foreground.
+/// Both orientations accumulate exact cross-sections in one flood traversal.
+struct Profiles {
+    axis: Axis,
+    columns: BTreeMap<usize, ComponentColumns>,
+}
+
+impl Profiles {
+    fn new(axis: Axis, components: &[&PixelRegion], observation: InkBounds) -> Self {
+        let columns = components
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| candidate(c, observation, axis))
+            .map(|(i, _)| {
+                (
+                    i,
+                    ComponentColumns {
+                        columns: BTreeMap::new(),
+                    },
+                )
+            })
+            .collect();
+        Self { axis, columns }
+    }
+
+    fn record(&mut self, i: usize, x: u32, y: u32, observation: InkBounds) {
+        let (x, y) = self.axis.coordinates(x, y);
+        let b = self.axis.bounds(observation);
+        if (b.top..b.bottom).contains(&y)
+            && let Some(profile) = self.columns.get_mut(&i)
+        {
+            profile.record(x, y);
+        }
+    }
+
+    fn edge(
+        &self,
+        edge: LeaderEdge,
+        observation: InkBounds,
+        inside: &[Option<InkBounds>],
+        components: &[&PixelRegion],
+    ) -> Vec<EdgeStroke> {
+        self.columns
+            .iter()
+            .filter_map(|(&i, c)| {
+                let mut stroke = c.stripe(
+                    edge,
+                    self.axis.bounds(observation),
+                    self.axis.bounds(inside[i]?),
+                    i,
+                    components[i].observation_support.inside_pixels,
+                )?;
+                stroke.inside_bounds = self.axis.bounds(stroke.inside_bounds);
+                Some(stroke)
+            })
+            .collect()
+    }
+}
+
+/// Measure separable exterior stripes on every observation edge, preserving
+/// actual component membership. Only reading-axis, edge-separable strokes
+/// can propose a crop contraction. Orthogonal strokes are evidence for
+/// subsequent counterfactual analysis, never automatic text deletions.
 /// Returns None when the shared membership-check budget is exhausted.
 ///
 /// # Errors
 /// Rejects inconsistent raster component identities or bounds.
-pub fn audit_contractions(
+pub fn audit_strokes(
     image: &GrayImage,
     threshold: u8,
     observation: InkBounds,
     components: &[&PixelRegion],
     remaining_checks: &mut u64,
-) -> Result<Option<Vec<ContractionEvidence>>, Error> {
-    let mut columns = components
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| candidate(c, observation))
-        .map(|(i, _)| {
-            (
-                i,
-                ComponentColumns {
-                    columns: BTreeMap::new(),
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    if columns.is_empty() {
-        return Ok(Some(Vec::new()));
+) -> Result<Option<StrokeAudit>, Error> {
+    let mut reading = Profiles::new(Axis::Reading, components, observation);
+    let mut orthogonal = Profiles::new(Axis::Orthogonal, components, observation);
+    if reading.columns.is_empty() && orthogonal.columns.is_empty() {
+        return Ok(Some(StrokeAudit::default()));
     }
     let required = membership_checks(image.width(), image.height(), 0);
     let Some(remaining) = remaining_checks.checked_sub(required) else {
@@ -223,21 +323,18 @@ pub fn audit_contractions(
     *remaining_checks = remaining;
     let mut inside = vec![None::<InkBounds>; components.len()];
     let measured = regions_visit(image, threshold, PixelClass::Ink, observation, |i, x, y| {
-        if (observation.top..observation.bottom).contains(&y) {
-            if let Some(profile) = columns.get_mut(&i) {
-                profile.record(x, y);
-            }
-            if (observation.left..observation.right).contains(&x)
-                && let Some(cell) = inside.get_mut(i)
-            {
-                let b = InkBounds {
-                    left: x,
-                    top: y,
-                    right: x + 1,
-                    bottom: y + 1,
-                };
-                *cell = Some(cell.map_or(b, |old| old.union(b)));
-            }
+        reading.record(i, x, y, observation);
+        orthogonal.record(i, x, y, observation);
+        if observation.contains(x, y)
+            && let Some(cell) = inside.get_mut(i)
+        {
+            let b = InkBounds {
+                left: x,
+                top: y,
+                right: x + 1,
+                bottom: y + 1,
+            };
+            *cell = Some(cell.map_or(b, |old| old.union(b)));
         }
     })?;
     if measured.len() != components.len()
@@ -251,39 +348,42 @@ pub fn audit_contractions(
             "foreign stroke component identity mismatch".into(),
         ));
     }
-    Ok(Some(
-        [LeaderEdge::Left, LeaderEdge::Right]
+    let contractions = [LeaderEdge::Left, LeaderEdge::Right]
+        .into_iter()
+        .filter_map(|edge| {
+            let strokes = reading.edge(edge, observation, &inside, components);
+            contraction(edge, observation, strokes, &inside, components)
+        })
+        .collect();
+    let orthogonal = [
+        (LeaderEdge::Left, OrthogonalEdge::Top),
+        (LeaderEdge::Right, OrthogonalEdge::Bottom),
+    ]
+    .into_iter()
+    .flat_map(|(edge, orthogonal_edge)| {
+        orthogonal
+            .edge(edge, observation, &inside, components)
             .into_iter()
-            .filter_map(|edge| {
-                let strokes = columns
-                    .iter()
-                    .filter_map(|(&i, c)| {
-                        c.stripe(
-                            edge,
-                            observation,
-                            inside[i]?,
-                            i,
-                            components[i].observation_support.inside_pixels,
-                        )
-                    })
-                    .collect();
-                contraction(edge, observation, strokes, &inside, components)
+            .map(move |stroke| OrthogonalStroke {
+                edge: orthogonal_edge,
+                stroke,
             })
-            .collect(),
-    ))
+    })
+    .collect();
+    Ok(Some(StrokeAudit {
+        contractions,
+        orthogonal,
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::Luma;
-    fn measure(
-        image: &GrayImage,
-        observation: InkBounds,
-    ) -> Result<Vec<ContractionEvidence>, Error> {
+    fn measure(image: &GrayImage, observation: InkBounds) -> Result<StrokeAudit, Error> {
         let components = crate::pixel_regions::regions(image, 128, PixelClass::Ink, observation)?;
         let mut remaining = u64::MAX;
-        audit_contractions(
+        audit_strokes(
             image,
             128,
             observation,
@@ -311,7 +411,7 @@ mod tests {
                 255
             }])
         });
-        let result = measure(&image, o)?;
+        let result = measure(&image, o)?.contractions;
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].edge, LeaderEdge::Left);
         assert_eq!(result[0].removed_pixels, 18);
@@ -323,7 +423,7 @@ mod tests {
             right: 110 - o.left,
             ..o
         };
-        let right = measure(&mirrored, mirrored_o)?;
+        let right = measure(&mirrored, mirrored_o)?.contractions;
         assert_eq!(right.len(), 1);
         assert_eq!(right[0].edge, LeaderEdge::Right);
         assert_eq!(right[0].retained.right, 110 - result[0].retained.left);
@@ -335,7 +435,7 @@ mod tests {
                 image.put_pixel(x, y, Luma([0]));
             }
         }
-        assert!(measure(&image, o)?.is_empty());
+        assert!(measure(&image, o)?.contractions.is_empty());
         Ok(())
     }
 
@@ -362,16 +462,66 @@ mod tests {
         let refs = components.iter().collect::<Vec<_>>();
         let charge = membership_checks(image.width(), image.height(), 0);
         let mut remaining = charge - 1;
-        assert!(audit_contractions(&image, 128, o, &refs, &mut remaining)?.is_none());
+        assert!(audit_strokes(&image, 128, o, &refs, &mut remaining)?.is_none());
         assert_eq!(remaining, charge - 1);
         remaining = charge;
         assert_eq!(
-            audit_contractions(&image, 128, o, &refs, &mut remaining)?
+            audit_strokes(&image, 128, o, &refs, &mut remaining)?
                 .ok_or_else(|| Error::Invalid("missing contraction evidence".into()))?
+                .contractions
                 .len(),
             1
         );
         assert_eq!(remaining, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn perpendicular_stubs_preserve_intervening_glyphs_and_attached_ink() -> Result<(), Error> {
+        let o = InkBounds {
+            left: 10,
+            top: 40,
+            right: 80,
+            bottom: 70,
+        };
+        let mut image = GrayImage::from_fn(100, 110, |x, y| {
+            let top = (41..44).contains(&x) && y < 45;
+            let bottom = (41..44).contains(&x) && y >= 65;
+            let digit = (20..30).contains(&x) && (44..66).contains(&y);
+            let period = (45..48).contains(&x) && (61..64).contains(&y);
+            let next = (55..65).contains(&x) && (44..66).contains(&y);
+            Luma([if top || bottom || digit || period || next {
+                0
+            } else {
+                255
+            }])
+        });
+        let r = measure(&image, o)?;
+        assert!(r.contractions.is_empty());
+        assert_eq!(r.orthogonal.len(), 2);
+        assert!(matches!(r.orthogonal[0].edge, OrthogonalEdge::Top));
+        assert!(matches!(r.orthogonal[1].edge, OrthogonalEdge::Bottom));
+        assert_eq!(r.orthogonal[0].stroke.inside.pixels, 15);
+        assert_eq!(r.orthogonal[1].stroke.inside.pixels, 15);
+        assert_eq!(
+            r.orthogonal[0].stroke.inside_bounds,
+            InkBounds {
+                left: 41,
+                right: 44,
+                top: 40,
+                bottom: 45
+            }
+        );
+        // Attach a real glyph to the incoming stroke. Its full measured
+        // in-box section no longer continues the stripe.
+        for x in 43..56 {
+            for y in 43..47 {
+                image.put_pixel(x, y, Luma([0]));
+            }
+        }
+        let r = measure(&image, o)?;
+        assert_eq!(r.orthogonal.len(), 1);
+        assert!(matches!(r.orthogonal[0].edge, OrthogonalEdge::Bottom));
         Ok(())
     }
 
@@ -389,7 +539,7 @@ mod tests {
             let second = (45..50).contains(&x) && (20..33).contains(&y);
             Luma([if stroke || body || second { 0 } else { 255 }])
         });
-        let r = measure(&image, o)?;
+        let r = measure(&image, o)?.contractions;
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].retained.left, 35);
         assert_eq!(r[0].removed_pixels, 10);

@@ -918,7 +918,12 @@ token must preserve its run identity in the contracted recognition. This
 works even when the two partitions meet at a half-open boundary without
 a blank column. A contraction and an expansion compete in the same atomic
 transaction resolution; neither can supersede the other. Geometry diagnostics
-alone never authorize a deletion.
+alone never authorize a deletion. The same connected traversal records exact
+top/bottom continuation stripes in the transposed reading frame, with
+actual source bounds and per-component pixel counts. These can identify
+perpendicular drawing/witness lines inside a text crop without assuming
+they are separable at a longitudinal edge. Orthogonal stroke evidence is
+diagnostic only.
 
 The observation band can widen orthogonally only to fully measured,
 locally supported components with majority foreground and vertical extent
@@ -950,7 +955,7 @@ peer additionally requires stable independently localized literal text inside th
 observation, and cannot have a shared component cut by the replacement boundary.
 Native-text conflicts and incomplete peer samples abstain.
 
-The schema 8 report retains the original observation identity, all considered extensions and contractions,
+The schema 9 report retains the original observation identity, all considered extensions and contractions,
 conditional CTC evidence, common-raster run counts, peer evidence, transactions and
 conflicts. Strictly nested candidates can supersede a shorter candidate only if all added
 foreground is bound to tokens, the larger component chain and crop contain the

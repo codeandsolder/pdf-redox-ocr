@@ -236,9 +236,10 @@ impl PageContext<'_> {
         predictor: &mut RefinementRecognizer,
         transactions: &mut Vec<Transaction>,
     ) -> Result<ContractionMeasurements, Error> {
-        let Some(contractions) = &sampled.audit.foreign_edge_contractions else {
+        let Some(strokes) = &sampled.audit.foreign_strokes else {
             return Ok(ContractionMeasurements::default());
         };
+        let contractions = &strokes.contractions;
         if contractions.is_empty() {
             return Ok(ContractionMeasurements::default());
         }
@@ -491,7 +492,7 @@ impl PageContext<'_> {
         let variants = (0..sampled.audit.boundary_extensions.len())
             .map(|i| self.recognize_variant(&sampled, i, &mut budget, predictor, transactions))
             .collect::<Result<Vec<_>, _>>()?;
-        sampled.measure_contractions(&self.policy.audit, &mut budget)?;
+        sampled.measure_strokes(&self.policy.audit, &mut budget)?;
         let contractions = self.recognize_contractions(&sampled, predictor, transactions)?;
         Ok(LineOutcome::Audited {
             audit: Box::new(sampled.audit),
@@ -634,7 +635,7 @@ pub fn reconcile_fragments(
     source.verify_pdf(pdf)?;
     Ok((
         FragmentReport {
-            schema_version: 8,
+            schema_version: 9,
             pdf_sha256: source.pdf_sha256.clone(),
             draft_model: source.model.clone(),
             secondary_model: RefinementModel::Consensus.label(),
