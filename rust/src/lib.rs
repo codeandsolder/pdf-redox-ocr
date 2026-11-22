@@ -89,6 +89,8 @@ pub mod source_ocr;
 #[cfg(feature = "pdf-integration")]
 mod source_samples;
 pub mod source_selection;
+#[cfg(all(feature = "native-inference", feature = "pdf-integration"))]
+mod stroke_reconciliation;
 
 use thiserror::Error;
 

@@ -54,16 +54,29 @@ pub struct PeerClaim {
 }
 
 #[derive(Debug, Serialize)]
-pub struct Transaction {
-    pub page: u32,
-    pub line_index: usize,
+pub struct Expansion {
     pub extension_index: usize,
     pub evidence: BoundaryEvidence,
     pub axis_added_pixels: u64,
     pub orthogonal_added_pixels: u64,
+    pub bindings: Vec<TokenBinding>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Operation {
+    Expansion(Expansion),
+    Contraction(crate::stroke_reconciliation::Contraction),
+}
+
+#[derive(Debug, Serialize)]
+pub struct Transaction {
+    pub page: u32,
+    pub line_index: usize,
     pub quad: Quad,
     pub text: String,
-    pub bindings: Vec<TokenBinding>,
+    #[serde(flatten)]
+    pub operation: Operation,
     pub consumed: Vec<PeerClaim>,
 }
 
@@ -90,6 +103,9 @@ pub enum Rejection {
     ResidualPeerText,
     PixelBudgetExceeded,
     InkBudgetExceeded,
+    NotLiteralContraction,
+    UnlocalizedRemovedTokens,
+    ForegroundPartitionMismatch,
 }
 
 fn added_range(primary: &str, candidate: &str, edge: LeaderEdge) -> Option<Range<usize>> {
@@ -523,38 +539,43 @@ pub fn propose(
     Ok(Transaction {
         page: page.page,
         line_index,
-        extension_index,
-        evidence: extension.evidence.clone(),
-        axis_added_pixels: sample.axis_added,
-        orthogonal_added_pixels: sample.orthogonal_added,
+        operation: Operation::Expansion(Expansion {
+            extension_index,
+            evidence: extension.evidence.clone(),
+            axis_added_pixels: sample.axis_added,
+            orthogonal_added_pixels: sample.orthogonal_added,
+            bindings,
+        }),
         quad: extension.proposed_quad,
         text: text.clone(),
-        bindings,
         consumed,
     })
 }
 
 /// Strict dominance is an evidence relation, not a reward for longer text.
 fn dominates(short: &Transaction, long: &Transaction) -> bool {
+    let (Operation::Expansion(a), Operation::Expansion(b)) = (&short.operation, &long.operation)
+    else {
+        return false;
+    };
     if short.identity() != long.identity()
-        || short.evidence.edge != long.evidence.edge
-        || short.axis_added_pixels >= long.axis_added_pixels
-        || short.orthogonal_added_pixels != long.orthogonal_added_pixels
-        || short.bindings.is_empty()
-        || short.bindings.len() >= long.bindings.len()
+        || a.evidence.edge != b.evidence.edge
+        || a.axis_added_pixels >= b.axis_added_pixels
+        || a.orthogonal_added_pixels != b.orthogonal_added_pixels
+        || a.bindings.is_empty()
+        || a.bindings.len() >= b.bindings.len()
         || short.consumed.len() != long.consumed.len()
     {
         return false;
     }
-    let a = short.evidence.expanded;
-    let b = long.evidence.expanded;
-    let short_components = &short.evidence.component_indices;
-    let long_components = &long.evidence.component_indices;
-    if a.top != b.top
-        || a.bottom != b.bottom
+    let (short_bounds, long_bounds) = (a.evidence.expanded, b.evidence.expanded);
+    let short_components = &a.evidence.component_indices;
+    let long_components = &b.evidence.component_indices;
+    if short_bounds.top != long_bounds.top
+        || short_bounds.bottom != long_bounds.bottom
         || short_components.len() >= long_components.len()
         || !short_components.iter().all(|i| long_components.contains(i))
-        || [short, long].iter().any(|op| {
+        || [a, b].iter().any(|op| {
             op.bindings.iter().map(|b| b.axis_added_pixels).sum::<u64>() != op.axis_added_pixels
         })
     {
@@ -569,23 +590,27 @@ fn dominates(short: &Transaction, long: &Transaction) -> bool {
     else {
         return false;
     };
-    if delta != long.bindings.len() - short.bindings.len() {
+    if delta != b.bindings.len() - a.bindings.len() {
         return false;
     }
-    let (offset, preserved) = match short.evidence.edge {
+    let (offset, preserved) = match a.evidence.edge {
         LeaderEdge::Left
-            if a.right == b.right && b.left < a.left && long_text.ends_with(&short_text) =>
+            if short_bounds.right == long_bounds.right
+                && long_bounds.left < short_bounds.left
+                && long_text.ends_with(&short_text) =>
         {
-            (delta, &long.bindings[delta..])
+            (delta, &b.bindings[delta..])
         }
         LeaderEdge::Right
-            if a.left == b.left && b.right > a.right && long_text.starts_with(&short_text) =>
+            if short_bounds.left == long_bounds.left
+                && long_bounds.right > short_bounds.right
+                && long_text.starts_with(&short_text) =>
         {
-            (0, &long.bindings[..short.bindings.len()])
+            (0, &b.bindings[..a.bindings.len()])
         }
         _ => return false,
     };
-    short.bindings.iter().zip(preserved).all(|(s, l)| {
+    a.bindings.iter().zip(preserved).all(|(s, l)| {
         s.position.checked_add(offset) == Some(l.position)
             && s.character == l.character
             && s.sample_bounds == l.sample_bounds
@@ -814,23 +839,25 @@ mod tests {
         Transaction {
             page,
             line_index,
-            extension_index: 0,
-            evidence: BoundaryEvidence {
-                edge: LeaderEdge::Right,
-                component_indices: vec![],
-                expanded: InkBounds {
-                    left: 0,
-                    top: 0,
-                    right: 1,
-                    bottom: 1,
+            operation: Operation::Expansion(Expansion {
+                extension_index: 0,
+                evidence: BoundaryEvidence {
+                    edge: LeaderEdge::Right,
+                    component_indices: vec![],
+                    expanded: InkBounds {
+                        left: 0,
+                        top: 0,
+                        right: 1,
+                        bottom: 1,
+                    },
+                    body_gap_pixels: 0,
                 },
-                body_gap_pixels: 0,
-            },
-            axis_added_pixels: 0,
-            orthogonal_added_pixels: 0,
+                axis_added_pixels: 0,
+                orthogonal_added_pixels: 0,
+                bindings: vec![],
+            }),
             quad: rect(x),
             text: "AB".into(),
-            bindings: vec![],
             consumed: consumed
                 .into_iter()
                 .map(|line_index| PeerClaim {
@@ -852,13 +879,16 @@ mod tests {
     ) -> Transaction {
         let mut op = operation(1, 0, vec![], 0.);
         op.text = text.into();
-        op.evidence = BoundaryEvidence {
+        let Operation::Expansion(expansion) = &mut op.operation else {
+            unreachable!()
+        };
+        expansion.evidence = BoundaryEvidence {
             edge,
             component_indices: components,
             expanded: bounds,
             body_gap_pixels: 0,
         };
-        op.bindings = bindings
+        expansion.bindings = bindings
             .iter()
             .map(|&(position, character, x)| TokenBinding {
                 position,
@@ -874,8 +904,15 @@ mod tests {
                 views: vec![0, 4],
             })
             .collect();
-        op.axis_added_pixels = 30 * u64::try_from(bindings.len()).unwrap_or_default();
+        expansion.axis_added_pixels = 30 * u64::try_from(bindings.len()).unwrap_or_default();
         op
+    }
+
+    fn alter_expansion(op: &mut Transaction, change: impl FnOnce(&mut Expansion)) {
+        let Operation::Expansion(e) = &mut op.operation else {
+            unreachable!()
+        };
+        change(e);
     }
 
     #[test]
@@ -913,12 +950,12 @@ mod tests {
             ..peer
         });
         assert!(dominates(&left, &longer));
-        longer.bindings[1].sample_bounds.left += 1;
+        alter_expansion(&mut longer, |e| e.bindings[1].sample_bounds.left += 1);
         assert!(!dominates(&left, &longer));
-        longer.bindings[1].sample_bounds.left -= 1;
-        longer.axis_added_pixels += 1;
+        alter_expansion(&mut longer, |e| e.bindings[1].sample_bounds.left -= 1);
+        alter_expansion(&mut longer, |e| e.axis_added_pixels += 1);
         assert!(!dominates(&left, &longer));
-        longer.axis_added_pixels -= 1;
+        alter_expansion(&mut longer, |e| e.axis_added_pixels -= 1);
         longer.consumed[0].token_positions[0] = 0;
         assert!(!dominates(&left, &longer));
 

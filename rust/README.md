@@ -894,7 +894,8 @@ a hard bound on interpreter or compressed-stream allocation.
 ### Source fragment reconciliation research
 
 `pdf-redox-ocr-fragment-reconcile --pdf FILE --primary-ocr DRAFT --line PAGE:INDEX --report REPORT --experimental-draft RESEARCH`
-evaluates bounded source edge extensions with the Small+Medium four-stretch CTC recognizer.
+evaluates bounded source edge extensions and source-supported stroke contractions
+with the Small+Medium four-stretch CTC recognizer.
 By default the source sampling window scales with the measured line height:
 longitudinal margin covers the maximum extension distance and its background
 margin, while each orthogonal margin covers one glyph height. An explicit
@@ -907,7 +908,17 @@ cross-sections sharing a row, contained in an equally long immediately
 adjacent exterior stripe. The cut preserves all other actual in-box
 component pixels, even at a shared half-open boundary. This refuses an
 attached genuine glyph whose cross-section deviates from the external
-stroke. These are geometry diagnostics, not automatic text deletions.
+stroke. For research reconciliation, the unchanged and contracted
+recognition crops are exact subimages of the same normalized source raster.
+The contraction must conserve all remaining foreground and produce a literal
+edge deletion supported by both models. Original CTC hypotheses are remapped
+to an ordered partition of the measured exterior stroke tips and retained
+runs; all removed runs must correspond to deleted tokens and every surviving
+token must preserve its run identity in the contracted recognition. This
+works even when the two partitions meet at a half-open boundary without
+a blank column. A contraction and an expansion compete in the same atomic
+transaction resolution; neither can supersede the other. Geometry diagnostics
+alone never authorize a deletion.
 
 The observation band can widen orthogonally only to fully measured,
 locally supported components with majority foreground and vertical extent
@@ -939,7 +950,7 @@ peer additionally requires stable independently localized literal text inside th
 observation, and cannot have a shared component cut by the replacement boundary.
 Native-text conflicts and incomplete peer samples abstain.
 
-The report retains the original observation identity, all considered extensions,
+The schema 8 report retains the original observation identity, all considered extensions and contractions,
 conditional CTC evidence, common-raster run counts, peer evidence, transactions and
 conflicts. Strictly nested candidates can supersede a shorter candidate only if all added
 foreground is bound to tokens, the larger component chain and crop contain the

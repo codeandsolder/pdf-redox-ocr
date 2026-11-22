@@ -24,14 +24,19 @@ use crate::{
         audit_line, inside_page,
     },
     pdf_metadata::PdfMetadata,
+    pixel_regions::InkBounds,
     refinement::{RefinementPolicy, RefinementScope, recognize_observation, refinement_plan},
     refinement_evidence::{Recognition, RefinementOutcome},
     refinement_recognition::{RefinementModel, RefinementRecognizer},
+    stroke_reconciliation,
 };
 
 pub use crate::{
     fragment_ink::{RunAccounting, RunInk},
-    fragment_reconciliation::{Consumption, PeerClaim, Rejection, TokenBinding, Transaction},
+    fragment_reconciliation::{
+        Consumption, Expansion, Operation, PeerClaim, Rejection, TokenBinding, Transaction,
+    },
+    stroke_reconciliation::{Contraction, ContractionVote, PartitionRun},
 };
 
 #[derive(Debug)]
@@ -69,6 +74,25 @@ pub enum VariantOutcome {
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
+pub enum ContractionOutcome {
+    Skipped {
+        reason: Rejection,
+    },
+    Measured {
+        recognition: Box<Recognition>,
+        transaction: Option<usize>,
+        rejection: Option<Rejection>,
+    },
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ContractionMeasurements {
+    pub original: Option<Box<Recognition>>,
+    pub variants: Vec<ContractionOutcome>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum LineOutcome {
     Skipped {
         page: u32,
@@ -80,6 +104,7 @@ pub enum LineOutcome {
         peer_search: Option<PeerSearch>,
         charged_ink_checks: u64,
         variants: Vec<VariantOutcome>,
+        contractions: ContractionMeasurements,
     },
 }
 
@@ -181,6 +206,85 @@ impl PageContext<'_> {
         Ok(())
     }
 
+    fn prepare_crop(
+        &mut self,
+        sampled: &SampledLine,
+        b: InkBounds,
+    ) -> Result<Option<(image::RgbImage, SourceInk)>, Error> {
+        let (width, height) = (b.right - b.left, b.bottom - b.top);
+        let cost = u64::from(width) * u64::from(height);
+        let Some(remaining) = self.remaining_pixels.checked_sub(cost) else {
+            return Ok(None);
+        };
+        self.remaining_pixels = remaining;
+        let rgb = imageops::crop_imm(&sampled.rgb, b.left, b.top, width, height).to_image();
+        let normalized =
+            imageops::crop_imm(&sampled.normalized, b.left, b.top, width, height).to_image();
+        let shared = SourceInk::from_shared_raster(
+            &rgb,
+            &normalized,
+            sampled.audit.polarity.clone(),
+            self.policy.audit.segmentation_threshold,
+            &self.policy.audit.topology_thresholds,
+        )?;
+        Ok(Some((rgb, shared)))
+    }
+
+    fn recognize_contractions(
+        &mut self,
+        sampled: &SampledLine,
+        predictor: &mut RefinementRecognizer,
+        transactions: &mut Vec<Transaction>,
+    ) -> Result<ContractionMeasurements, Error> {
+        let Some(contractions) = &sampled.audit.foreign_edge_contractions else {
+            return Ok(ContractionMeasurements::default());
+        };
+        if contractions.is_empty() {
+            return Ok(ContractionMeasurements::default());
+        }
+        let Some((rgb, shared)) = self.prepare_crop(sampled, sampled.audit.observation_bounds)?
+        else {
+            return Ok(ContractionMeasurements {
+                original: None,
+                variants: contractions
+                    .iter()
+                    .map(|_| ContractionOutcome::Skipped {
+                        reason: Rejection::PixelBudgetExceeded,
+                    })
+                    .collect(),
+            });
+        };
+        let original = predictor.recognize_with_ink(&rgb, shared)?;
+        let mut variants = Vec::new();
+        for (i, c) in contractions.iter().enumerate() {
+            let Some((rgb, shared)) = self.prepare_crop(sampled, c.evidence.retained)? else {
+                variants.push(ContractionOutcome::Skipped {
+                    reason: Rejection::PixelBudgetExceeded,
+                });
+                continue;
+            };
+            let recognition = predictor.recognize_with_ink(&rgb, shared)?;
+            let (transaction, rejection) =
+                match stroke_reconciliation::propose(&sampled.audit, i, &original, &recognition) {
+                    Ok(operation) => {
+                        let id = transactions.len();
+                        transactions.push(operation);
+                        (Some(id), None)
+                    }
+                    Err(reason) => (None, Some(reason)),
+                };
+            variants.push(ContractionOutcome::Measured {
+                recognition: Box::new(recognition),
+                transaction,
+                rejection,
+            });
+        }
+        Ok(ContractionMeasurements {
+            original: Some(Box::new(original)),
+            variants,
+        })
+    }
+
     fn recognize_variant(
         &mut self,
         sampled: &SampledLine,
@@ -201,24 +305,11 @@ impl PageContext<'_> {
             });
         }
         let b = extension.evidence.expanded;
-        let (width, height) = (b.right - b.left, b.bottom - b.top);
-        let cost = u64::from(width) * u64::from(height);
-        let Some(remaining) = self.remaining_pixels.checked_sub(cost) else {
+        let Some((rgb, shared)) = self.prepare_crop(sampled, b)? else {
             return Ok(VariantOutcome::Skipped {
                 reason: Rejection::PixelBudgetExceeded,
             });
         };
-        self.remaining_pixels = remaining;
-        let rgb = imageops::crop_imm(&sampled.rgb, b.left, b.top, width, height).to_image();
-        let normalized =
-            imageops::crop_imm(&sampled.normalized, b.left, b.top, width, height).to_image();
-        let shared = SourceInk::from_shared_raster(
-            &rgb,
-            &normalized,
-            sampled.audit.polarity.clone(),
-            self.policy.audit.segmentation_threshold,
-            &self.policy.audit.topology_thresholds,
-        )?;
         let Some(run_accounting) = (Sample {
             image: &sampled.normalized,
             frame: sampled.frame,
@@ -400,11 +491,14 @@ impl PageContext<'_> {
         let variants = (0..sampled.audit.boundary_extensions.len())
             .map(|i| self.recognize_variant(&sampled, i, &mut budget, predictor, transactions))
             .collect::<Result<Vec<_>, _>>()?;
+        sampled.measure_contractions(&self.policy.audit, &mut budget)?;
+        let contractions = self.recognize_contractions(&sampled, predictor, transactions)?;
         Ok(LineOutcome::Audited {
             audit: Box::new(sampled.audit),
             peer_search,
             charged_ink_checks: self.policy.audit.max_ink_checks - budget,
             variants,
+            contractions,
         })
     }
 }
@@ -540,7 +634,7 @@ pub fn reconcile_fragments(
     source.verify_pdf(pdf)?;
     Ok((
         FragmentReport {
-            schema_version: 7,
+            schema_version: 8,
             pdf_sha256: source.pdf_sha256.clone(),
             draft_model: source.model.clone(),
             secondary_model: RefinementModel::Consensus.label(),

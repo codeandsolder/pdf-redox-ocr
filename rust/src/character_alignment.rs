@@ -14,7 +14,7 @@ use crate::{
     glyph_confirmation::{ConfirmationDecision, ConfirmationPolicy},
     glyph_isolation::{InkGroup, MeasuredInk},
     ink_polarity::PolarityEvidence,
-    pixel_regions::PixelRegion,
+    pixel_regions::{InkBounds, PixelRegion},
     recognition::PixelLine,
 };
 use image::RgbImage;
@@ -201,7 +201,10 @@ pub(crate) struct EmissionCell {
     pub interval: [f64; 2],
 }
 
-pub(crate) fn anchor_candidates(cells: &[EmissionCell], runs: &[InkGroup]) -> Vec<CharacterAnchor> {
+pub(crate) fn anchor_candidates(
+    cells: &[EmissionCell],
+    runs: &[InkBounds],
+) -> Vec<CharacterAnchor> {
     cells
         .iter()
         .enumerate()
@@ -228,7 +231,7 @@ pub(crate) fn anchor_candidates(cells: &[EmissionCell], runs: &[InkGroup]) -> Ve
                 runs.iter()
                     .enumerate()
                     .filter_map(|(j, run)| {
-                        let b = run.run.ink;
+                        let b = run;
                         (f64::from(b.left) < right && f64::from(b.right) > left).then_some(j)
                     })
                     .collect()
@@ -370,7 +373,8 @@ fn prediction_anchors(
             })
         })
         .collect::<Result<Vec<_>, Error>>()?;
-    let mut anchors = anchor_candidates(&cells, runs);
+    let bounds = runs.iter().map(|g| g.run.ink).collect::<Vec<_>>();
+    let mut anchors = anchor_candidates(&cells, &bounds);
     align_runs(&mut anchors, runs.len(), dimensions.0);
     Ok(anchors)
 }
