@@ -922,8 +922,14 @@ alone never authorize a deletion. The same connected traversal records exact
 top/bottom continuation stripes in the transposed reading frame, with
 actual source bounds and per-component pixel counts. These can identify
 perpendicular drawing/witness lines inside a text crop without assuming
-they are separable at a longitudinal edge. Orthogonal stroke evidence is
-diagnostic only.
+they are separable at a longitudinal edge. Orthogonal stroke evidence includes every exact in-box cross-section.
+Recognition additionally measures a counterfactual that replaces only those
+thresholded pixels by the original background-class luminance in RGB and
+white in the shared normalized raster. Each component is counted once even
+if both entry edges prove it. The report binds the mask and paired original
+and masked recognitions by hashes, pixel counts and source spans, preserving
+all non-mask samples. The original recognition is shared with contractions.
+No orthogonal-mask recognition can yet authorize a transaction.
 
 The observation band can widen orthogonally only to fully measured,
 locally supported components with majority foreground and vertical extent
@@ -955,7 +961,7 @@ peer additionally requires stable independently localized literal text inside th
 observation, and cannot have a shared component cut by the replacement boundary.
 Native-text conflicts and incomplete peer samples abstain.
 
-The schema 9 report retains the original observation identity, all considered extensions and contractions,
+The schema 10 report retains the original observation identity, all considered extensions and contractions,
 conditional CTC evidence, common-raster run counts, peer evidence, transactions and
 conflicts. Strictly nested candidates can supersede a shorter candidate only if all added
 foreground is bound to tokens, the larger component chain and crop contain the
