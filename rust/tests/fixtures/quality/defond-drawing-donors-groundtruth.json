@@ -1,0 +1,566 @@
+{
+  "schema_version": 1,
+  "source_pdf_sha256": "1fce7d48e7fe2347759998c27d7bb7bde711ea5620e8219715e4ead54ac71ba1",
+  "coordinate_system": "PDF user space",
+  "provenance": "Visual transcription of original rendered DEFOND mechanical drawings on pages 30, 31, 33 and 35, inspected at 240/300 DPI on 2026-11-22 before OCR of those pages for this evaluation; anchors from original crop coordinates. Independently labeled donor pages, never use held-out page 28 as a donor. Slashed-circle diameter glyph transcribed as Ø by the existing reference convention.",
+  "samples": [
+    {
+      "page": 30,
+      "center": [
+        331.2,
+        768.709
+      ],
+      "text": "26.0",
+      "kind": "technical"
+    },
+    {
+      "page": 30,
+      "center": [
+        270,
+        740.809
+      ],
+      "text": "15.0",
+      "kind": "technical"
+    },
+    {
+      "page": 30,
+      "center": [
+        393.9,
+        740.809
+      ],
+      "text": "12.5",
+      "kind": "technical"
+    },
+    {
+      "page": 30,
+      "center": [
+        309.3,
+        703.009
+      ],
+      "text": "POS.1",
+      "kind": "technical"
+    },
+    {
+      "page": 30,
+      "center": [
+        352.5,
+        703.009
+      ],
+      "text": "POS.2",
+      "kind": "technical"
+    },
+    {
+      "page": 30,
+      "center": [
+        331.5,
+        696.709
+      ],
+      "text": "28°",
+      "kind": "technical"
+    },
+    {
+      "page": 30,
+      "center": [
+        480.6,
+        703.609
+      ],
+      "text": "9.0",
+      "kind": "technical"
+    },
+    {
+      "page": 30,
+      "center": [
+        394.2,
+        668.509
+      ],
+      "text": "14.5",
+      "kind": "technical"
+    },
+    {
+      "page": 30,
+      "center": [
+        276.6,
+        634.009
+      ],
+      "text": "11.3",
+      "kind": "technical"
+    },
+    {
+      "page": 30,
+      "center": [
+        393.3,
+        629.209
+      ],
+      "text": "12.3",
+      "kind": "technical"
+    },
+    {
+      "page": 30,
+      "center": [
+        521.7,
+        655.009
+      ],
+      "text": "1.0",
+      "kind": "technical"
+    },
+    {
+      "page": 30,
+      "center": [
+        523.5,
+        628.909
+      ],
+      "text": "7.5",
+      "kind": "technical"
+    },
+    {
+      "page": 30,
+      "center": [
+        276,
+        604.609
+      ],
+      "text": "10.5",
+      "kind": "technical"
+    },
+    {
+      "page": 30,
+      "center": [
+        349.2,
+        604.309
+      ],
+      "text": "0.8",
+      "kind": "technical"
+    },
+    {
+      "page": 30,
+      "center": [
+        318.6,
+        577.609
+      ],
+      "text": "9.6",
+      "kind": "technical"
+    },
+    {
+      "page": 30,
+      "center": [
+        480.9,
+        575.509
+      ],
+      "text": "6.3",
+      "kind": "technical"
+    },
+    {
+      "page": 31,
+      "center": [
+        254.4,
+        642.709
+      ],
+      "text": "15.1",
+      "kind": "technical"
+    },
+    {
+      "page": 31,
+      "center": [
+        254.1,
+        624.709
+      ],
+      "text": "9.6",
+      "kind": "technical"
+    },
+    {
+      "page": 31,
+      "center": [
+        480.6,
+        648.409
+      ],
+      "text": "5.0",
+      "kind": "technical"
+    },
+    {
+      "page": 31,
+      "center": [
+        501.6,
+        648.409
+      ],
+      "text": "13.5",
+      "kind": "technical"
+    },
+    {
+      "page": 31,
+      "center": [
+        397.5,
+        614.809
+      ],
+      "text": "20°",
+      "kind": "technical"
+    },
+    {
+      "page": 31,
+      "center": [
+        352.2,
+        570.709
+      ],
+      "text": "16.8",
+      "kind": "technical"
+    },
+    {
+      "page": 31,
+      "center": [
+        517.8,
+        574.909
+      ],
+      "text": "22.8REF",
+      "kind": "technical"
+    },
+    {
+      "page": 31,
+      "center": [
+        491.7,
+        566.509
+      ],
+      "text": "13.5",
+      "kind": "technical"
+    },
+    {
+      "page": 31,
+      "center": [
+        491.7,
+        535.909
+      ],
+      "text": "9.0",
+      "kind": "technical"
+    },
+    {
+      "page": 31,
+      "center": [
+        254.1,
+        511.309
+      ],
+      "text": "9.7",
+      "kind": "technical"
+    },
+    {
+      "page": 31,
+      "center": [
+        420.9,
+        512.509
+      ],
+      "text": "11.0",
+      "kind": "technical"
+    },
+    {
+      "page": 31,
+      "center": [
+        420.6,
+        502.009
+      ],
+      "text": "18.6",
+      "kind": "technical"
+    },
+    {
+      "page": 31,
+      "center": [
+        353.1,
+        473.509
+      ],
+      "text": "12.0",
+      "kind": "technical"
+    },
+    {
+      "page": 33,
+      "center": [
+        230.7,
+        652.609
+      ],
+      "text": "9.5",
+      "kind": "technical"
+    },
+    {
+      "page": 33,
+      "center": [
+        304.2,
+        606.409
+      ],
+      "text": "28.4REF",
+      "kind": "technical"
+    },
+    {
+      "page": 33,
+      "center": [
+        295.2,
+        594.109
+      ],
+      "text": "19.0",
+      "kind": "technical"
+    },
+    {
+      "page": 33,
+      "center": [
+        238.2,
+        569.209
+      ],
+      "text": "4.6",
+      "kind": "technical"
+    },
+    {
+      "page": 33,
+      "center": [
+        240.6,
+        546.409
+      ],
+      "text": "3.5",
+      "kind": "technical"
+    },
+    {
+      "page": 33,
+      "center": [
+        251.4,
+        524.509
+      ],
+      "text": "1.8",
+      "kind": "technical"
+    },
+    {
+      "page": 33,
+      "center": [
+        338.1,
+        522.709
+      ],
+      "text": "13.5",
+      "kind": "technical"
+    },
+    {
+      "page": 33,
+      "center": [
+        245.1,
+        509.209
+      ],
+      "text": "20.5",
+      "kind": "technical"
+    },
+    {
+      "page": 33,
+      "center": [
+        248.1,
+        496.609
+      ],
+      "text": "19.0",
+      "kind": "technical"
+    },
+    {
+      "page": 33,
+      "center": [
+        337.5,
+        488.509
+      ],
+      "text": "9.5",
+      "kind": "technical"
+    },
+    {
+      "page": 33,
+      "center": [
+        254.4,
+        471.109
+      ],
+      "text": "0.8",
+      "kind": "technical"
+    },
+    {
+      "page": 33,
+      "center": [
+        295.5,
+        462.709
+      ],
+      "text": "16.3",
+      "kind": "technical"
+    },
+    {
+      "page": 33,
+      "center": [
+        470.4,
+        494.209
+      ],
+      "text": "11.0",
+      "kind": "technical"
+    },
+    {
+      "page": 33,
+      "center": [
+        461.1,
+        469.609
+      ],
+      "text": "4.8",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        504.72,
+        771.829
+      ],
+      "text": "Ø18.5",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        517.68,
+        752.629
+      ],
+      "text": "Ø19.8",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        519.12,
+        716.869
+      ],
+      "text": "Ø20.8",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        372,
+        738.709
+      ],
+      "text": "16.0",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        393.6,
+        738.949
+      ],
+      "text": "12.4",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        414,
+        738.949
+      ],
+      "text": "3.0",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        461.52,
+        694.309
+      ],
+      "text": "9.3",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        464.64,
+        683.269
+      ],
+      "text": "PANEL CUTOUT",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        470.4,
+        667.189
+      ],
+      "text": "NOMINAL THICKNESS 1.0 to 2.5mm",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        469.68,
+        652.069
+      ],
+      "text": "Ø18.0",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        241.44,
+        625.669
+      ],
+      "text": "10.2",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        241.2,
+        587.749
+      ],
+      "text": "14.0",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        343.92,
+        569.749
+      ],
+      "text": "21.0",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        241.68,
+        549.589
+      ],
+      "text": "9.0",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        246,
+        521.509
+      ],
+      "text": "6.0(2X)",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        334.56,
+        521.749
+      ],
+      "text": "0.8 THK.",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        469.68,
+        523.429
+      ],
+      "text": "6.3",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        470.4,
+        510.469
+      ],
+      "text": "14.4",
+      "kind": "technical"
+    },
+    {
+      "page": 35,
+      "center": [
+        470.64,
+        500.389
+      ],
+      "text": "17.6",
+      "kind": "technical"
+    }
+  ]
+}

@@ -65,6 +65,8 @@ pub mod sample_layout;
 #[cfg(feature = "pdf-integration")]
 pub mod source_appearances;
 #[cfg(feature = "pdf-integration")]
+pub mod source_glyphs;
+#[cfg(feature = "pdf-integration")]
 pub mod source_mask;
 #[cfg(feature = "pdf-integration")]
 pub mod source_ocr;

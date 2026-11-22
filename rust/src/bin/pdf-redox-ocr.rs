@@ -58,6 +58,9 @@ struct Args {
     /// Export reviewed glyph appearance samples without modifying OCR text.
     #[arg(long, requires = "glyph_reference")]
     glyph_samples: Option<PathBuf>,
+    /// Additionally measure independently segmented source ink at the specified DPI.
+    #[arg(long, requires = "glyph_samples", value_parser = clap::value_parser!(u32).range(36..=2400))]
+    glyph_source_dpi: Option<u32>,
     /// Explicit new directory for lossless ordinary/treated residual raster captures.
     #[arg(long)]
     capture_residual_dir: Option<PathBuf>,
@@ -455,7 +458,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
             );
         }
     }
-    let reviewed = reference
+    let mut reviewed = reference
         .as_ref()
         .map(|reference| {
             ReviewedGlyphBank::from_audits(
@@ -467,6 +470,22 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
             )
         })
         .transpose()?;
+    if let (Some(dpi), Some(bank)) = (args.glyph_source_dpi, &mut reviewed) {
+        pdf_redox_ocr::source_glyphs::resample(
+            bank,
+            input.path(),
+            &result.character_audits,
+            &result.raster_character_mappings,
+            &result.residual_pages,
+            dpi,
+        )?;
+        if let Some(sampling) = &bank.source_sampling {
+            eprintln!(
+                "source glyphs: {} matched from {}/{} sampled lines at {} DPI",
+                sampling.matched_glyphs, sampling.sampled_lines, sampling.attempted_lines, dpi
+            );
+        }
+    }
     write_outputs(args, &input, job.original_bytes(), &result)?;
     if let (Some(path), Some(bank)) = (&args.glyph_samples, reviewed) {
         input.verify_recognized(&result.draft)?;

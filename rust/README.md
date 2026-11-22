@@ -476,7 +476,7 @@ overlay admission. This is a disagreement report, not ground-truth accuracy.
 
 ### Dotted layout leader evidence
 
-Line audit schema 5 includes a `leaders` array for each original source
+Line audit schema 6 includes a `leaders` array for each original source
 observation. The detector operates on actual native-resolution connected
 components in the rectified padded line frame. It requires at least five
 near-square, similarly sized, regularly spaced dots with at least two full
@@ -532,7 +532,7 @@ prediction/decision by exact RGB SHA-256 and dimensions. Full-raster inference
 calls remain separate from recognition-only batch counters. Disable the stage
 with `--no-leader-repair` for exact policy A/B comparisons. Native-only pages
 still initialize no model. The standalone line-audit tool remains purely
-diagnostic; its schema 5 and original PDF coordinate contract are unchanged.
+diagnostic; schema 6 adds source group appearance and the normalized raster digest; original PDF coordinates are unchanged.
 
 
 ### Experimental boundary-ink recovery
@@ -714,7 +714,7 @@ must independently identify a unique unclipped ink group. Whitespace is
 excluded from scalar alignment without case folding. Each exported
 sample retains its source PDF, scoped raster occurrence and crop identity, actual prediction,
 line score, page, ink geometry and 24x24 grayscale ink coverage together
-with the original dimensions. Schema 2 distinguishes raster-local detector
+with the original dimensions. Schema 3 distinguishes raster-local detector
 identities across regional crops on the same page. No reference text is applied to the draft.
 
 Compare held-out pages using the model-free matcher:
@@ -737,6 +737,21 @@ admitted nine candidates (three correct, six wrong substitutions); both
 diameter queries ranked the reviewed label first but failed the distance
 limit. Raw shape matching is diagnostic only; its evidence does not
 authorize Unicode substitution or overlay admission.
+
+For a controlled high-resolution appearance comparison, specify
+--glyph-source-dpi 600 during each bank extraction and
+--appearance source in the matching command.
+Each reviewed line is independently re-rendered from the unchanged PDF,
+using its actual primary reading frame. Source shapes are measured only
+for isolated, unclipped groups with substantial reciprocal geometric
+coverage and a unique association in both directions, including all
+unlabeled competitors. Each shape retains its source group index, exact
+normalized line raster digest/dimensions and mapped ink quad. Sampling
+failures and unmatched shapes remain explicit. Source-mode comparison
+requires equal sampling DPI, excludes identical original and source line
+crops, counts distinct source raster digests, and never falls back to
+primary appearances. This remains a held-out diagnostic, not a correction
+policy or new Unicode attribution.
 
 
 ### Direct native-image decoding experiment

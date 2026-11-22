@@ -7,11 +7,13 @@ use std::{
 };
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::{
     Error, PageNumber,
     draft::{OcrDraft, OcrLine, sha256_file},
     geometry::{DisplayMapper, PageBox, Point, Quad},
+    glyph_appearance::GlyphShape,
     glyph_isolation::{InkBand, InkGroup, InkIsolation, InkRun, isolate_ink},
     ink_polarity::{Polarity, PolarityEvidence},
     layout_leaders::{LeaderEvidence, detect_leaders},
@@ -46,7 +48,7 @@ impl Default for LineAuditPolicy {
 }
 
 impl LineAuditPolicy {
-    fn validate(&self) -> Result<(), Error> {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
         if !(36..=2400).contains(&self.dpi)
             || self.max_pixels == 0
             || self.segmentation_threshold == 0
@@ -92,6 +94,8 @@ pub struct MappedInkGroup {
     pub ink_quad: Quad,
     /// Original PDF quad for the actual topology sampling window.
     pub crop_quad: Quad,
+    /// Normalized source ink appearance, absent for clipped groups.
+    pub appearance: Option<GlyphShape>,
 }
 
 /// A connected component with its original PDF-space bounding quad.
@@ -142,6 +146,8 @@ pub struct AuditedLine {
     pub height: u32,
     pub axis_swapped: bool,
     pub polarity: PolarityEvidence,
+    /// SHA-256 of the actual rectified luminance raster after polarity normalization.
+    pub normalized_sha256: String,
     pub groups: Vec<MappedInkGroup>,
     pub components: Vec<MappedComponent>,
     pub supported_runs: Vec<MappedSupportedRun>,
@@ -177,7 +183,32 @@ fn mapped_leaders(
         .collect()
 }
 
-fn audit_line(
+fn mapped_groups(
+    groups: Vec<InkGroup>,
+    normalized: &image::GrayImage,
+    window: SampleWindow,
+    frame: LineFrame,
+) -> Result<Vec<MappedInkGroup>, Error> {
+    groups
+        .into_iter()
+        .map(|group| {
+            let appearance =
+                if group.touches_line_edge || group.run.observation_support.outside_pixels > 0 {
+                    None
+                } else {
+                    Some(GlyphShape::measure(normalized, group.run.ink)?)
+                };
+            Ok(MappedInkGroup {
+                ink_quad: window.quad(frame, group.run.ink),
+                crop_quad: window.quad(frame, group.crop),
+                group,
+                appearance,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn audit_line(
     pdf: &Path,
     metadata: &PdfMetadata,
     page: PageNumber,
@@ -236,14 +267,7 @@ fn audit_line(
         policy.segmentation_threshold,
         &policy.topology_thresholds,
     )?;
-    let groups = groups
-        .into_iter()
-        .map(|group| MappedInkGroup {
-            ink_quad: window.quad(frame, group.run.ink),
-            crop_quad: window.quad(frame, group.crop),
-            group,
-        })
-        .collect();
+    let groups = mapped_groups(groups, &normalized, window, frame)?;
     let leaders = mapped_leaders(&components, window, frame);
     let components = components
         .into_iter()
@@ -277,6 +301,7 @@ fn audit_line(
         height,
         axis_swapped: frame.axis_swapped,
         polarity,
+        normalized_sha256: hex::encode(Sha256::digest(normalized.as_raw())),
         groups,
         components,
         supported_runs,
@@ -341,7 +366,7 @@ pub fn audit_lines(
         ));
     }
     Ok(LineAuditReport {
-        schema_version: 5,
+        schema_version: 6,
         pdf_sha256: draft.pdf_sha256.clone(),
         draft_model: draft.model.clone(),
         dpi: policy.dpi,
