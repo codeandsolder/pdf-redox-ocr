@@ -345,7 +345,7 @@ fn source_edge_extensions_report_competing_observations_across_rotations()
         ));
         assert!(original_only.strip_fraction.abs() < 1e-9);
         assert!((original_only.expanded_peer_fraction - 1.0).abs() < 1e-9);
-        assert!(original_only.component_indices.is_empty());
+        assert_eq!(original_only.component_indices, [] as [usize; 0]);
         assert!((extension.added_strip[0].0 - 70.0).abs() < 1e-8);
         assert!(extension.proposed_quad[1].0 > 85.0);
         assert_eq!(line.original_quad, quad);
