@@ -196,12 +196,10 @@ impl SourceEdits {
             .copied()
     }
 
-    pub(crate) fn combine(votes: &[SourceVote]) -> Option<Self> {
+    pub(crate) fn combine<'a>(edits: impl Iterator<Item = &'a Self> + Clone) -> Option<Self> {
         Some(Self {
-            inserted: ChangePositions::combine(votes.iter().map(|v| &v.embedding.edits.inserted))?,
-            substituted: ChangePositions::combine(
-                votes.iter().map(|v| &v.embedding.edits.substituted),
-            )?,
+            inserted: ChangePositions::combine(edits.clone().map(|e| &e.inserted))?,
+            substituted: ChangePositions::combine(edits.map(|e| &e.substituted))?,
         })
     }
 }
@@ -332,7 +330,8 @@ pub fn propose(
     .ok_or(Rejection::UnlocalizedSourceEdit)?;
     // Text and geometry are identical across all feasible explanations;
     // keep the whole uncertainty set, not a fabricated unique old identity.
-    let edits = SourceEdits::combine(&votes).ok_or(Rejection::UnlocalizedSourceEdit)?;
+    let edits = SourceEdits::combine(votes.iter().map(|v| &v.embedding.edits))
+        .ok_or(Rejection::UnlocalizedSourceEdit)?;
     Ok(SourceRecognition {
         source_rgb_sha256: ink.rgb_sha256.clone(),
         revised_runs,

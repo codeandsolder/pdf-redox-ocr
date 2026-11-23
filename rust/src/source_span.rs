@@ -316,40 +316,8 @@ pub fn probe(input: SpanInput<'_>, remaining_checks: &mut u64) -> Result<SourceS
     if !models.contains(&RecognitionModel::Small) || !models.contains(&RecognitionModel::Medium) {
         return Ok(skip("unlocalized_original_text"));
     }
-    let mut possible_insert = BTreeSet::new();
-    let mut required_insert: Option<BTreeSet<usize>> = None;
-    let mut possible_change = BTreeSet::new();
-    let mut required_change: Option<BTreeSet<usize>> = None;
-    for vote in &votes {
-        let e = &vote.embedding.edits;
-        possible_insert.extend(e.inserted.possible.iter().copied());
-        possible_change.extend(e.substituted.possible.iter().copied());
-        let inserted = e.inserted.required.iter().copied().collect::<BTreeSet<_>>();
-        let changed = e
-            .substituted
-            .required
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        required_insert = Some(required_insert.map_or_else(
-            || inserted.clone(),
-            |prior| prior.intersection(&inserted).copied().collect(),
-        ));
-        required_change = Some(required_change.map_or_else(
-            || changed.clone(),
-            |prior| prior.intersection(&changed).copied().collect(),
-        ));
-    }
-    let edits = SourceEdits {
-        inserted: crate::source_reconciliation::ChangePositions {
-            possible: possible_insert.into_iter().collect(),
-            required: required_insert.unwrap_or_default().into_iter().collect(),
-        },
-        substituted: crate::source_reconciliation::ChangePositions {
-            possible: possible_change.into_iter().collect(),
-            required: required_change.unwrap_or_default().into_iter().collect(),
-        },
-    };
+    let edits = SourceEdits::combine(votes.iter().map(|v| &v.embedding.edits))
+        .ok_or_else(|| Error::Invalid("missing source-span embedding votes".into()))?;
     let accounting = sample.account(observation, peers, remaining_checks)?;
     let Some(source_accounting) =
         sample.account_spans(observation, &bands, peers, &accounting, remaining_checks)?
