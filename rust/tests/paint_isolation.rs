@@ -243,7 +243,7 @@ fn gray_image(value: u8) -> pdf_redox::OwnedObject {
     .collect();
     OwnedObject::Stream {
         dictionary,
-        data: StreamData::Owned(vec![value]),
+        data: StreamData::Owned(vec![value].into()),
     }
 }
 
