@@ -1,16 +1,17 @@
 //! Geometry-only isolation of visible ink along an OCR line.
 
-use image::{GrayImage, imageops};
-use serde::Serialize;
+use image::{GrayImage, Pixel, RgbImage, imageops};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     Error,
     glyph_topology::{GlyphTopology, analyze},
+    ink_polarity::{Polarity, PolarityEvidence, estimate},
     pixel_regions::{InkBounds, ObservationSupport, PixelClass, PixelRegion, regions},
 };
 
 /// A projection group and its exact constituent connected components.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InkRun {
     pub ink: InkBounds,
     /// Indices into the line's connected-component array.
@@ -19,7 +20,7 @@ pub struct InkRun {
 }
 
 /// One isolated ink group, with diagnostic topology at each requested threshold.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InkGroup {
     #[serde(flatten)]
     pub run: InkRun,
@@ -48,6 +49,41 @@ pub struct InkIsolation {
     /// Orthogonal projection of source-supported components. Detached marks
     /// may occupy their own band; neither bands nor runs imply characters.
     pub supported_bands: Vec<InkBand>,
+}
+
+/// Ordinary recognition-crop ink measurement shared by greedy and candidate
+/// geometry. Shape extraction can remain lazy for individual associated runs.
+pub(crate) struct MeasuredInk {
+    pub normalized: GrayImage,
+    pub polarity: PolarityEvidence,
+    pub isolation: InkIsolation,
+}
+
+impl MeasuredInk {
+    pub(crate) fn from_rgb(image: &RgbImage) -> Result<Self, Error> {
+        let dimensions = image.dimensions();
+        let gray = GrayImage::from_fn(dimensions.0, dimensions.1, |x, y| {
+            image.get_pixel(x, y).to_luma()
+        });
+        let polarity = estimate(&gray, Polarity::Auto)?;
+        let normalized = polarity.normalize(&gray);
+        let isolation = isolate_ink(
+            &normalized,
+            InkBounds {
+                left: 0,
+                top: 0,
+                right: dimensions.0,
+                bottom: dimensions.1,
+            },
+            192,
+            &[128, 192, 224],
+        )?;
+        Ok(Self {
+            normalized,
+            polarity,
+            isolation,
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -98,6 +134,20 @@ fn projection_runs(
                 observation_support: component.observation_support,
             });
         }
+    }
+    runs
+}
+
+/// Count exact occupied-column intervals in a subwindow, without computing
+/// component topology, allocating a crop or recognizing anything.
+#[cfg(any(all(feature = "pdf-integration", feature = "native-inference"), test))]
+pub(crate) fn occupied_run_count(image: &GrayImage, bounds: InkBounds, threshold: u8) -> usize {
+    let mut previous = false;
+    let mut runs = 0;
+    for x in bounds.left..bounds.right {
+        let present = (bounds.top..bounds.bottom).any(|y| image.get_pixel(x, y).0[0] < threshold);
+        runs += usize::from(present && !previous);
+        previous = present;
     }
     runs
 }
@@ -283,6 +333,10 @@ mod tests {
             });
             let components = regions(&image, 128, PixelClass::Ink, full(&image))?;
             let runs = projection_runs(&components, 0..components.len(), Axis::Columns);
+            assert_eq!(
+                super::occupied_run_count(&image, full(&image), 128),
+                runs.len()
+            );
             let mut actual = [false; 4];
             for run in &runs {
                 for x in run.ink.left..run.ink.right {

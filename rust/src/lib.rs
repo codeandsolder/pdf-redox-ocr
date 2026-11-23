@@ -5,16 +5,28 @@
 
 pub mod artifacts;
 pub mod boundary_ink;
+pub mod candidate_ink;
+pub mod candidate_ranking;
 #[cfg(feature = "pdf-integration")]
 pub mod catalog_evidence;
 pub mod character_alignment;
 pub mod crop_geometry;
 pub mod crop_repair;
+pub mod ctc_alignment;
+pub mod ctc_evidence;
 #[cfg(feature = "pdf-integration")]
 pub mod direct_images;
 mod disjoint_set;
 pub mod draft;
 pub mod draft_compare;
+#[cfg(any(feature = "pdf-integration", test))]
+mod foreign_ink;
+#[cfg(any(feature = "pdf-integration", test))]
+mod fragment_ink;
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+mod fragment_reconciliation;
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+pub mod fragment_refinement;
 pub mod geometry;
 pub mod glyph_appearance;
 pub mod glyph_confirmation;
@@ -31,6 +43,8 @@ pub mod layout_leaders;
 #[cfg(feature = "pdf-integration")]
 pub mod line_audit;
 mod line_frame;
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+mod mask_reconciliation;
 #[cfg(feature = "pdf-integration")]
 pub mod mixed_visibility;
 #[cfg(feature = "pdf-integration")]
@@ -41,6 +55,8 @@ pub mod mosaic_ocr;
 pub mod native_font_mask;
 pub mod native_images;
 pub mod native_words;
+#[cfg(any(all(feature = "pdf-integration", feature = "native-inference"), test))]
+mod orthogonal_mask;
 pub mod page_selection;
 #[cfg(feature = "pdf-integration")]
 pub mod paint_isolation;
@@ -55,8 +71,12 @@ pub mod polygon;
 pub mod quality_eval;
 pub mod rasterize;
 pub mod recognition;
+pub mod recognition_model;
 #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
 pub mod refinement;
+pub mod refinement_evidence;
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+pub mod refinement_recognition;
 #[cfg(feature = "pdf-integration")]
 pub mod region_ocr;
 pub mod reviewed_glyphs;
@@ -70,9 +90,13 @@ pub mod source_glyphs;
 pub mod source_mask;
 #[cfg(feature = "pdf-integration")]
 pub mod source_ocr;
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+mod source_reconciliation;
 #[cfg(feature = "pdf-integration")]
 mod source_samples;
 pub mod source_selection;
+#[cfg(all(feature = "native-inference", feature = "pdf-integration"))]
+mod stroke_reconciliation;
 
 use thiserror::Error;
 

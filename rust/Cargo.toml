@@ -10,7 +10,7 @@ description = "Native Rust structure-aware PDF optical character recognition"
 [dependencies]
 quick-xml = "0.42"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.11"
 hex = "0.4"
 thiserror = "2"
@@ -89,3 +89,13 @@ required-features = ["cli"]
 name = "pdf-redox-ocr-glyph-match"
 path = "src/bin/pdf-redox-ocr-glyph-match.rs"
 required-features = ["cli"]
+
+[[bin]]
+name = "pdf-redox-ocr-candidate-rank"
+path = "src/bin/pdf-redox-ocr-candidate-rank.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "pdf-redox-ocr-fragment-reconcile"
+path = "src/bin/pdf-redox-ocr-fragment-reconcile.rs"
+required-features = ["native-inference", "pdf-integration", "cli"]

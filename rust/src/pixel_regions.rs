@@ -2,12 +2,12 @@
 
 use image::GrayImage;
 use num_traits::ToPrimitive;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::Error;
 
 /// Half-open bounds in a source raster.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InkBounds {
     pub left: u32,
     pub top: u32,
@@ -51,7 +51,7 @@ impl InkBounds {
 }
 
 /// Pixel support inside and outside the supplied observation.
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct ObservationSupport {
     pub inside_pixels: u64,
     pub outside_pixels: u64,
@@ -78,6 +78,27 @@ impl ObservationSupport {
     }
 }
 
+/// Nearest actual component pixels beyond either reading-axis edge, within
+/// the observation's orthogonal band. Left is exclusive; right is inclusive.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct BandNeighbors {
+    pub left: Option<u32>,
+    pub right: Option<u32>,
+}
+
+impl BandNeighbors {
+    fn record(&mut self, x: u32, y: u32, observation: InkBounds) {
+        if !(observation.top..observation.bottom).contains(&y) {
+            return;
+        }
+        if x < observation.left {
+            self.left = Some(self.left.map_or(x + 1, |old| old.max(x + 1)));
+        } else if x >= observation.right {
+            self.right = Some(self.right.map_or(x, |old| old.min(x)));
+        }
+    }
+}
+
 /// A threshold-connected set of actual raster pixels.
 #[derive(Clone, Debug, Serialize)]
 pub struct PixelRegion {
@@ -86,6 +107,7 @@ pub struct PixelRegion {
     pub centroid: [f64; 2],
     pub touches_line_edge: bool,
     pub observation_support: ObservationSupport,
+    pub band_neighbors: BandNeighbors,
 }
 
 /// Dual digital topology: eight-connected ink, four-connected background.
@@ -157,7 +179,12 @@ impl Flood<'_> {
         }
     }
 
-    fn region(&mut self, seed: usize, observation: InkBounds) -> Result<PixelRegion, Error> {
+    fn region(
+        &mut self,
+        seed: usize,
+        observation: InkBounds,
+        mut visit: impl FnMut(u32, u32),
+    ) -> Result<PixelRegion, Error> {
         self.enqueue(seed);
         let mut bounds = InkBounds {
             left: self.image.width(),
@@ -168,6 +195,7 @@ impl Flood<'_> {
         let mut area = 0_usize;
         let mut sums = [0.0, 0.0];
         let mut support = ObservationSupport::default();
+        let mut band_neighbors = BandNeighbors::default();
         while let Some(index) = self.stack.pop() {
             let x = u32::try_from(index % self.width)
                 .map_err(|_| Error::Invalid("unrepresentable region X".into()))?;
@@ -181,6 +209,8 @@ impl Flood<'_> {
             sums[0] += f64::from(x);
             sums[1] += f64::from(y);
             support.record(x, y, observation);
+            band_neighbors.record(x, y, observation);
+            visit(x, y);
             self.neighbors(index);
         }
         let denominator = area
@@ -192,6 +222,7 @@ impl Flood<'_> {
             centroid: sums.map(|sum| sum / denominator),
             touches_line_edge: bounds.touches_edge(self.image.width(), self.image.height()),
             observation_support: support,
+            band_neighbors,
         })
     }
 }
@@ -202,6 +233,18 @@ pub(crate) fn regions(
     threshold: u8,
     class: PixelClass,
     observation: InkBounds,
+) -> Result<Vec<PixelRegion>, Error> {
+    regions_visit(image, threshold, class, observation, |_, _, _| {})
+}
+
+/// Visit every member pixel exactly once with its resulting component index.
+/// The index is identical to that returned by the ordinary regions traversal.
+pub(crate) fn regions_visit(
+    image: &GrayImage,
+    threshold: u8,
+    class: PixelClass,
+    observation: InkBounds,
+    mut visit: impl FnMut(usize, u32, u32),
 ) -> Result<Vec<PixelRegion>, Error> {
     let (width, height) = image.dimensions();
     let total = usize::try_from(u64::from(width) * u64::from(height))
@@ -229,7 +272,8 @@ pub(crate) fn regions(
     let mut result = Vec::new();
     for (seed, &value) in image.as_raw().iter().enumerate() {
         if !flood.visited[seed] && class.accepts(value, threshold) {
-            result.push(flood.region(seed, observation)?);
+            let index = result.len();
+            result.push(flood.region(seed, observation, |x, y| visit(index, x, y))?);
         }
     }
     Ok(result)

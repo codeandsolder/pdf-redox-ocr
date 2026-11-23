@@ -14,7 +14,7 @@ use pdf_redox_ocr::{
     artifacts::{check_output_paths as check_paths, write_atomic},
     crop_repair::RepairPolicy,
     draft::OcrDraft,
-    inference::{LineOrientationMode, OcrInference, RecognitionModel},
+    inference::{CharacterEvidence, LineOrientationMode, OcrInference},
     input_preparation::{PreparationMode, PreparedInput},
     mosaic::MosaicBudget,
     native_images::NativeImageBudget,
@@ -25,6 +25,7 @@ use pdf_redox_ocr::{
     quality_eval::GroundTruth,
     rasterize::{DEFAULT_PAGE_MAX_SIDE, RenderPolicy},
     recognition::RecognitionCacheBudget,
+    recognition_model::RecognitionModel,
     reviewed_glyphs::ReviewedGlyphBank,
 };
 
@@ -46,24 +47,8 @@ struct Args {
     /// Write an optional PDF annotated through the Rust pdf-redox importer.
     #[arg(long)]
     output_pdf: Option<PathBuf>,
-    /// Optional SHA-bound JSON audit of source recognition, paint proofs and routing.
-    #[arg(long)]
-    report: Option<PathBuf>,
-    /// Include actual CTC positions and independent source ink group evidence.
-    #[arg(long, requires = "report")]
-    character_audit: bool,
-    /// Source-SHA-bound manual reference for labeling uniquely aligned glyphs.
-    #[arg(long, requires = "glyph_samples")]
-    glyph_reference: Option<PathBuf>,
-    /// Export reviewed glyph appearance samples without modifying OCR text.
-    #[arg(long, requires = "glyph_reference")]
-    glyph_samples: Option<PathBuf>,
-    /// Additionally measure independently segmented source ink at the specified DPI.
-    #[arg(long, requires = "glyph_samples", value_parser = clap::value_parser!(u32).range(36..=2400))]
-    glyph_source_dpi: Option<u32>,
-    /// Explicit new directory for lossless ordinary/treated residual raster captures.
-    #[arg(long)]
-    capture_residual_dir: Option<PathBuf>,
+    #[command(flatten)]
+    evidence: EvidenceArgs,
     /// One-based pages separated by commas or inclusive ranges, e.g. 1,3-5.
     #[arg(long)]
     pages: Option<String>,
@@ -115,6 +100,31 @@ struct Args {
     /// Maximum aggregate decoded pixels per page (including distinct context checks in Hayro).
     #[arg(long, default_value_t = 64_000_000)]
     max_native_extraction_pixels: u64,
+}
+
+#[derive(Debug, clap::Args)]
+struct EvidenceArgs {
+    /// Optional SHA-bound JSON audit of source recognition, paint proofs and routing.
+    #[arg(long)]
+    report: Option<PathBuf>,
+    /// Include actual CTC positions and independent source ink group evidence.
+    #[arg(long, requires = "report")]
+    character_audit: bool,
+    /// Record actual CTC class scores and bounded competing sequence hypotheses.
+    #[arg(long, requires = "report")]
+    ctc_audit: bool,
+    /// Source-SHA-bound manual reference for labeling uniquely aligned glyphs.
+    #[arg(long, requires = "glyph_samples")]
+    glyph_reference: Option<PathBuf>,
+    /// Export reviewed glyph appearance samples without modifying OCR text.
+    #[arg(long, requires = "glyph_reference")]
+    glyph_samples: Option<PathBuf>,
+    /// Additionally measure independently segmented source ink at the specified DPI.
+    #[arg(long, requires = "glyph_samples", value_parser = clap::value_parser!(u32).range(36..=2400))]
+    glyph_source_dpi: Option<u32>,
+    /// Explicit new directory for lossless ordinary/treated residual raster captures.
+    #[arg(long)]
+    capture_residual_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -255,6 +265,7 @@ fn write_outputs(
         None
     };
     let audit = args
+        .evidence
         .report
         .as_ref()
         .map(|_| -> Result<Vec<u8>, Box<dyn Error>> {
@@ -290,7 +301,7 @@ fn write_outputs(
     if let (Some(output_path), Some(bytes)) = (args.output_pdf.as_ref(), annotated) {
         write_atomic(output_path, &bytes)?;
     }
-    if let (Some(path), Some(bytes)) = (&args.report, audit) {
+    if let (Some(path), Some(bytes)) = (&args.evidence.report, audit) {
         write_atomic(path, &bytes)?;
     }
     Ok(())
@@ -341,13 +352,13 @@ fn validate_inputs(args: &Args) -> Result<Option<GroundTruth>, Box<dyn Error>> {
     }
     if args.output.is_none()
         && args.output_pdf.is_none()
-        && args.report.is_none()
-        && args.glyph_samples.is_none()
+        && args.evidence.report.is_none()
+        && args.evidence.glyph_samples.is_none()
     {
         return Err("request at least one draft, searchable PDF or audit output".into());
     }
     if args.preparation.optimize
-        && (args.output.is_some() || args.glyph_samples.is_some())
+        && (args.output.is_some() || args.evidence.glyph_samples.is_some())
         && args.preparation.optimized_pdf.is_none()
     {
         return Err(
@@ -358,11 +369,11 @@ fn validate_inputs(args: &Args) -> Result<Option<GroundTruth>, Box<dyn Error>> {
     let paths = [
         args.output.as_deref(),
         args.output_pdf.as_deref(),
-        args.report.as_deref(),
+        args.evidence.report.as_deref(),
         args.preparation.optimized_pdf.as_deref(),
-        args.capture_residual_dir.as_deref(),
+        args.evidence.capture_residual_dir.as_deref(),
         args.preparation.output_glyph_catalog.as_deref(),
-        args.glyph_samples.as_deref(),
+        args.evidence.glyph_samples.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -374,7 +385,8 @@ fn validate_inputs(args: &Args) -> Result<Option<GroundTruth>, Box<dyn Error>> {
             return Err("glyph catalog aliases PDF source".into());
         }
     }
-    args.glyph_reference
+    args.evidence
+        .glyph_reference
         .as_ref()
         .map(|path| -> Result<GroundTruth, Box<dyn Error>> {
             check_paths(path, &paths)?;
@@ -419,7 +431,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     let reference = validate_inputs(args)?;
     let input = prepare_input(args, reference.as_ref())?;
     let job = PreparedOcr::open(input.path(), args.pages.as_deref(), configured_policy(args))?;
-    if let Some(directory) = &args.capture_residual_dir {
+    if let Some(directory) = &args.evidence.capture_residual_dir {
         fs::create_dir(directory)?;
     }
     let engine = OcrInference::pp_ocrv6(
@@ -429,7 +441,14 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
             boundaries: args.recognition.boundary_repair,
             minimum_confidence: args.confidence.max(0.97),
         },
-        args.character_audit || input.catalog().is_some() || reference.is_some(),
+        if args.evidence.ctc_audit {
+            CharacterEvidence::Ctc
+        } else if args.evidence.character_audit || input.catalog().is_some() || reference.is_some()
+        {
+            CharacterEvidence::Geometry
+        } else {
+            CharacterEvidence::Off
+        },
         args.recognition.recognizer,
         args.recognition.confirm_with.map(|model| {
             pdf_redox_ocr::inference::AlternativeRecognizer {
@@ -444,7 +463,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     let mut result = job.recognize(
         &engine,
         CliObserver {
-            capture: args.capture_residual_dir.clone(),
+            capture: args.evidence.capture_residual_dir.clone(),
         },
     )?;
     if let Some(catalog) = input.catalog() {
@@ -470,7 +489,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
             )
         })
         .transpose()?;
-    if let (Some(dpi), Some(bank)) = (args.glyph_source_dpi, &mut reviewed) {
+    if let (Some(dpi), Some(bank)) = (args.evidence.glyph_source_dpi, &mut reviewed) {
         pdf_redox_ocr::source_glyphs::resample(
             bank,
             input.path(),
@@ -487,7 +506,7 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
         }
     }
     write_outputs(args, &input, job.original_bytes(), &result)?;
-    if let (Some(path), Some(bank)) = (&args.glyph_samples, reviewed) {
+    if let (Some(path), Some(bank)) = (&args.evidence.glyph_samples, reviewed) {
         input.verify_recognized(&result.draft)?;
         eprintln!(
             "reviewed glyphs: {} from {} matched source lines",

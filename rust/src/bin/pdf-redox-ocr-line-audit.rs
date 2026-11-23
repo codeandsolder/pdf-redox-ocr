@@ -46,6 +46,9 @@ struct Args {
     /// Maximum source or oriented crop size, in pixels, per line.
     #[arg(long, default_value_t = 2_000_000)]
     max_pixels: u64,
+    /// Maximum total raster-pixel/peer membership checks per line.
+    #[arg(long, default_value_t = 32_000_000)]
+    max_ink_checks: u64,
     /// Foreground polarity; auto uses measured perimeter luminance classes.
     #[arg(long, value_enum, default_value = "auto")]
     polarity: ForegroundMode,
@@ -71,9 +74,10 @@ fn run(args: &Args) -> Result<(), Box<dyn Error>> {
     let mut policy = LineAuditPolicy {
         dpi: args.dpi,
         max_pixels: args.max_pixels,
+        max_ink_checks: args.max_ink_checks,
         segmentation_threshold: args.segmentation_threshold,
         polarity: args.polarity.into(),
-        padding_pixels: args.padding_pixels,
+        padding_pixels: Some([args.padding_pixels; 4]),
         ..LineAuditPolicy::default()
     };
     if !args.threshold.is_empty() {

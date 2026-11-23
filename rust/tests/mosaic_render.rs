@@ -113,6 +113,46 @@ fn native_mosaic_crop_matches_poppler_full_page_across_real_pdf_effects()
 }
 
 #[test]
+fn fractional_page_boundary_crop_matches_full_native_render()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let pdf = dir.path().join("fractional-boundaries.pdf");
+    fs::write(
+        &pdf,
+        include_bytes!("fixtures/fractional-page-boundaries.pdf"),
+    )?;
+    let metadata = PdfMetadata::open(&pdf)?;
+    for number in 1..=4 {
+        let page = PageNumber::new(number)?;
+        let mapper = metadata.mapper(page)?;
+        let media = *metadata
+            .media_boxes()
+            .get(&page)
+            .ok_or("fixture media box")?;
+        for dpi in [72, 300, 600, 1200] {
+            let crop = render_rgb_region(&pdf, page, mapper, media, dpi, 2_000_000)?;
+            let full = Command::new("pdftoppm")
+                .args([
+                    "-f",
+                    &number.to_string(),
+                    "-l",
+                    &number.to_string(),
+                    "-r",
+                    &dpi.to_string(),
+                    "-singlefile",
+                ])
+                .arg(&pdf)
+                .output()?;
+            assert!(full.status.success());
+            let reference =
+                image::load_from_memory_with_format(&full.stdout, ImageFormat::Pnm)?.into_rgb8();
+            assert_eq!(crop.rgb, reference, "page {number} at {dpi} DPI");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn group_estimate_or_source_orientation_does_not_bypass_resource_limits()
 -> Result<(), Box<dyn std::error::Error>> {
     let doc =

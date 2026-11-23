@@ -14,8 +14,8 @@ use crate::{
     geometry::{Point, Quad, QuadBounds},
     ink_polarity::Polarity,
     layout_leaders::{LeaderEdge, LeaderEvidence, detect_leaders},
-    line_frame::{LineFrame, SampleWindow},
-    pixel_regions::{InkBounds, PixelClass, regions},
+    line_frame::{LineAxis, LineFrame, SampleWindow},
+    pixel_regions::{InkBounds, PixelClass, PixelRegion, regions},
     polygon::overlap_fraction,
     recognition::PixelLine,
 };
@@ -154,51 +154,24 @@ fn added_strip(
     window.quad(frame, bounds)
 }
 
-fn crop_evidence(
-    image: &RgbImage,
+/// Select the geometry-supported repair independently of raster sampling.
+fn select_repair_body(
+    components: &[PixelRegion],
     lines: &[PixelLine],
     index: usize,
-    rotate180: bool,
     policy: RepairPolicy,
-    budget: &mut u64,
-) -> Option<CropEvidence> {
+    window: SampleWindow,
+    frame: LineFrame,
+) -> Option<(InkBounds, CropReason, Vec<Quad>)> {
     let line = &lines[index];
-    if !policy.boundaries && !leader_candidate(line, policy) {
-        return None;
-    }
-    let mut frame = LineFrame::new(line.quad, |points| points, MAX_LINE_PIXELS).ok()?;
-    // OAR rotates tall crops counterclockwise, so their reading axis grows
-    // along the original downward image axis. The diagnostic frame alone
-    // has no reading-direction contract.
-    if frame.axis_swapped != rotate180 {
-        frame.corners.rotate_left(2);
-    }
-    let inside = |Point(x, y): Point| {
-        (0.0..=f64::from(image.width())).contains(&x)
-            && (0.0..=f64::from(image.height())).contains(&y)
-    };
-    let window = SampleWindow::new(
-        frame,
-        inside,
-        frame.height.saturating_mul(2),
-        MAX_LINE_PIXELS,
-    )
-    .ok()?;
-    let dimensions = window.dimensions(frame)?;
-    let count = u64::from(dimensions.0) * u64::from(dimensions.1);
-    *budget = budget.checked_sub(count)?;
     let observation = window.observation(frame);
-    let (normalized, _) = window
-        .normalized_ink(frame, image, |point| point, Polarity::Auto)
-        .ok()?;
-    let components = regions(&normalized, 192, PixelClass::Ink, observation).ok()?;
-    let all_leaders = detect_leaders(&components, observation);
+    let all_leaders = detect_leaders(components, observation);
     let leaders = all_leaders
         .iter()
         .filter(|l| policy.leaders && has_leader_text(&line.text, l.edge))
         .cloned()
         .collect::<Vec<_>>();
-    let (body, reason, added_strips) = if !leaders.is_empty() {
+    if !leaders.is_empty() {
         let mut body = observation;
         for leader in &leaders {
             body.left = body.left.max(leader.body.left);
@@ -207,9 +180,9 @@ fn crop_evidence(
         if body.left >= body.right {
             return None;
         }
-        (body, CropReason::PeriodicLeader { leaders }, vec![])
+        Some((body, CropReason::PeriodicLeader { leaders }, vec![]))
     } else if policy.boundaries && all_leaders.is_empty() {
-        let resolved = detect_boundaries(&components, observation, dimensions.0)
+        let resolved = detect_boundaries(components, observation, window.dimensions(frame)?.0)
             .into_iter()
             .filter_map(|edge| {
                 let quad = added_strip(window, frame, observation, &edge);
@@ -228,10 +201,66 @@ fn crop_evidence(
             .iter()
             .map(|e| e.expanded)
             .fold(observation, InkBounds::union);
-        (body, CropReason::BoundaryInk { edges }, strips)
+        Some((body, CropReason::BoundaryInk { edges }, strips))
     } else {
+        None
+    }
+}
+
+fn crop_evidence(
+    image: &RgbImage,
+    lines: &[PixelLine],
+    index: usize,
+    rotate180: bool,
+    policy: RepairPolicy,
+    budget: &mut u64,
+) -> Option<CropEvidence> {
+    let line = &lines[index];
+    if !policy.boundaries && !leader_candidate(line, policy) {
         return None;
+    }
+    let mut frame = LineFrame::new(
+        line.quad,
+        |points| points,
+        MAX_LINE_PIXELS,
+        LineAxis::Longest,
+    )
+    .ok()?;
+    // OAR rotates tall crops counterclockwise, so their reading axis grows
+    // along the original downward image axis. The diagnostic frame alone
+    // has no reading-direction contract.
+    if frame.axis_swapped != rotate180 {
+        frame.corners.rotate_left(2);
+    }
+    let inside = |Point(x, y): Point| {
+        (0.0..=f64::from(image.width())).contains(&x)
+            && (0.0..=f64::from(image.height())).contains(&y)
     };
+    let window = SampleWindow::new(
+        frame,
+        inside,
+        [frame.height.saturating_mul(2); 4],
+        MAX_LINE_PIXELS,
+    )
+    .ok()?;
+    let dimensions = window.dimensions(frame)?;
+    let count = u64::from(dimensions.0) * u64::from(dimensions.1);
+    *budget = budget.checked_sub(count)?;
+    let observation = window.observation(frame);
+    let rectified = window
+        .rectify(
+            frame,
+            image,
+            |point| point,
+            |pixel| image::Pixel::to_luma(&pixel),
+        )
+        .ok()?;
+    let (normalized, _) = window
+        .normalize_ink(frame, &rectified, Polarity::Auto)
+        .ok()?;
+    let components = regions(&normalized, 192, PixelClass::Ink, observation).ok()?;
+    let (body, reason, added_strips) =
+        select_repair_body(&components, lines, index, policy, window, frame)?;
     // The frame may swap axes for vertical lines. The recognition-only
     // predictor still has to confirm the exact body on the proved edge.
     // Restore original detector corner identity when mapping back.

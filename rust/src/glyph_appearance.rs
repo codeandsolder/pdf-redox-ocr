@@ -82,6 +82,34 @@ impl GlyphShape {
         })
     }
 
+    /// Original tight ink dimensions.
+    #[must_use]
+    pub const fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// Stable enclosed-region count over six fixed coverage thresholds.
+    ///
+    /// # Errors
+    /// Rejects invalid normalized coverage.
+    pub fn stable_hole_count(&self) -> Result<Option<usize>, Error> {
+        let gray = GrayImage::from_raw(SIDE, SIDE, self.coverage.iter().map(|v| 255 - v).collect())
+            .ok_or_else(|| Error::Invalid("invalid normalized glyph coverage".into()))?;
+        let mut counts = std::collections::BTreeMap::new();
+        // coverage >= t corresponds to luminance < 256-t.
+        for threshold in [208, 176, 144, 112, 80, 48] {
+            let holes = crate::glyph_topology::analyze(&gray, threshold)?
+                .enclosed_background_regions
+                .into_iter()
+                .filter(|r| r.area_pixels >= 3)
+                .count();
+            *counts.entry(holes).or_insert(0) += 1;
+        }
+        Ok(counts
+            .into_iter()
+            .find_map(|(holes, count)| (count >= 4).then_some(holes)))
+    }
+
     /// Symmetric, scale-normalized distance including original aspect ratio.
     /// A one-cell translation search accounts for rasterization and tight-box
     /// rounding without permitting arbitrary deformation or rotation.

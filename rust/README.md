@@ -93,7 +93,7 @@ Contained lower-resolution requests are skipped and the existing mosaic
 pixel, DPI and group budgets bound regional work. Only qualified lines fully
 inside the crop, non-overlapping accepted page/source OCR and native text,
 supplement the draft. These are page observations, not independent image
-source proofs. The schema-18 regional_ocr audit records crop identity, mapping,
+source proofs. The schema-19 regional_ocr audit records crop identity, mapping,
 observations and admission decisions.
 For fallback page OCR, a temporary Rust-generated PDF makes native searchable
 font shows invisible using mode 3 while retaining the original text-show
@@ -176,7 +176,7 @@ half-turn. The same vertices are retained; raw detector and crop-repair audits
 keep the original detector ordering. Native-only documents still need no model
 session.
 
-The optional `--report audit.json` writes a separate schema-18 diagnostic
+The optional `--report audit.json` writes a separate schema-19 diagnostic
 report bound to the original PDF digest and model provenance. It includes
 the validated policy, raw native-image observations in source-pixel
 coordinates, original paint paths and native-only blockers, the per-page
@@ -237,43 +237,93 @@ source-resolution mosaics and stale source rejection.
 
 ## Native Rust recognition-only refinement
 
-The independent second pass is provided by `pdf-redox-ocr-refine`. It consumes
-an exact-PDF-bound v3 draft, selects uncertain lines, perspective-crops only
-those quads from the original page raster, and runs the PP-OCRv6 medium
-recognition model without re-detecting lines. The OAR text-line orientation
-classifier corrects upside-down crops by default (disable with `--no-cls`).
-Models and dictionary default to OAR's verified cache; explicit ONNX,
-orientation-model and dictionary paths are supported.
+The independent research pass is provided by `pdf-redox-ocr-refine`. It
+consumes an exact-PDF-bound v3 draft and samples only the requested original
+visible source line regions at 600 DPI by default. It uses the original
+BL/BR/TR/TL reading-order quad, rectified with bilinear RGB sampling, and
+never re-detects lines, invokes an orientation classifier, or masks native
+fonts. The complete page paint stack is respected. Both outer render pixels
+and rectified pixels are charged to the line and page budgets before rendering
+(defaults 2M and 32M). Geometry or budget failures are explicitly retained
+as skipped targets rather than substituted with another recognition crop.
+The source PDF hash is verified before and after refinement.
 
 ```sh
 pdf-redox-ocr-refine --pdf input.pdf --primary-ocr observations.json \
   --report medium-comparison.json --experimental-draft medium-hypotheses.json \
-  --max-primary-score 0.97 --pages 8,10
+  --max-primary-score 0.97 --pages 8,10 --ocr-threads 6
 ```
 
-Output is a comparison report and a distinct experimental v3 draft, never an
-automatic rewrite of the primary PDF. The experimental draft has every line
-unreviewed with confidence **zero**, including unchanged lines. Unicode NFKC
-and whitespace differences are recorded as equivalent, but altered case,
-digits, punctuation, and units remain distinct. No second model is loaded if
-nothing qualifies for refinement. For **high-confidence errors**, pass exact
-original-draft indices with repeatable `--line PAGE:INDEX` instead of editing a
-reduced copy of the OCR observations; these line numbers are zero-based and are
-validated against the unchanged source draft, bypassing only confidence and
-minimum-length selection:
+Use `--recognizer small` or `--recognizer medium` (default) for greedy
+hypotheses from the same official recognition model path as production.
+The experimental `--recognizer consensus` records both models at
+85%, 100%, 120%, and 150% horizontal source-crop width. Each separate
+inference records its actual RGB digest, dimensions, greedy prediction
+and CTC sequence evidence. The fixed research rule requires at least five
+distinct model-and-RGB views, both models represented, and a unique winning text; each
+vote must have a distinct runner-up with retained path weight at most
+25% of the top hypothesis. Whitespace differences alone are ignored.
+The selected literal text comes from an actual winning view, preferring
+the unstretched crop. Sequence weights are bounded-search evidence,
+not calibrated probabilities of correctness.
+
+For high-confidence errors, target exact original draft indices:
 
 ```sh
 pdf-redox-ocr-refine --pdf input.pdf --primary-ocr observations.json \
-  --line 28:2 --line 28:11 --report diameter-hypotheses.json \
-  --experimental-draft diameter-experimental.json
+  --line 28:2 --line 28:11 --recognizer consensus \
+  --report diameter-hypotheses.json --experimental-draft diameter-experimental.json
 ```
 
-The second-pass report schema 2 identifies `selection_mode` as `confidence`
-or `explicit-lines`, and emits null selection thresholds in explicit mode.
-Every experimental draft line remains unreviewed with confidence zero regardless
-of selection. When searchable native fonts overlap selected pages, an ephemeral
-render-only font mask is used as in primary OCR. Both CLIs share strict
-page-selection and atomic output handling.
+The refinement report schema 4 records crop geometry, actual sample hash,
+render resolution and budgets, per-view recognition evidence and explicit
+abstention or skipped targets. Literal non-whitespace changes remain
+distinct (including NFKC-compatible forms such as superscripts and full-width
+punctuation). The separate experimental v3 draft sets **every** line
+confidence to zero and reviewed=false, including unchanged lines. This
+research command never changes production OCR admission or overwrites the
+input PDF/draft. No model is loaded when no eligible region is sampled.
+
+### Offline topology comparison of saved candidates
+
+The model-free executable `pdf-redox-ocr-candidate-rank` consumes a schema 4
+refinement report and independently transcribed schema 3 source glyph banks
+at the same sampling DPI. Build it with
+`cargo build --release --no-default-features --features cli --bin pdf-redox-ocr-candidate-rank`.
+It requires neither a PDF rendering backend nor ONNX Runtime.
+
+```sh
+pdf-redox-ocr-candidate-rank --pdf input.pdf --primary-ocr observations.json \
+  --refinement-report refinement.json --donor reviewed-a.json \
+  --donor reviewed-b.json --report ranking.json \
+  --experimental-draft topology-draft.json
+```
+
+The report and draft must describe the same original observations (page,
+line index, literal text, binary64 confidence and quad coordinates). Each
+candidate binding is recomputed from conditional entry intervals and the
+shared, unstretched source ink. Only actual retained alternatives are eligible:
+every differing scalar must uniquely bind the same visible, unclipped ink
+run in both hypotheses, with support from both recognizers. Whitespace
+aliases do not contribute extra votes.
+
+The shape rule counts enclosed background regions of at least three
+normalized pixels at six fixed coverage thresholds. A count is stable only
+if at least four thresholds agree. The alternative label needs at least
+two distinct independently transcribed source-line hashes with the observed
+count. The incumbent label also needs two independent donors, none with
+the observed count. The query page and an identical normalized query crop
+are excluded from all donor evidence. This is empirical compatibility with
+a finite donor bank, not a universal assertion about character shapes.
+
+Only one eligible entire alternative may win. Insertions, deletions,
+unresolved geometry and conflicting alternatives abstain. The rank report
+contains donor identities, measured counts, view indices, selected changes
+and hashes of the artifacts used. Exact PDF provenance and consistent saved
+metadata are checked; the saved report is not a cryptographic proof of OCR.
+The output is another research-only draft, preserving source geometry but
+clearing **all** confidence and review flags. No PDF or production admission
+decision changes.
 
 ## Source-bound manual OCR quality evaluation
 
@@ -353,8 +403,9 @@ pdf-redox-ocr-line-audit --pdf source.pdf --primary-ocr draft.json \
 
 The command checks the original PDF digest, renders only the specified line's
 bounding region (600 DPI by default), and rectifies its ordered quadrilateral
-into an oriented grayscale raster. An elongated vertical observation uses
-the longer axis; this does not determine reading direction. The original
+into the original OCR observation's classified reading-order grayscale frame.
+A tall singleton retains its actual reading axis, just like recognition;
+the physical page rotation and aspect ratio do not reclassify the text. The original
 observation's luminance histogram is partitioned using Otsu's method. The
 background class is estimated from unique perimeter pixels (overall class
 occupancy breaks ties). The measured background is mapped to white after
@@ -393,11 +444,28 @@ original PDF-space quadrilaterals, line-edge contact at the segmentation
 threshold, and topology at the selected cutoffs (64/128/192/224 by default).
 Topology at a higher threshold can include additional ink at the crop edge.
 
+Version-9 line reports enumerate local, fully sampled edge-component
+chains, including entire neighboring glyphs. Each `boundary_extensions`
+entry records the proposed quad, newly added strip, measured component
+indices, and overlapping OCR-line or native-text region identities.
+Intersection fractions refer independently to the added strip and the
+peer quad; original-only peer intersections are included with zero strip
+coverage, and full proposed-quad coverage is reported separately; component intersections are bounding-quad evidence, not a
+pixel ownership proof. Invalid peer geometry rejects the diagnostic
+rather than silently ignoring competing observations. Each proposal also
+counts actual normalized foreground sample centers in the original
+observation, added strip and remainder of the same raster. Per-component
+and per-peer counts retain exact identity; the peer union counts coinciding
+regions only once. Peers extending outside the sample are explicitly
+marked incomplete. Membership checks are bounded by the per-line
+`--max-ink-checks` budget (32M by default), with explicit budget-exceeded
+outcomes. These proposals do not authorize recognition, merging, or draft changes.
+
 This is an inspection of visible ink groups, not a character segmentation
 guarantee. It does not compare group counts with recognized strings, assign
 Unicode, exclude unrelated diagram strokes, or edit the input draft. The
 renderer and rectified image are independently bounded by `--max-pixels`.
-The report records both original and oriented line geometry.
+The report records the original reading-order quad and measured padded sample geometry.
 
 ## Correctness policy
 
@@ -438,7 +506,7 @@ At least one draft, searchable PDF or audit must be requested.
 Retaining a draft with processing requires `--optimized-pdf`, because
 its SHA and user-space geometry bind to the exact prepared PDF, not the
 original source. The optimizer report and actual configuration are recorded
-under `preparation` in schema-18 CLI audits, alongside both input hashes;
+under `preparation` in schema-19 CLI audits, alongside both input hashes;
 the existing `pdf_sha256` refers to the OCR input. Reverify the original
 and prepared source hashes before applying or publishing results.
 Processing is intentionally not lossless in every case (microstroke
@@ -526,7 +594,7 @@ retained, not invented. Failed or conflicting crops leave original
 observations unchanged. Failed repair attempts prevent caching the incomplete
 raster result; successful exact RGB reuse includes the confirmed repairs.
 
-Pipeline audit schema 18 records original pixel-space observations, sample
+Pipeline audit schema 20 records original pixel-space observations, sample
 frame, component bounds, typed crop reason, proposed quad and each actual
 prediction/decision by exact RGB SHA-256 and dimensions. Full-raster inference
 calls remain separate from recognition-only batch counters. Disable the stage
@@ -556,7 +624,7 @@ substitutions are encoded. Accepted crop geometry and model confidence
 replace the original; failures prevent exact-RGB result caching. The
 experimental flag is off by default until broader representative validation.
 All repair kinds share a 2M-pixel per-window and 16M-pixel per-raster sampling
-budget, prioritizing terminal-leader candidates, and schema-18 `crop_repairs` records the original prediction,
+budget, prioritizing terminal-leader candidates, and schema-19 `crop_repairs` records the original prediction,
 actual geometry, type-specific evidence and independent prediction/outcome.
 `recognition.crop_batches` counts actual recognition-only batches (leader and boundary batches are separate to preserve existing leader inference ordering);
 leader/boundary candidate/accepted counters are independent.
@@ -602,7 +670,7 @@ sorted detector index (not final draft index), exact rectified RGB crop
 hash/dimensions, padding geometry, raw CTC column indices, projected ink
 and alignment candidates. Component indices address the entry's component
 array. Positions and ink bounds are in the **rectified recognition-crop
-frame**. Schema 18 additionally records a reconstructible projective crop
+frame**. Schema 20 additionally records a reconstructible projective crop
 mapping for actual detector quadrilaterals, verified against returned crop
 dimensions and the OAR rotation contract. The `raster_character_mappings`
 field binds whole-page, regional, native-image and reconstructed mosaic
@@ -617,6 +685,32 @@ Audit pixel work is bounded to 16M sampled crop pixels per raster; skipped
 or invalid observations are counted. Cache hits reuse the same original
 raster audit, and enabling the diagnostic requires an explicit audit output.
 Existing geometry-supported crop repairs remain independent.
+
+Use `--ctc-audit --report audit.json` to additionally inspect actual CTC class
+probabilities (including blank) at the primary greedy emission columns and
+five competing sequence hypotheses. This opts into full model output from
+the **same** recognition inference, not a second recognition or a different
+crop. The bounded prefix search retains 12 prefixes and considers all
+transitions into retained prefixes. For new children, the strongest 14
+classes per column suffice to reproduce a full-vocabulary beam step
+(blank and the repeated last class are the only exceptional transitions).
+Subnormal products fall back to bounded full-vocabulary selection to preserve
+the deterministic tie break. The audit displays only the top 8 classes
+plus blank at each greedy emission. Its reported log mass is a lower bound
+on CTC path mass, **not** a calibrated character or sequence correctness
+probability. It never changes the greedy prediction, line confidence,
+confirmation policy or OCR admission. It also captures alternative-model
+evidence when confirmation is requested. Each retained class sequence is
+additionally aligned using the full original
+probability tensor and a log-domain forward/backward automaton. It reports
+the exact unpruned sequence mass and conditional token entry modes and 95%
+equal-tail intervals (not label correctness or glyph boxes). Refinement
+records a shared source-ink segmentation and candidate-specific geometric
+associations across all horizontal views. Ambiguous joins, clipping and
+entry intervals extending into padding are not proof of a character.
+Ordinary recognition retains OAR's compact output path; full CTC diagnostics
+temporarily allocate the
+owned class tensor and require an explicit audit output.
 
 
 Manual-reference files remain separate by selection: the original Walsin
@@ -796,3 +890,117 @@ appearances. The
 existing extraction ceiling limits attempted target pixels per page in
 the direct path, not unrelated images. It is a decoded-pixel policy, not
 a hard bound on interpreter or compressed-stream allocation.
+
+### Source fragment reconciliation research
+
+`pdf-redox-ocr-fragment-reconcile --pdf FILE --primary-ocr DRAFT --line PAGE:INDEX --report REPORT --experimental-draft RESEARCH`
+evaluates bounded source edge extensions and source-supported stroke contractions
+with the Small+Medium four-stretch CTC recognizer.
+By default the source sampling window scales with the measured line height:
+longitudinal margin covers the maximum extension distance and its background
+margin, while each orthogonal margin covers one glyph height. An explicit
+`--padding-pixels` replaces this with a uniform diagnostic margin. Actual
+within-page sampled bounds are recorded per line.
+The explicit line-audit command also reports source-edge contraction geometry
+for a long connected stroke with predominantly external foreground. The
+entire in-observation tip must be a sustained stripe: contiguous column
+cross-sections sharing a row, contained in an equally long immediately
+adjacent exterior stripe. The cut preserves all other actual in-box
+component pixels, even at a shared half-open boundary. This refuses an
+attached genuine glyph whose cross-section deviates from the external
+stroke. For research reconciliation, the unchanged and contracted
+recognition crops are exact subimages of the same normalized source raster.
+The contraction must conserve all remaining foreground and produce a literal
+edge deletion supported by both models. Original CTC hypotheses are remapped
+to an ordered partition of the measured exterior stroke tips and retained
+runs; all removed runs must correspond to deleted tokens and every surviving
+token must preserve its run identity in the contracted recognition. This
+works even when the two partitions meet at a half-open boundary without
+a blank column. A contraction and an expansion compete in the same atomic
+transaction resolution; neither can supersede the other. Geometry diagnostics
+alone never authorize a deletion. The same connected traversal records exact
+top/bottom continuation stripes in the transposed reading frame, with
+actual source bounds and per-component pixel counts. These can identify
+perpendicular drawing/witness lines inside a text crop without assuming
+they are separable at a longitudinal edge. Orthogonal stroke evidence includes every exact in-box cross-section.
+Recognition additionally measures a counterfactual that replaces only those
+thresholded pixels by the original background-class luminance in RGB and
+white in the shared normalized raster. Each component is counted once even
+if both entry edges prove it. The report binds the mask and paired original
+and masked recognitions by hashes, pixel counts and source spans, preserving
+all non-mask samples. The original recognition is shared with contractions.
+A masked text-only correction requires unique retained-run assignment in
+both models, compatible localization of the very same revised class sequence
+before masking, and increased full conditional CTC log odds versus the same
+primary class sequence. Original and masked crops of identical dimensions share
+a batch for each model and stretch. Missing comparison sequences are
+scored exactly from the same complete inference distributions, independently
+of beam rank, and serialized as explicit queries with their own token mapping.
+Queries never participate in recognition consensus. An ordered token assignment must preserve the exact
+transcription of every unaffected source group. Only groups with measured
+removed foreground may change their labels; split groups retain a common
+original identity. Each accepted vote records the path-mass comparison and
+an explicit compatible ordered assignment. These text-only operations
+participate in the existing atomic conflict resolver. The output remains
+research-only and non-importable.
+
+Nondeleting text revisions inside the original observation are handled
+separately from crop expansion and stroke removal. The exact occupied-column
+projection preselects observations in which an injective revised transcription
+is possible. Both models must support the same revised run assignment.
+A bounded ordered minimum-cost embedding consumes every original token at a
+compatible source run and every revised token in reading order. Literal
+retention and insertion have zero cost; a substitution costs one. The number
+of insertions is fixed by the revised length. This permits substitutions,
+insertions, and mixed edits without inventing deletions or arbitrary old-token
+identities. Each view records all possible and required insertion/substitution
+positions across minimum-cost complete embeddings; their union and intersection
+are retained across accepted views. Every possibly edited run must have
+unclipped independent ink, with exact peer accounting rejecting overlapping
+OCR/native text. Explicit original CTC queries score even absent beam sequences;
+the consensus winner must have higher exact mass in each accepted view.
+Every text-only correction enters the same atomic conflict resolver and keeps
+unchanged original geometry.
+
+The observation band can widen orthogonally only to fully measured,
+locally supported components with majority foreground and vertical extent
+inside the original band. Their measured height is not capped by the
+detected height. Re-measure the expanded band and reject unrelated newly included body
+ink; original, longitudinal additions, orthogonal additions and outside
+foreground are counted separately. Added tokens must bind to longitudinal
+ink, not to repaired original glyph tops or bottoms. Competing peers in
+the orthogonal addition cause abstention.
+When a measured local extension reaches a separate OCR peer and the peer
+exceeds the normal search horizon, a single bounded retry expands the common
+sample enough to measure that peer in full. Candidate chains must still obey
+local component/gap/obstruction constraints; additional peers cannot recursively
+extend the horizon. The ordinary sample is retained unless the retry can account
+for a previously incomplete peer, preserves all already complete peer evidence,
+and fits the same page and ink-check budgets. The report records the retry plan
+and total charged ink checks. Explicit diagnostic padding disables this retry.
+Every expanded recognition window is an exact
+subimage of that raster, using the original observation's measured luminance normalization.
+Recognition runs are independently counted in the common raster, including how much
+original and added foreground each contains and each peer's actual foreground count.
+Conservation is checked against the connected-component audit.
+
+All added non-whitespace tokens must have a stable, ordered unique assignment to runs
+containing actual added foreground in both recognizer models. Existing tokens are
+constrained to runs containing original foreground. A consumed neighboring observation
+must have its added foreground accounted for by those bindings. A partially captured
+peer additionally requires stable independently localized literal text inside the new
+observation, and cannot have a shared component cut by the replacement boundary.
+Native-text conflicts and incomplete peer samples abstain.
+
+The schema 15 report retains the original observation identity, all considered extensions and contractions,
+conditional CTC evidence, common-raster run counts, peer evidence, transactions and
+conflicts. Strictly nested candidates can supersede a shorter candidate only if all added
+foreground is bound to tokens, the larger component chain and crop contain the
+smaller, every preserved token has identical common-raster run bounds and pixel
+support, and peer claims are unchanged. The report records every strict
+dominator. Remaining operations sharing observations or overlapping replacement
+geometry are blocked symmetrically; dominated options do not revive on conflict. The output is a **non-importable schema 0 draft** with every
+confidence zero and no reviewed flags. This is an offline diagnostic, not automatic
+overlay admission. The combined page pixel budget covers padded source renders,
+rectification, variant crops and separately sampled peers. The ink-check budget is
+shared across component and run measurements for each original line.

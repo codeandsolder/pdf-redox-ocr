@@ -8,17 +8,18 @@ use crate::{
     Error,
     crop_geometry::CropGeometry,
     crop_repair::BodyPrediction,
+    ctc_evidence::CtcOutcome,
     disjoint_set::DisjointSet,
     glyph_appearance::GlyphShape,
     glyph_confirmation::{ConfirmationDecision, ConfirmationPolicy},
-    glyph_isolation::{InkGroup, isolate_ink},
-    ink_polarity::{Polarity, PolarityEvidence, estimate},
+    glyph_isolation::{InkGroup, MeasuredInk},
+    ink_polarity::PolarityEvidence,
     pixel_regions::{InkBounds, PixelRegion},
     recognition::PixelLine,
 };
-use image::{Pixel, RgbImage};
+use image::RgbImage;
 use num_traits::ToPrimitive;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -49,7 +50,7 @@ impl BatchGeometry {
         Ok(Self { tensor_width })
     }
 
-    fn resized_width(self, (w, h): (u32, u32)) -> Result<usize, Error> {
+    pub(crate) fn resized_width(self, (w, h): (u32, u32)) -> Result<usize, Error> {
         Ok(
             (INPUT_SHAPE[1].to_f32().ok_or_else(invalid_geometry)? * ratio(w, h)?)
                 .ceil()
@@ -74,7 +75,7 @@ fn invalid_geometry() -> Error {
 
 /// One observed CTC token. Its signed pixel coordinate is intentionally
 /// unclamped; an emission in right padding is not a source glyph.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct CharacterAnchor {
     pub character: char,
     pub column: usize,
@@ -84,7 +85,7 @@ pub struct CharacterAnchor {
 }
 
 /// Ordered matching describes geometric compatibility, not character identity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum RunAlignment {
     Whitespace,
@@ -92,6 +93,8 @@ pub enum RunAlignment {
     NoInk,
     /// More characters share the ink than can be separately identified.
     NoInjectiveAssignment,
+    /// A potentially visible neighboring hypothesis can also claim this run.
+    UncertainNeighbor,
     /// At least two ordered, injective assignments are possible.
     Ambiguous {
         first: usize,
@@ -118,6 +121,8 @@ pub struct CharacterLineAudit {
     pub tensor_width: usize,
     pub resized_width: usize,
     pub sequence_length: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ctc: Option<CtcOutcome>,
     pub polarity: PolarityEvidence,
     pub components: Vec<PixelRegion>,
     pub runs: Vec<InkGroup>,
@@ -131,6 +136,8 @@ pub struct ConfirmedPrediction {
     pub tensor_width: usize,
     pub resized_width: usize,
     pub sequence_length: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ctc: Option<CtcOutcome>,
     pub anchors: Vec<CharacterAnchor>,
     pub decision: ConfirmationDecision,
 }
@@ -185,35 +192,54 @@ const MAX_SAMPLE_PIXELS: u64 = 16_000_000;
 /// Match each CTC emission to ink groups with a local reading-axis cell.
 /// Cells are divided by neighboring nonspace peaks. This gives evidence
 /// for ambiguous joins/splits instead of manufacturing a one-to-one mapping.
-fn anchor_candidates(cells: &[(char, usize, f64)], runs: &[InkGroup]) -> Vec<CharacterAnchor> {
+/// A model position, with a range of plausible entry columns already
+/// mapped into the original (unstretched) source crop.
+pub(crate) struct EmissionCell {
+    pub character: char,
+    pub column: usize,
+    pub position: f64,
+    pub interval: [f64; 2],
+}
+
+pub(crate) fn anchor_candidates(
+    cells: &[EmissionCell],
+    runs: &[InkBounds],
+) -> Vec<CharacterAnchor> {
     cells
         .iter()
         .enumerate()
-        .map(|(i, &(character, column, x))| {
+        .map(|(i, cell)| {
+            // An outer envelope of all midpoint cells implied by the marginal
+            // entry intervals. A wider interval never manufactures a unique
+            // mapping. This is geometric compatibility, not a joint posterior.
             let left = cells[..i]
                 .iter()
                 .rev()
-                .find(|(c, _, _)| !c.is_whitespace())
-                .map_or(f64::NEG_INFINITY, |(_, _, p)| x.midpoint(*p));
+                .find(|other| !other.character.is_whitespace())
+                .map_or(f64::NEG_INFINITY, |other| {
+                    cell.interval[0].midpoint(other.interval[0])
+                });
             let right = cells[i + 1..]
                 .iter()
-                .find(|(c, _, _)| !c.is_whitespace())
-                .map_or(f64::INFINITY, |(_, _, p)| x.midpoint(*p));
-            let candidate_runs = if character.is_whitespace() {
+                .find(|other| !other.character.is_whitespace())
+                .map_or(f64::INFINITY, |other| {
+                    cell.interval[1].midpoint(other.interval[1])
+                });
+            let candidate_runs = if cell.character.is_whitespace() {
                 vec![]
             } else {
                 runs.iter()
                     .enumerate()
                     .filter_map(|(j, run)| {
-                        let b = run.run.ink;
+                        let b = run;
                         (f64::from(b.left) < right && f64::from(b.right) > left).then_some(j)
                     })
                     .collect()
             };
             CharacterAnchor {
-                character,
-                column,
-                crop_x: x,
+                character: cell.character,
+                column: cell.column,
+                crop_x: cell.position,
                 candidate_runs,
                 alignment: RunAlignment::NoInk,
             }
@@ -261,7 +287,7 @@ fn extreme_assignment(
 /// Group mutually competing tokens by shared ink runs. An unresolvable
 /// touching-glyph cluster cannot poison unrelated glyph associations in the
 /// same line. Ordered extrema solve each independent candidate component.
-fn align_runs(anchors: &mut [CharacterAnchor], run_count: usize, crop_width: u32) {
+pub(crate) fn align_runs(anchors: &mut [CharacterAnchor], run_count: usize, crop_width: u32) {
     let mut components = DisjointSet::new(anchors.len());
     let mut owner = vec![None; run_count];
     for (index, anchor) in anchors.iter_mut().enumerate() {
@@ -338,14 +364,17 @@ fn prediction_anchors(
         .into_iter()
         .zip(columns.iter().copied())
         .map(|(character, column)| {
-            Ok((
+            let position = (column.to_f64().ok_or_else(invalid_geometry)? + 0.5) * scale;
+            Ok(EmissionCell {
                 character,
                 column,
-                (column.to_f64().ok_or_else(invalid_geometry)? + 0.5) * scale,
-            ))
+                position,
+                interval: [position; 2],
+            })
         })
         .collect::<Result<Vec<_>, Error>>()?;
-    let mut anchors = anchor_candidates(&cells, runs);
+    let bounds = runs.iter().map(|g| g.run.ink).collect::<Vec<_>>();
+    let mut anchors = anchor_candidates(&cells, &bounds);
     align_runs(&mut anchors, runs.len(), dimensions.0);
     Ok(anchors)
 }
@@ -385,6 +414,7 @@ impl CharacterLineAudit {
             tensor_width: batch.tensor_width,
             resized_width: batch.resized_width(self.crop_dimensions)?,
             sequence_length: length,
+            ctc: None,
             anchors,
             decision,
         })
@@ -399,22 +429,11 @@ impl CharacterLineAudit {
     ) -> Result<Self, Error> {
         let dimensions = crop.dimensions();
         let resized_width = batch.resized_width(dimensions)?;
-        let gray = image::GrayImage::from_fn(dimensions.0, dimensions.1, |x, y| {
-            crop.get_pixel(x, y).to_luma()
-        });
-        let polarity = estimate(&gray, Polarity::Auto)?;
-        let normalized = polarity.normalize(&gray);
-        let isolation = isolate_ink(
-            &normalized,
-            InkBounds {
-                left: 0,
-                top: 0,
-                right: dimensions.0,
-                bottom: dimensions.1,
-            },
-            192,
-            &[128, 192, 224],
-        )?;
+        let MeasuredInk {
+            normalized,
+            polarity,
+            isolation,
+        } = MeasuredInk::from_rgb(crop)?;
         let anchors = prediction_anchors(
             &original.text,
             dimensions,
@@ -443,6 +462,7 @@ impl CharacterLineAudit {
             tensor_width: batch.tensor_width,
             resized_width,
             sequence_length,
+            ctc: None,
             polarity,
             components: isolation.components,
             runs: isolation.groups,

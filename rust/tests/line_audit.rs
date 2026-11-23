@@ -121,7 +121,7 @@ fn source_padding_recovers_clipped_stroke_across_rotations()
         &draft,
         &targets,
         &LineAuditPolicy {
-            padding_pixels: 36,
+            padding_pixels: Some([36; 4]),
             ..LineAuditPolicy::default()
         },
     )?;
@@ -227,7 +227,7 @@ fn periodic_source_leader_mapping_preserves_body_ink_across_rotations()
         &draft,
         &targets,
         &LineAuditPolicy {
-            padding_pixels: 160,
+            padding_pixels: Some([160; 4]),
             ..LineAuditPolicy::default()
         },
     )?;
@@ -250,6 +250,178 @@ fn periodic_source_leader_mapping_preserves_body_ink_across_rotations()
         assert!((leader.body_quad[2].0 - 79.0).abs() < 0.5);
         assert_eq!(line.original_quad, quad);
         assert_eq!(line.original_text, "A.B...");
+    }
+    Ok(())
+}
+
+#[test]
+fn source_edge_extensions_report_competing_observations_across_rotations()
+-> Result<(), Box<dyn std::error::Error>> {
+    use pdf_redox_ocr::{layout_leaders::LeaderEdge, line_audit::BoundaryPeer};
+
+    let directory = tempfile::tempdir()?;
+    let pdf = directory.path().join("source.pdf");
+    let quad = [
+        Point(50.0, 65.0),
+        Point(70.0, 65.0),
+        Point(70.0, 91.0),
+        Point(50.0, 91.0),
+    ];
+    let peer_quad = [
+        Point(73.0, 65.0),
+        Point(94.0, 65.0),
+        Point(94.0, 91.0),
+        Point(73.0, 91.0),
+    ];
+    let (mut draft, targets) = fixture_draft(&pdf, quad, "0")?;
+    for page in &mut draft.pages {
+        page.lines.push(OcrLine {
+            text: "8".into(),
+            confidence: 0.99,
+            quad: peer_quad,
+            reviewed: false,
+        });
+        page.native_text_regions.extend([peer_quad, quad]);
+    }
+    let report = audit_lines(
+        &pdf,
+        &draft,
+        &targets,
+        &LineAuditPolicy {
+            padding_pixels: Some([240; 4]),
+            ..LineAuditPolicy::default()
+        },
+    )?;
+    assert_eq!(report.schema_version, 16);
+    for line in report.lines {
+        let extension = line
+            .boundary_extensions
+            .iter()
+            .find(|e| {
+                e.evidence.edge == LeaderEdge::Right
+                    && e.overlaps
+                        .iter()
+                        .any(|o| matches!(o.peer, BoundaryPeer::OcrLine { line_index: 1 }))
+            })
+            .ok_or("missing adjacent glyph proposal")?;
+        assert_eq!(extension.overlaps.len(), 3);
+        let pdf_redox_ocr::line_audit::InkAccounting::Measured {
+            peers_fully_sampled,
+            peers,
+            peer_union,
+            sample,
+            ..
+        } = &extension.ink_accounting
+        else {
+            return Err("expected measured ink accounting".into());
+        };
+        assert_eq!(peers_fully_sampled, &[true, true, true]);
+        assert_eq!(peers[&0], peers[&1]);
+        assert_eq!(peer_union.original, sample.original);
+        assert_eq!(peer_union.axis_added, peers[&0].axis_added);
+        assert_eq!(peer_union.outside_expansion, peers[&0].outside_expansion);
+        assert_eq!(peers[&2].original, sample.original);
+        assert_eq!(peers[&2].axis_added, 0);
+        assert!(peer_union.axis_added > 0);
+
+        assert!(
+            extension
+                .overlaps
+                .iter()
+                .any(|o| matches!(o.peer, BoundaryPeer::NativeText { region_index: 0 }))
+        );
+        for overlap in &extension.overlaps[..2] {
+            assert!(overlap.strip_fraction > 0.0 && overlap.strip_fraction <= 1.0);
+            assert!(overlap.peer_fraction > 0.0 && overlap.peer_fraction <= 1.0);
+            assert_eq!(
+                overlap.component_indices,
+                extension.evidence.component_indices
+            );
+        }
+        let original_only = &extension.overlaps[2];
+        assert!(matches!(
+            original_only.peer,
+            BoundaryPeer::NativeText { region_index: 1 }
+        ));
+        assert!(original_only.strip_fraction.abs() < 1e-9);
+        assert!((original_only.expanded_peer_fraction - 1.0).abs() < 1e-9);
+        assert_eq!(original_only.component_indices, [] as [usize; 0]);
+        assert!((extension.added_strips[0][0].0 - 70.0).abs() < 1e-8);
+        assert!(extension.proposed_quad[1].0 > 85.0);
+        assert_eq!(line.original_quad, quad);
+    }
+    Ok(())
+}
+
+#[test]
+fn tall_single_glyph_preserves_classified_reading_axis_across_page_rotations()
+-> Result<(), Box<dyn std::error::Error>> {
+    use pdf_redox_ocr::layout_leaders::LeaderEdge;
+    let directory = tempfile::tempdir()?;
+    let pdf = directory.path().join("tall.pdf");
+    // Two narrow tall glyph-like components. Reading order is explicitly
+    // horizontal even though the first glyph box is twice as tall as wide.
+    let content = b"0 g 42 42 4 18 re f 52 42 5 18 re f";
+    fs::write(
+        &pdf,
+        support::pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R] /Count 4 /MediaBox [0 0 100 100] >>"
+                .to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R /Rotate 90 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R /Rotate 180 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /Contents 7 0 R /Rotate 270 >>".to_vec(),
+            support::stream("", content),
+        ]),
+    )?;
+    let quad = [
+        Point(40., 40.),
+        Point(48., 40.),
+        Point(48., 62.),
+        Point(40., 62.),
+    ];
+    let draft = OcrDraft::new(
+        sha256_file(&pdf)?,
+        "classified singleton".into(),
+        (1..=4)
+            .map(|page| DraftPage {
+                page,
+                native_text_regions: vec![],
+                lines: vec![OcrLine {
+                    text: "1".into(),
+                    confidence: 0.99,
+                    quad,
+                    reviewed: false,
+                }],
+            })
+            .collect(),
+    );
+    let targets = (1..=4)
+        .map(|page| Ok((PageNumber::new(page)?, BTreeSet::from([0]))))
+        .collect::<Result<Targets, pdf_redox_ocr::Error>>()?;
+    let report = audit_lines(
+        &pdf,
+        &draft,
+        &targets,
+        &LineAuditPolicy {
+            padding_pixels: Some([100; 4]),
+            ..LineAuditPolicy::default()
+        },
+    )?;
+    for line in report.lines {
+        let obs = line.observation_bounds;
+        assert_eq!(obs.right - obs.left, 67);
+        assert_eq!(obs.bottom - obs.top, 184);
+        let extension = line
+            .boundary_extensions
+            .iter()
+            .find(|e| e.evidence.edge == LeaderEdge::Right)
+            .ok_or("missing right-side glyph from tall classified observation")?;
+        assert!((extension.proposed_quad[0].0 - 40.).abs() < 1e-8);
+        assert!(extension.proposed_quad[1].0 > 57.);
+        assert!((extension.proposed_quad[2].1 - 62.).abs() < 1e-8);
+        assert_eq!(line.original_quad, quad);
     }
     Ok(())
 }

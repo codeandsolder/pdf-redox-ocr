@@ -1,6 +1,74 @@
 //! Convex PDF paint clipping and OCR polygon intersection.
 
-use crate::geometry::Point;
+#[cfg(any(feature = "pdf-integration", test))]
+use crate::Error;
+use crate::geometry::{Point, Quad};
+
+pub(crate) fn convex(quad: &Quad) -> bool {
+    let mut positive = false;
+    for index in 0..4 {
+        let [a, b, c] = [quad[index], quad[(index + 1) % 4], quad[(index + 2) % 4]];
+        let cross = (b.0 - a.0).mul_add(c.1 - b.1, -(b.1 - a.1) * (c.0 - b.0));
+        if !cross.is_finite()
+            || cross.abs() <= 1e-9
+            || (index != 0 && cross.is_sign_positive() != positive)
+        {
+            return false;
+        }
+        positive = cross.is_sign_positive();
+    }
+    true
+}
+
+#[cfg(any(feature = "pdf-integration", test))]
+pub(crate) struct ConvexQuad {
+    pub(crate) corners: Quad,
+    positive: bool,
+    min: Point,
+    max: Point,
+}
+
+#[cfg(any(feature = "pdf-integration", test))]
+impl ConvexQuad {
+    pub(crate) fn new(corners: Quad) -> Result<Self, Error> {
+        if !convex(&corners) {
+            return Err(Error::Invalid("invalid fragment accounting quad".into()));
+        }
+        let (min, max) = corners.iter().fold(
+            (
+                Point(f64::INFINITY, f64::INFINITY),
+                Point(f64::NEG_INFINITY, f64::NEG_INFINITY),
+            ),
+            |(Point(l, t), Point(r, b)), &Point(x, y)| {
+                (Point(l.min(x), t.min(y)), Point(r.max(x), b.max(y)))
+            },
+        );
+        let [a, b, c, _] = corners;
+        Ok(Self {
+            positive: (b.0 - a.0).mul_add(c.1 - b.1, -(b.1 - a.1) * (c.0 - b.0)) > 0.0,
+            corners,
+            min,
+            max,
+        })
+    }
+
+    pub(crate) fn contains(&self, Point(x, y): Point) -> bool {
+        if x < self.min.0 || x > self.max.0 || y < self.min.1 || y > self.max.1 {
+            return false;
+        }
+        self.corners
+            .iter()
+            .zip(self.corners.iter().cycle().skip(1))
+            .all(|(&a, &b)| {
+                let cross = (b.0 - a.0).mul_add(y - a.1, -(b.1 - a.1) * (x - a.0));
+                if self.positive {
+                    cross >= 0.0
+                } else {
+                    cross <= 0.0
+                }
+            })
+    }
+}
 
 /// Signed polygon area. Its sign records winding.
 #[must_use]

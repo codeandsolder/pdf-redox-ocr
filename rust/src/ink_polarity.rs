@@ -5,7 +5,7 @@
 
 use image::{GrayImage, Luma};
 use num_traits::ToPrimitive;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::Error;
 
@@ -20,7 +20,7 @@ pub enum Polarity {
 }
 
 /// The actual foreground luminance relative to the estimated background.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Foreground {
     Dark,
@@ -29,7 +29,7 @@ pub enum Foreground {
 }
 
 /// Observable histogram evidence, including low-contrast and weak-border cases.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PolarityEvidence {
     pub foreground: Foreground,
     /// Last luminance in the lower histogram class (Otsu partition).

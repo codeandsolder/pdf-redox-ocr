@@ -35,9 +35,9 @@ impl ConfirmationDecision {
 fn supported_runs(anchor: &CharacterAnchor) -> Vec<usize> {
     match anchor.alignment {
         RunAlignment::Unique { run } => vec![run],
-        RunAlignment::Ambiguous { .. } | RunAlignment::NoInjectiveAssignment => {
-            anchor.candidate_runs.clone()
-        }
+        RunAlignment::Ambiguous { .. }
+        | RunAlignment::NoInjectiveAssignment
+        | RunAlignment::UncertainNeighbor => anchor.candidate_runs.clone(),
         RunAlignment::Whitespace | RunAlignment::Padding | RunAlignment::NoInk => vec![],
     }
 }

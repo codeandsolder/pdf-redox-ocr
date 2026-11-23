@@ -1,0 +1,380 @@
+//! Recognition-only views of a single bounded, reading-order RGB source crop.
+//! No detector, orientation classifier or automatic admission is involved.
+
+use std::{collections::BTreeMap, num::NonZeroUsize};
+
+use image::{RgbImage, imageops::FilterType};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+use crate::{
+    Error,
+    candidate_ink::SourceInk,
+    ctc_evidence::{CtcEvidence, CtcOutcome},
+    inference::{CharacterEvidence, RecognitionSessionModel},
+    recognition_model::RecognitionModel,
+    refinement_evidence::{Recognition, RefinementDecision, ViewEvidence, canonical},
+};
+
+const STRETCHES: [u32; 4] = [85, 100, 120, 150];
+const MIN_VOTES: usize = 5;
+const MAX_RUNNER_RATIO: f64 = 0.25;
+
+/// Independent, fixed research recognizer configurations.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+pub enum RefinementModel {
+    Small,
+    #[default]
+    Medium,
+    Consensus,
+}
+
+impl RefinementModel {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Small => "PP-OCRv6 Small",
+            Self::Medium => "PP-OCRv6 Medium",
+            Self::Consensus => "PP-OCRv6 Small+Medium four-stretch CTC consensus",
+        }
+    }
+
+    const fn models(self) -> &'static [RecognitionModel] {
+        match self {
+            Self::Small => &[RecognitionModel::Small],
+            Self::Medium => &[RecognitionModel::Medium],
+            Self::Consensus => &[RecognitionModel::Small, RecognitionModel::Medium],
+        }
+    }
+
+    const fn stretches(self) -> &'static [u32] {
+        match self {
+            Self::Consensus => &STRETCHES,
+            Self::Small | Self::Medium => &[100],
+        }
+    }
+}
+
+fn separated(evidence: &CtcEvidence) -> Option<&str> {
+    let best = evidence.hypotheses.first()?;
+    let key = canonical(&best.text);
+    if key.is_empty() {
+        return None;
+    }
+    // The rank and margin compare retained path mass, not calibrated
+    // probabilities. Formatting variants are not distinct candidates.
+    let runner = evidence
+        .hypotheses
+        .iter()
+        .skip(1)
+        .find(|h| canonical(&h.text) != key)?;
+    let ratio = (runner.log_mass_lower_bound - best.log_mass_lower_bound).exp();
+    (ratio <= MAX_RUNNER_RATIO).then_some(best.text.as_str())
+}
+
+fn consensus(views: &[ViewEvidence]) -> RefinementDecision {
+    // The fixed experiment requires one vote per model/stretch pair.
+    // Duplicate observations cannot create an additional vote.
+    let mut seen = std::collections::BTreeSet::new();
+    let mut seen_samples = std::collections::BTreeSet::new();
+    let mut votes = BTreeMap::<String, Vec<(usize, &str)>>::new();
+    for (index, view) in views.iter().enumerate() {
+        if !STRETCHES.contains(&view.stretch_percent)
+            || !seen.insert((view.model, view.stretch_percent))
+            || !seen_samples.insert((view.model, view.dimensions, view.rgb_sha256.as_str()))
+        {
+            continue;
+        }
+        if let CtcOutcome::Measured { evidence } = &view.ctc
+            && let Some(text) = separated(evidence)
+        {
+            votes
+                .entry(canonical(text))
+                .or_default()
+                .push((index, text));
+        }
+    }
+    let mut ranked = votes.into_values().collect::<Vec<_>>();
+    ranked.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    let Some(winner) = ranked.first() else {
+        return RefinementDecision::Abstained;
+    };
+    if winner.len() < MIN_VOTES
+        || ranked.get(1).is_some_and(|next| next.len() >= winner.len())
+        || !winner
+            .iter()
+            .any(|&(i, _)| views[i].model == RecognitionModel::Small)
+        || !winner
+            .iter()
+            .any(|&(i, _)| views[i].model == RecognitionModel::Medium)
+    {
+        return RefinementDecision::Abstained;
+    }
+    // Retain literal text from one actual hypothesis; prefer unstretched,
+    // then deterministic view order. Do not synthesize a spelling.
+    let Some(&(_, text)) = winner
+        .iter()
+        .min_by_key(|&&(i, _)| (views[i].stretch_percent.abs_diff(100), i))
+    else {
+        return RefinementDecision::Abstained;
+    };
+    RefinementDecision::Consensus {
+        text: text.to_owned(),
+        view_indices: winner.iter().map(|&(i, _)| i).collect(),
+    }
+}
+
+fn stretch_crop(image: &RgbImage, stretch: u32) -> Result<std::borrow::Cow<'_, RgbImage>, Error> {
+    let width = u32::try_from((u64::from(image.width()) * u64::from(stretch)).div_ceil(100))
+        .map_err(|_| Error::Invalid("refinement view width overflow".into()))?;
+    if width == 0 || image.height() == 0 {
+        return Err(Error::Invalid("empty refinement view".into()));
+    }
+    Ok(if stretch == 100 {
+        std::borrow::Cow::Borrowed(image)
+    } else {
+        std::borrow::Cow::Owned(image::imageops::resize(
+            image,
+            width,
+            image.height(),
+            FilterType::Triangle,
+        ))
+    })
+}
+
+/// Lazily loaded recognition-only sessions. Both use the same preprocessing,
+/// vocabulary and CPU provider configuration as primary recognition.
+pub struct RefinementRecognizer {
+    profile: RefinementModel,
+    threads: Option<NonZeroUsize>,
+    sessions: BTreeMap<RecognitionModel, RecognitionSessionModel>,
+}
+
+impl RefinementRecognizer {
+    #[must_use]
+    pub const fn new(profile: RefinementModel, threads: Option<NonZeroUsize>) -> Self {
+        Self {
+            profile,
+            threads,
+            sessions: BTreeMap::new(),
+        }
+    }
+
+    /// Recognize a single original reading-order RGB crop, retaining each
+    /// complete view separately. Crop width variation is bounded at 150%.
+    ///
+    /// # Errors
+    /// Returns an error for model failures, unrepresentable view dimensions
+    /// or unexpected inference batch sizes.
+    pub fn recognize(&mut self, image: &RgbImage) -> Result<Recognition, Error> {
+        self.recognize_with_ink(image, SourceInk::measure(image)?)
+    }
+
+    pub(crate) fn recognize_with_ink(
+        &mut self,
+        image: &RgbImage,
+        source_ink: SourceInk,
+    ) -> Result<Recognition, Error> {
+        let [result] = self.recognize_crops([(image, source_ink)], None)?;
+        Ok(result)
+    }
+
+    pub(crate) fn recognize_observed(
+        &mut self,
+        crop: (&RgbImage, SourceInk),
+        primary: &str,
+    ) -> Result<Recognition, Error> {
+        let [result] = self.recognize_crops([crop], Some(primary))?;
+        Ok(result)
+    }
+
+    pub(crate) fn recognize_pair(
+        &mut self,
+        original: (&RgbImage, SourceInk),
+        masked: (&RgbImage, SourceInk),
+        primary: &str,
+    ) -> Result<[Recognition; 2], Error> {
+        self.recognize_crops([original, masked], Some(primary))
+    }
+
+    fn recognize_crops<const N: usize>(
+        &mut self,
+        crops: [(&RgbImage, SourceInk); N],
+        primary: Option<&str>,
+    ) -> Result<[Recognition; N], Error> {
+        for (image, source_ink) in &crops {
+            if image.dimensions() != source_ink.dimensions
+                || hex::encode(Sha256::digest(image.as_raw())) != source_ink.rgb_sha256
+            {
+                return Err(Error::Invalid(
+                    "recognition source ink belongs to different pixels".into(),
+                ));
+            }
+        }
+        let mut views: [Vec<ViewEvidence>; N] = std::array::from_fn(|_| Vec::new());
+        for &model in self.profile.models() {
+            let session = match self.sessions.entry(model) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(RecognitionSessionModel::load(model, self.threads)?)
+                }
+            };
+            for &stretch in self.profile.stretches() {
+                let resampled = crops
+                    .iter()
+                    .map(|(image, _)| stretch_crop(image, stretch))
+                    .collect::<Result<Vec<_>, Error>>()?;
+                let pixels = resampled
+                    .iter()
+                    .map(std::borrow::Cow::as_ref)
+                    .collect::<Vec<_>>();
+                let prediction = if let Some(primary) = primary {
+                    session.predict_with_primary(&pixels, primary)?
+                } else {
+                    session.predict(&pixels, CharacterEvidence::Ctc)?
+                };
+                if prediction.ctc.len() != N {
+                    return Err(Error::Inference("missing view CTC evidence".into()));
+                }
+                for (i, ((text, score), ctc)) in prediction
+                    .output
+                    .texts
+                    .into_iter()
+                    .zip(prediction.output.scores)
+                    .zip(prediction.ctc)
+                    .enumerate()
+                {
+                    let ctc =
+                        ctc.ok_or_else(|| Error::Inference("missing view CTC evidence".into()))?;
+                    if !(0.0..=1.0).contains(&score) {
+                        return Err(Error::Inference("invalid view score".into()));
+                    }
+                    let dimensions = pixels[i].dimensions();
+                    let ink_mapping = match &ctc {
+                        CtcOutcome::Measured { evidence } => {
+                            crops[i].1.map_view(dimensions, evidence)
+                        }
+                        CtcOutcome::Unavailable { .. } => None,
+                    };
+                    views[i].push(ViewEvidence {
+                        model,
+                        stretch_percent: stretch,
+                        dimensions,
+                        rgb_sha256: hex::encode(Sha256::digest(pixels[i].as_raw())),
+                        greedy_text: text,
+                        greedy_score: f64::from(score),
+                        ctc,
+                        ink_mapping,
+                    });
+                }
+            }
+        }
+        let mut results = Vec::with_capacity(N);
+        for ((_, source_ink), views) in crops.into_iter().zip(views) {
+            let decision = match self.profile {
+                RefinementModel::Consensus => consensus(&views),
+                RefinementModel::Small | RefinementModel::Medium => views
+                    .first()
+                    .filter(|v| !v.greedy_text.trim().is_empty())
+                    .map_or(RefinementDecision::Abstained, |v| {
+                        RefinementDecision::Greedy {
+                            text: v.greedy_text.clone(),
+                        }
+                    }),
+            };
+            results.push(Recognition {
+                views,
+                decision,
+                source_ink: Box::new(source_ink),
+            });
+        }
+        results
+            .try_into()
+            .map_err(|_| Error::Inference("inconsistent recognition count".into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ctc_evidence::SequenceHypothesis;
+
+    fn view(
+        model: RecognitionModel,
+        stretch_percent: u32,
+        best: &str,
+        runner: &str,
+        ratio: f64,
+    ) -> ViewEvidence {
+        ViewEvidence {
+            model,
+            stretch_percent,
+            dimensions: (100, 20),
+            rgb_sha256: stretch_percent.to_string(),
+            greedy_text: best.into(),
+            greedy_score: 0.99,
+            ink_mapping: None,
+            ctc: CtcOutcome::Measured {
+                evidence: CtcEvidence {
+                    queries: Vec::new(),
+                    sequence_length: 2,
+                    vocabulary_size: 3,
+                    row_class_limit: 8,
+                    beam_width: 12,
+                    greedy_text: best.into(),
+                    emissions: Vec::new(),
+                    hypotheses: vec![
+                        SequenceHypothesis {
+                            text: best.into(),
+                            classes: Vec::new(),
+                            log_mass_lower_bound: -0.2,
+                            alignment: crate::ctc_alignment::SequenceAlignment::Unavailable {
+                                reason: "fixture".into(),
+                            },
+                        },
+                        SequenceHypothesis {
+                            text: runner.into(),
+                            classes: Vec::new(),
+                            log_mass_lower_bound: -0.2 + ratio.ln(),
+                            alignment: crate::ctc_alignment::SequenceAlignment::Unavailable {
+                                reason: "fixture".into(),
+                            },
+                        },
+                    ],
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn consensus_needs_distinct_views_and_both_models() {
+        let mut views = STRETCHES
+            .iter()
+            .map(|&s| view(RecognitionModel::Small, s, "3.5", "35", 0.1))
+            .collect::<Vec<_>>();
+        assert!(consensus(&views).text().is_none());
+        views.push(view(RecognitionModel::Small, 100, "3.5", "35", 0.1));
+        assert!(consensus(&views).text().is_none());
+        views.push(view(RecognitionModel::Medium, 100, "3.5", "35", 0.5));
+        assert!(consensus(&views).text().is_none());
+        views.push(view(RecognitionModel::Medium, 120, "3.5", "35", 0.1));
+        assert_eq!(consensus(&views).text(), Some("3.5"));
+        views[3].rgb_sha256 = views[0].rgb_sha256.clone();
+        assert!(consensus(&views).text().is_none());
+    }
+
+    #[test]
+    fn consensus_abstains_instead_of_combining_distinct_strings() {
+        let views = [RecognitionModel::Small, RecognitionModel::Medium]
+            .into_iter()
+            .flat_map(|m| {
+                STRETCHES
+                    .into_iter()
+                    .map(move |s| view(m, s, if s < 110 { "Ø20" } else { "020" }, "20", 0.1))
+            })
+            .collect::<Vec<_>>();
+        assert!(consensus(&views).text().is_none());
+    }
+}
