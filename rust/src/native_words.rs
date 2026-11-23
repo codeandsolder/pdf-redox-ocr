@@ -114,6 +114,13 @@ pub fn parse_bbox_xhtml(
                     .map_err(|e| Error::Invalid(format!("invalid XHTML text entity: {e}")))?;
                 word_has_text |= !unescaped.trim().is_empty();
             }
+            Event::GeneralRef(ref reference) if word.is_some() => {
+                let name = reference.as_ref();
+                let entity = format!("&{name};");
+                let unescaped = quick_xml::escape::unescape(&entity)
+                    .map_err(|e| Error::Invalid(format!("invalid XHTML text entity: {e}")))?;
+                word_has_text |= !unescaped.trim().is_empty();
+            }
             Event::End(ref end) if local_name(end.name().as_ref()) == "word" => {
                 if let Some(bounds) = word.take()
                     && word_has_text
