@@ -13,7 +13,17 @@ use num_traits::ToPrimitive;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::{Error, candidate_ink::CandidateAnchor, pixel_regions::InkBounds};
+use crate::{
+    Error,
+    candidate_ink::CandidateAnchor,
+    ctc_evidence::{CtcOutcome, SequenceReference},
+    fragment_ink::{RunAccounting, Sample},
+    geometry::Quad,
+    pixel_regions::InkBounds,
+    recognition_model::RecognitionModel,
+    refinement_evidence::{Recognition, RefinementDecision, ViewEvidence, canonical},
+    source_reconciliation::{Embedding, SourceEdits, embedding_compatible},
+};
 
 /// Exact, disjoint source columns attributed to a visible CTC token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
