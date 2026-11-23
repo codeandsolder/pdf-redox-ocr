@@ -27,7 +27,7 @@ hayro-interpret = { git = "https://github.com/LaurenzV/hayro", rev = "e7ada1354d
 # Cargo does not propagate dependency workspace patches. Reuse the exact
 # generated standalone syntax snapshot in the pinned pdf-redox repository.
 [patch."https://github.com/LaurenzV/hayro"]
-hayro-syntax = { git = "https://github.com/codeandsolder/pdf-redox", rev = "3f00775cb6d38561451d226adf5125d7b0bf554c" }
+hayro-syntax = { git = "https://github.com/codeandsolder/pdf-redox", rev = "c9d5df7d12c98c407f416cc557d2eeded0c4fca1" }
 
 hayro-interpret = { path = "../vendor/hayro-interpret" }
 

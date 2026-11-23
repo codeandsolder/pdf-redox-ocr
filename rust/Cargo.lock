@@ -1086,7 +1086,7 @@ source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56
 [[package]]
 name = "hayro-syntax"
 version = "0.9.0"
-source = "git+https://github.com/codeandsolder/pdf-redox?rev=3f00775cb6d38561451d226adf5125d7b0bf554c#3f00775cb6d38561451d226adf5125d7b0bf554c"
+source = "git+https://github.com/codeandsolder/pdf-redox?rev=c9d5df7d12c98c407f416cc557d2eeded0c4fca1#c9d5df7d12c98c407f416cc557d2eeded0c4fca1"
 dependencies = [
  "hayro-ccitt",
  "hayro-jbig2",
