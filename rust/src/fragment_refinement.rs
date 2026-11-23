@@ -441,7 +441,12 @@ impl PageContext<'_> {
             &recognition.source_ink,
             sampled.audit.observation_bounds,
             sampled.normalized.dimensions(),
-            &sampled.audit.components,
+            sampled
+                .audit
+                .components
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (i, &c.component)),
         );
         let proposal =
             match source_reconciliation::propose(&sampled.audit, recognition, &complete_runs) {

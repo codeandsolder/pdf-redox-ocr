@@ -283,7 +283,7 @@ fn vote(
             Some(Slot {
                 character,
                 run,
-                editable: !group.touches_line_edge
+                editable: (!group.touches_line_edge || complete.contains(&run))
                     && group.run.observation_support.inside_pixels > 0,
             })
         })

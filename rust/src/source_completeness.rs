@@ -28,12 +28,12 @@ const fn contained(outer: InkBounds, inner: InkBounds) -> bool {
         && inner.bottom <= outer.bottom
 }
 
-fn prove_one(
+fn prove_one<'a>(
     run: usize,
     group: &InkGroup,
     observation: InkBounds,
     sample_size: (u32, u32),
-    components: &[PixelRegion],
+    components: impl IntoIterator<Item = (usize, &'a PixelRegion)>,
 ) -> Option<CompleteRun> {
     if !group.touches_line_edge || group.run.observation_support.inside_pixels == 0 {
         return None;
@@ -50,7 +50,7 @@ fn prove_one(
     }
     let mut ink_pixels = 0_u64;
     let mut component_indices = Vec::new();
-    for (index, component) in components.iter().enumerate() {
+    for (index, component) in components {
         let b = component.bounds;
         if component.observation_support.outside_pixels != 0
             || b.touches_edge(sample_size.0, sample_size.1)
@@ -75,17 +75,19 @@ fn prove_one(
 }
 
 #[must_use]
-pub fn prove(
+pub fn prove<'a>(
     source_ink: &SourceInk,
     observation: InkBounds,
     sample_size: (u32, u32),
-    components: &[PixelRegion],
+    components: impl Clone + IntoIterator<Item = (usize, &'a PixelRegion)>,
 ) -> Vec<CompleteRun> {
     source_ink
         .groups
         .iter()
         .enumerate()
-        .filter_map(|(run, group)| prove_one(run, group, observation, sample_size, components))
+        .filter_map(|(run, group)| {
+            prove_one(run, group, observation, sample_size, components.clone())
+        })
         .collect()
 }
 
@@ -135,14 +137,30 @@ mod tests {
         let (components, groups) = regions_on_both(&image, o);
         assert_eq!(groups.len(), 1);
         assert!(groups[0].touches_line_edge);
-        let proof = prove_one(0, &groups[0], o, image.dimensions(), &components).unwrap();
+        let proof = prove_one(
+            0,
+            &groups[0],
+            o,
+            image.dimensions(),
+            components.iter().enumerate(),
+        )
+        .unwrap();
         assert_eq!(proof.component_indices, vec![0]);
         assert_eq!(proof.ink_pixels, 16);
         // Exactly the same ink at the same apparent crop edge, but
         // physically joined to exterior foreground: now not complete.
         image.put_pixel(4, 10, Luma([0]));
         let (components, groups) = regions_on_both(&image, o);
-        assert!(prove_one(0, &groups[0], o, image.dimensions(), &components).is_none());
+        assert!(
+            prove_one(
+                0,
+                &groups[0],
+                o,
+                image.dimensions(),
+                components.iter().enumerate()
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -153,7 +171,16 @@ mod tests {
             image.put_pixel(0, y, Luma([0]));
         }
         let (components, groups) = regions_on_both(&image, o);
-        assert!(prove_one(0, &groups[0], o, image.dimensions(), &components).is_none());
+        assert!(
+            prove_one(
+                0,
+                &groups[0],
+                o,
+                image.dimensions(),
+                components.iter().enumerate()
+            )
+            .is_none()
+        );
 
         let o = bounds(5, 5, 15, 15);
         let mut image = GrayImage::from_pixel(25, 25, Luma([255]));
@@ -161,11 +188,38 @@ mod tests {
             image.put_pixel(5, y, Luma([0]));
         }
         let (mut components, groups) = regions_on_both(&image, o);
-        assert!(prove_one(0, &groups[0], o, image.dimensions(), &components).is_some());
+        assert!(
+            prove_one(
+                0,
+                &groups[0],
+                o,
+                image.dimensions(),
+                components.iter().enumerate()
+            )
+            .is_some()
+        );
         components[0].area_pixels += 1;
-        assert!(prove_one(0, &groups[0], o, image.dimensions(), &components).is_none());
+        assert!(
+            prove_one(
+                0,
+                &groups[0],
+                o,
+                image.dimensions(),
+                components.iter().enumerate()
+            )
+            .is_none()
+        );
         components[0].area_pixels -= 1;
         components[0].observation_support.outside_pixels += 1;
-        assert!(prove_one(0, &groups[0], o, image.dimensions(), &components).is_none());
+        assert!(
+            prove_one(
+                0,
+                &groups[0],
+                o,
+                image.dimensions(),
+                components.iter().enumerate()
+            )
+            .is_none()
+        );
     }
 }
