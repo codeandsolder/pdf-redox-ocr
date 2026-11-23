@@ -30,7 +30,7 @@ use crate::{
     refinement::{RefinementPolicy, RefinementScope, recognize_observation, refinement_plan},
     refinement_evidence::{Recognition, RefinementOutcome},
     refinement_recognition::{RefinementModel, RefinementRecognizer},
-    source_insertion, stroke_reconciliation,
+    source_reconciliation, stroke_reconciliation,
 };
 
 pub use crate::{
@@ -40,7 +40,9 @@ pub use crate::{
     },
     mask_reconciliation::{MaskCorrection, MaskVote, RunPartition},
     orthogonal_mask::MaskEvidence,
-    source_insertion::{InsertionRecognition, InsertionVote, SourceInsertion},
+    source_reconciliation::{
+        ChangePositions, Embedding, SourceCorrection, SourceEdits, SourceRecognition, SourceVote,
+    },
     stroke_reconciliation::{Contraction, ContractionVote, PartitionRun},
 };
 
@@ -106,7 +108,7 @@ pub enum OrthogonalOutcome {
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub enum InsertionOutcome {
+pub enum SourceEditOutcome {
     Skipped {
         reason: Rejection,
     },
@@ -119,7 +121,7 @@ pub enum InsertionOutcome {
 #[derive(Debug, Serialize)]
 pub struct ObservationMeasurements {
     pub original: Option<Box<Recognition>>,
-    pub insertion: InsertionOutcome,
+    pub source_edit: SourceEditOutcome,
     pub contractions: Vec<ContractionOutcome>,
     pub orthogonal: Option<Box<OrthogonalOutcome>>,
 }
@@ -128,7 +130,7 @@ impl ObservationMeasurements {
     fn skipped(reason: Rejection, contractions: usize, has_mask: bool) -> Self {
         Self {
             original: None,
-            insertion: InsertionOutcome::Skipped { reason },
+            source_edit: SourceEditOutcome::Skipped { reason },
             contractions: (0..contractions)
                 .map(|_| ContractionOutcome::Skipped { reason })
                 .collect(),
@@ -429,13 +431,13 @@ impl PageContext<'_> {
         Ok(variants)
     }
 
-    fn insertion_proposal(
+    fn source_edit_proposal(
         &self,
         sampled: &SampledLine,
         recognition: &Recognition,
         budget: &mut u64,
     ) -> Result<Result<Transaction, Rejection>, Error> {
-        let proposal = match source_insertion::propose(&sampled.audit, recognition) {
+        let proposal = match source_reconciliation::propose(&sampled.audit, recognition) {
             Ok(proposal) => proposal,
             Err(reason) => return Ok(Err(reason)),
         };
@@ -472,7 +474,7 @@ impl PageContext<'_> {
         else {
             return Ok(Err(Rejection::InkBudgetExceeded));
         };
-        for &position in &proposal.positions.possible {
+        for position in proposal.edits.affected() {
             let run = &run_accounting.runs[proposal.revised_runs[position]];
             if let Some((&peer, _)) = run.peers.iter().find(|(_, ink)| ink.original != 0) {
                 return Ok(Err(match peers[peer] {
@@ -482,14 +484,14 @@ impl PageContext<'_> {
             }
         }
         let Some(text) = recognition.decision.text() else {
-            return Err(Error::Invalid("missing insertion decision".into()));
+            return Err(Error::Invalid("missing source revision decision".into()));
         };
         Ok(Ok(Transaction {
             page: sampled.audit.page,
             line_index: sampled.audit.line_index,
             quad: sampled.audit.original_quad,
             text: text.to_owned(),
-            operation: Operation::Insertion(SourceInsertion {
+            operation: Operation::SourceCorrection(SourceCorrection {
                 recognition: proposal,
                 peers,
                 run_accounting,
@@ -511,8 +513,8 @@ impl PageContext<'_> {
         let primary = &sampled.audit.original_text;
         let count = primary.chars().filter(|c| !c.is_whitespace()).count();
         let b = sampled.audit.observation_bounds;
-        // An injective revised assignment requires more foreground runs
-        // than original tokens. Test the exact in-box projection cheaply
+        // A nondeleting injective revised assignment requires at least as
+        // many foreground runs as original tokens. Test the exact in-box projection cheaply
         // before allocating a crop or loading a recognizer session.
         if contractions.is_empty() && !has_mask {
             let required = membership_checks(b.right - b.left, b.bottom - b.top, 0);
@@ -528,7 +530,7 @@ impl PageContext<'_> {
                 &sampled.normalized,
                 b,
                 self.policy.audit.segmentation_threshold,
-            ) <= count
+            ) < count
             {
                 return Ok(ObservationMeasurements::skipped(
                     Rejection::InsufficientIndependentRuns,
@@ -544,7 +546,7 @@ impl PageContext<'_> {
                 has_mask,
             ));
         };
-        let possible_insertion = shared.groups.len() > count;
+        let possible_source_edit = shared.groups.len() >= count;
         let mut variants = self.recognize_contractions(sampled, predictor)?;
         // Preserve the pixel-budget priority of the contraction crops,
         // then recognize the masked and original crops in one paired batch
@@ -572,21 +574,21 @@ impl PageContext<'_> {
             mask_result,
             transactions,
         );
-        let insertion = if possible_insertion {
-            let result = self.insertion_proposal(sampled, &original, budget)?;
+        let source_edit = if possible_source_edit {
+            let result = self.source_edit_proposal(sampled, &original, budget)?;
             let (transaction, rejection) = register_transaction(transactions, result);
-            InsertionOutcome::Measured {
+            SourceEditOutcome::Measured {
                 transaction,
                 rejection,
             }
         } else {
-            InsertionOutcome::Skipped {
+            SourceEditOutcome::Skipped {
                 reason: Rejection::InsufficientIndependentRuns,
             }
         };
         Ok(ObservationMeasurements {
             original: Some(Box::new(original)),
-            insertion,
+            source_edit,
             contractions: variants,
             orthogonal,
         })
@@ -938,7 +940,7 @@ pub fn reconcile_fragments(
     source.verify_pdf(pdf)?;
     Ok((
         FragmentReport {
-            schema_version: 14,
+            schema_version: 15,
             pdf_sha256: source.pdf_sha256.clone(),
             draft_model: source.model.clone(),
             secondary_model: RefinementModel::Consensus.label(),

@@ -68,7 +68,7 @@ pub enum Operation {
     Expansion(Expansion),
     Contraction(crate::stroke_reconciliation::Contraction),
     MaskCorrection(crate::mask_reconciliation::MaskCorrection),
-    Insertion(crate::source_insertion::SourceInsertion),
+    SourceCorrection(crate::source_reconciliation::SourceCorrection),
 }
 
 #[derive(Debug, Serialize)]
@@ -109,8 +109,8 @@ pub enum Rejection {
     UnlocalizedRemovedTokens,
     ForegroundPartitionMismatch,
     UnlocalizedMaskChange,
-    NotLiteralInsertion,
-    UnlocalizedInsertedTokens,
+    WouldDeleteSourceToken,
+    UnlocalizedSourceEdit,
     InsufficientIndependentRuns,
 }
 
