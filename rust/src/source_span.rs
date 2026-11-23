@@ -17,7 +17,7 @@ use crate::{
     Error,
     candidate_ink::CandidateAnchor,
     ctc_evidence::SequenceReference,
-    fragment_ink::{RunAccounting, Sample},
+    fragment_ink::{ColumnInk, RunAccounting, Sample},
     geometry::Quad,
     pixel_regions::InkBounds,
     recognition_model::RecognitionModel,
@@ -43,6 +43,27 @@ pub struct ColumnBand {
     pub possible_bounds: InkBounds,
     /// Whether measured ink touches any original source raster boundary.
     pub touches_source_edge: bool,
+}
+
+impl ColumnBand {
+    /// Check the entire possible source ownership region, including physical
+    /// pixels excluded by the representative midpoint. This rejects a peer
+    /// intersecting any admissible cut, not merely the chosen one.
+    fn possible_peer_ink(&self, columns: &[ColumnInk]) -> Result<bool, Error> {
+        let l = usize::try_from(self.possible_bounds.left)
+            .map_err(|_| Error::Invalid("invalid envelope left".into()))?;
+        let r = usize::try_from(self.possible_bounds.right)
+            .map_err(|_| Error::Invalid("invalid envelope right".into()))?;
+        let column_range = columns.get(l..r).ok_or_else(|| {
+            Error::Invalid("source-column ownership envelope outside crop".into())
+        })?;
+        if column_range.iter().map(|c| c.foreground).sum::<u64>() != self.possible_foreground {
+            return Err(Error::Invalid("source-column union ink mismatch".into()));
+        }
+        Ok(column_range
+            .iter()
+            .any(|column| column.peers.values().any(|&ink| ink != 0)))
+    }
 }
 
 /// One complete ordered partition plus every admissible boundary location.
@@ -407,21 +428,7 @@ pub fn probe(input: SpanInput<'_>, remaining_checks: &mut u64) -> Result<SourceS
         return Err(Error::Invalid("missing source-column pixel ledger".into()));
     };
     for position in edits.affected() {
-        let band = &bands[position];
-        let l = usize::try_from(band.possible_bounds.left)
-            .map_err(|_| Error::Invalid("invalid envelope left".into()))?;
-        let r = usize::try_from(band.possible_bounds.right)
-            .map_err(|_| Error::Invalid("invalid envelope right".into()))?;
-        let column_range = columns.get(l..r).ok_or_else(|| {
-            Error::Invalid("source-column ownership envelope outside crop".into())
-        })?;
-        if column_range.iter().map(|c| c.foreground).sum::<u64>() != band.possible_foreground {
-            return Err(Error::Invalid("source-column union ink mismatch".into()));
-        }
-        if column_range
-            .iter()
-            .any(|column| column.peers.values().any(|&ink| ink != 0))
-        {
+        if bands[position].possible_peer_ink(columns)? {
             return Ok(skip("possible_competing_peer_foreground"));
         }
     }
@@ -528,6 +535,45 @@ mod tests {
         assert!(bands.iter().all(|b| b.guaranteed_foreground == 0));
         assert!(bands.iter().all(|b| b.possible_foreground == 1));
         assert_eq!(budget, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn possible_peer_ink_is_not_hidden_by_representative_cut() -> Result<(), Error> {
+        let anchors = [
+            anchor('A', 5.0, [4.0, 6.0]),
+            anchor('B', 14.0, [13.0, 15.0]),
+        ];
+        let raster = GrayImage::from_fn(20, 8, |x, y| {
+            if y == 4 && [3, 12, 15].contains(&x) {
+                Luma([0])
+            } else {
+                Luma([255])
+            }
+        });
+        let partition = ordered_partition(&[anchors.iter().collect()], raster.dimensions())
+            .ok_or_else(|| Error::Invalid("expected uncertain CTC partition".into()))?;
+        let mut budget = 160;
+        let bands = measured_bands(&raster, 128, &partition, &mut budget)?
+            .ok_or_else(|| Error::Invalid("expected source bands".into()))?;
+        assert!(bands[0].bounds.right < 12);
+        assert!(bands[0].guaranteed_foreground > 0);
+        let mut columns = (0..20)
+            .map(|column| ColumnInk {
+                column,
+                foreground: u64::from([3, 12, 15].contains(&column)),
+                peers: std::collections::BTreeMap::new(),
+            })
+            .collect::<Vec<_>>();
+        columns[12].peers.insert(0, 1);
+        assert!(
+            !columns[..usize::try_from(bands[0].bounds.right)
+                .map_err(|_| Error::Invalid("source band bounds".into()))?]
+                .iter()
+                .any(|c| c.peers.values().any(|&n| n > 0))
+        );
+        assert!(bands[0].possible_peer_ink(&columns)?);
+        assert!(!bands[1].possible_peer_ink(&columns)?);
         Ok(())
     }
 
