@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     Error,
     candidate_ink::CandidateAnchor,
-    ctc_evidence::{CtcOutcome, SequenceReference},
+    ctc_evidence::SequenceReference,
     fragment_ink::{RunAccounting, Sample},
     geometry::Quad,
     pixel_regions::InkBounds,
@@ -209,18 +209,7 @@ fn view_vote(
     revised: &str,
     bands: &[ColumnBand],
 ) -> Option<SpanVote> {
-    let CtcOutcome::Measured { evidence } = &view.ctc else {
-        return None;
-    };
-    let new = evidence.hypotheses.first()?;
-    if canonical(&new.text) != revised {
-        return None;
-    }
-    let primary = evidence.strongest_matching(|text| canonical(text) == old)?;
-    let odds = new.data().log_mass()? - evidence.sequence(primary)?.log_mass()?;
-    if odds <= 0.0 {
-        return None;
-    }
+    let (primary, odds) = crate::source_reconciliation::exact_view_odds(view, old, revised)?;
     let mapping = view.ink_mapping.as_ref()?;
     let old_anchors = mapping.sequence(primary)?.visible_anchors(old)?;
     let revised_characters = revised.chars().collect::<Vec<_>>();

@@ -261,13 +261,13 @@ fn embedding(old: &[&CandidateAnchor], slots: &[Slot]) -> Option<Embedding> {
     })
 }
 
-fn vote(
-    view_index: usize,
+/// One exact, explicitly measured likelihood comparison on a fixed crop.
+/// An absent original beam candidate must be an actual full-sequence query.
+pub fn exact_view_odds(
     view: &ViewEvidence,
     old: &str,
     revised: &str,
-    ink: &SourceInk,
-) -> Option<(Vec<usize>, SourceVote)> {
+) -> Option<(SequenceReference, f64)> {
     let CtcOutcome::Measured { evidence } = &view.ctc else {
         return None;
     };
@@ -280,6 +280,17 @@ fn vote(
     if odds <= 0.0 {
         return None;
     }
+    Some((primary, odds))
+}
+
+fn vote(
+    view_index: usize,
+    view: &ViewEvidence,
+    old: &str,
+    revised: &str,
+    ink: &SourceInk,
+) -> Option<(Vec<usize>, SourceVote)> {
+    let (primary, odds) = exact_view_odds(view, old, revised)?;
     let mapping = view.ink_mapping.as_ref()?;
     let runs = mapping.hypotheses.first()?.unique_runs(revised)?;
     let old = mapping.sequence(primary)?.visible_anchors(old)?;
