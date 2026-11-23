@@ -132,6 +132,18 @@ pub struct RunInk {
 pub struct RunAccounting {
     pub runs: Vec<RunInk>,
     pub charged_checks: u64,
+    /// Exact per-column foreground and peer membership for uncertain band
+    /// boundaries. Measured in the same pass and only when requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<ColumnInk>>,
+}
+
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+#[derive(Debug, Serialize)]
+pub struct ColumnInk {
+    pub column: u32,
+    pub foreground: u64,
+    pub peers: BTreeMap<usize, u64>,
 }
 
 struct MeasuredInk {
@@ -240,6 +252,7 @@ impl Sample<'_> {
             peer_quads,
             accounting,
             remaining_checks,
+            false,
         )
     }
 
@@ -263,6 +276,7 @@ impl Sample<'_> {
             peer_quads,
             accounting,
             remaining_checks,
+            true,
         )
     }
 
@@ -275,6 +289,7 @@ impl Sample<'_> {
         peer_quads: &[Quad],
         accounting: &InkAccounting,
         remaining_checks: &mut u64,
+        capture_columns: bool,
     ) -> Result<Option<RunAccounting>, Error> {
         let InkAccounting::Measured { sample, peers, .. } = accounting else {
             return Ok(None);
@@ -298,6 +313,15 @@ impl Sample<'_> {
                 "source-ink partition support count mismatch".into(),
             ));
         }
+        let mut columns = capture_columns.then(|| {
+            (0..width)
+                .map(|column| ColumnInk {
+                    column,
+                    foreground: 0,
+                    peers: BTreeMap::new(),
+                })
+                .collect::<Vec<_>>()
+        });
         let mut runs = Vec::with_capacity(bounds.len());
         for (index, (&bounds, &expected)) in bounds.iter().zip(expected_pixels).enumerate() {
             if bounds.left < previous_right
@@ -317,18 +341,32 @@ impl Sample<'_> {
             };
             for y in bounds.top..bounds.bottom {
                 for x in bounds.left..bounds.right {
+                    let column = x;
                     let (x, y) = (x + expanded.left, y + expanded.top);
                     if self.image.get_pixel(x, y).0[0] >= self.threshold {
                         continue;
                     }
                     let part = classify_pixel(observation, expanded, x, y);
                     run.sample.record(part);
+                    if let Some(columns) = &mut columns {
+                        columns[usize::try_from(column)
+                            .map_err(|_| Error::Invalid("invalid column index".into()))?]
+                        .foreground += 1;
+                    }
                     let point = self
                         .window
                         .to_source(self.frame, Point(f64::from(x) + 0.5, f64::from(y) + 0.5));
                     for (peer, quad) in peer_quads.iter().enumerate() {
                         if quad.contains(point) {
                             run.peers.entry(peer).or_default().record(part);
+                            if let Some(columns) = &mut columns {
+                                *columns[usize::try_from(column).map_err(|_| {
+                                    Error::Invalid("invalid column index".into())
+                                })?]
+                                .peers
+                                .entry(peer)
+                                .or_default() += 1;
+                            }
                         }
                     }
                 }
@@ -362,6 +400,7 @@ impl Sample<'_> {
         Ok(Some(RunAccounting {
             runs,
             charged_checks,
+            columns,
         }))
     }
 

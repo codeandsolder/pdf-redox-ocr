@@ -33,8 +33,25 @@ pub struct ColumnBand {
     pub bounds: InkBounds,
     /// Exact foreground count, never a bounding-box estimate.
     pub foreground: u64,
+    /// Ink guaranteed to belong to this token under **every** valid boundary.
+    pub guaranteed_foreground: u64,
+    /// Ink which can belong under **some** boundary placement.
+    pub possible_foreground: u64,
+    /// Whether any source-edge ink could belong under an admissible cut.
+    pub possible_source_edge: bool,
+    /// Source x envelope of any admissible ownership for this token.
+    pub possible_bounds: InkBounds,
     /// Whether measured ink touches any original source raster boundary.
     pub touches_source_edge: bool,
+}
+
+/// One complete ordered partition plus every admissible boundary location.
+/// A deterministic midpoint is only a representative for accounting; the
+/// actual character boundary is unknown within the closed integer range.
+#[derive(Debug, Serialize)]
+pub struct OrderedPartition {
+    pub bounds: Vec<InkBounds>,
+    pub cut_ranges: Vec<[u32; 2]>,
 }
 
 /// All accepted CTC views' tokens in the same canonical reading order.
@@ -43,7 +60,7 @@ pub struct ColumnBand {
 pub fn ordered_partition(
     views: &[Vec<&CandidateAnchor>],
     dimensions: (u32, u32),
-) -> Option<Vec<InkBounds>> {
+) -> Option<OrderedPartition> {
     let (width, height) = dimensions;
     let tokens = views.first()?.len();
     if width == 0 || height == 0 || tokens == 0 || views.iter().any(|v| v.len() != tokens) {
@@ -73,6 +90,7 @@ pub fn ordered_partition(
     }
     let mut cuts = Vec::with_capacity(tokens + 1);
     cuts.push(0);
+    let mut ranges = vec![[0, 0]];
     for i in 1..tokens {
         // The cut lies in the *unclaimed* gap between every earlier entry
         // interval and every later entry interval. The intervening real
@@ -82,13 +100,22 @@ pub fn ordered_partition(
         if a >= b {
             return None;
         }
-        let cut = a.midpoint(b).round().to_u32()?;
+        // Every admissible cut must be strictly after the prior token's
+        // entry interval and at or before the next token's first entry.
+        let minimum = a.floor().to_u32()?.checked_add(1)?;
+        let maximum = b.floor().to_u32()?;
+        if minimum > maximum || minimum <= *cuts.last()? || maximum >= width {
+            return None;
+        }
+        let cut = a.midpoint(b).round().to_u32()?.clamp(minimum, maximum);
         if cut <= *cuts.last()? || cut >= width {
             return None;
         }
         cuts.push(cut);
+        ranges.push([minimum, maximum]);
     }
     cuts.push(width);
+    ranges.push([width, width]);
     let mut result = Vec::with_capacity(tokens);
     for (i, edge) in cuts.windows(2).enumerate() {
         let bounds = InkBounds {
@@ -102,7 +129,10 @@ pub fn ordered_partition(
         }
         result.push(bounds);
     }
-    Some(result)
+    Some(OrderedPartition {
+        bounds: result,
+        cut_ranges: ranges,
+    })
 }
 
 /// Count exact foreground, including ink crossing a band boundary.
@@ -111,11 +141,18 @@ pub fn ordered_partition(
 pub fn measured_bands(
     raster: &GrayImage,
     threshold: u8,
-    bounds: &[InkBounds],
+    partition: &OrderedPartition,
     remaining_checks: &mut u64,
 ) -> Result<Option<Vec<ColumnBand>>, Error> {
     let (width, height) = raster.dimensions();
+    let bounds = &partition.bounds;
+    let cuts = &partition.cut_ranges;
     if threshold == 0
+        || cuts.len() != bounds.len() + 1
+        || cuts[0] != [0, 0]
+        || cuts.last() != Some(&[width, width])
+        || cuts.iter().any(|&[min, max]| min > max || max > width)
+        || cuts.windows(2).any(|p| p[0][1] >= p[1][0])
         || bounds.is_empty()
         || bounds[0].left != 0
         || bounds.last().is_none_or(|b| b.right != width)
@@ -133,22 +170,70 @@ pub fn measured_bands(
         return Ok(None);
     };
     *remaining_checks = remaining;
+    // This single exact per-column raster tally supports both representative
+    // and worst-case membership counts without re-visiting any source pixels.
+    let mut columns =
+        vec![0_u64; usize::try_from(width).map_err(|_| Error::Invalid("source width".into()))?];
+    let mut source_edge = vec![false; columns.len()];
+    for y in 0..height {
+        for x in 0..width {
+            if raster.get_pixel(x, y).0[0] >= threshold {
+                continue;
+            }
+            let index = usize::try_from(x).map_err(|_| Error::Invalid("source x".into()))?;
+            columns[index] += 1;
+            source_edge[index] |= x == 0 || x + 1 == width || y == 0 || y + 1 == height;
+        }
+    }
+    let mut prefix = Vec::with_capacity(columns.len() + 1);
+    prefix.push(0_u64);
+    for &count in &columns {
+        prefix.push(prefix.last().copied().unwrap_or(0).saturating_add(count));
+    }
+    let sum = |left: u32, right: u32| -> Option<u64> {
+        let l = usize::try_from(left).ok()?;
+        let r = usize::try_from(right).ok()?;
+        prefix.get(r)?.checked_sub(*prefix.get(l)?)
+    };
     let mut result = Vec::with_capacity(bounds.len());
     for (token, &b) in bounds.iter().enumerate() {
-        let mut foreground = 0_u64;
-        let mut touches_source_edge = false;
-        for y in 0..height {
-            for x in b.left..b.right {
-                if raster.get_pixel(x, y).0[0] < threshold {
-                    foreground += 1;
-                    touches_source_edge |= x == 0 || x + 1 == width || y == 0 || y + 1 == height;
-                }
-            }
-        }
+        let [possible_left, guaranteed_left] = cuts[token];
+        let [guaranteed_right, possible_right] = cuts[token + 1];
+        let bounds_possible = InkBounds {
+            left: possible_left,
+            top: 0,
+            right: possible_right,
+            bottom: height,
+        };
+        let foreground = sum(b.left, b.right)
+            .ok_or_else(|| Error::Invalid("invalid source band tally".into()))?;
+        let guaranteed_foreground = if guaranteed_left < guaranteed_right {
+            sum(guaranteed_left, guaranteed_right)
+                .ok_or_else(|| Error::Invalid("invalid guaranteed source tally".into()))?
+        } else {
+            0
+        };
+        let possible_foreground = sum(possible_left, possible_right)
+            .ok_or_else(|| Error::Invalid("invalid possible source tally".into()))?;
+        let possible_source_edge = source_edge[usize::try_from(possible_left)
+            .map_err(|_| Error::Invalid("possible source position".into()))?
+            ..usize::try_from(possible_right)
+                .map_err(|_| Error::Invalid("possible source position".into()))?]
+            .iter()
+            .any(|&x| x);
+        let touches_source_edge = source_edge[usize::try_from(b.left)
+            .map_err(|_| Error::Invalid("source position".into()))?
+            ..usize::try_from(b.right).map_err(|_| Error::Invalid("source position".into()))?]
+            .iter()
+            .any(|&x| x);
         result.push(ColumnBand {
             token,
             bounds: b,
             foreground,
+            guaranteed_foreground,
+            possible_foreground,
+            possible_source_edge,
+            possible_bounds: bounds_possible,
             touches_source_edge,
         });
     }
@@ -172,6 +257,8 @@ pub struct SourceSpanEvidence {
     pub normalized_sha256: String,
     pub revised_text: String,
     pub bands: Vec<ColumnBand>,
+    /// Every possible integer cut within all CTC entry constraints.
+    pub cut_ranges: Vec<[u32; 2]>,
     pub edits: SourceEdits,
     pub votes: Vec<SpanVote>,
     pub source_accounting: RunAccounting,
@@ -216,7 +303,7 @@ fn view_vote(
     let old_characters = old.chars().collect::<Vec<_>>();
     let editable = bands
         .iter()
-        .map(|band| band.foreground > 0 && !band.touches_source_edge)
+        .map(|band| band.guaranteed_foreground > 0 && !band.possible_source_edge)
         .collect::<Vec<_>>();
     let embedding =
         embedding_compatible(&old_characters, &revised_characters, &editable, |j, i| {
@@ -283,10 +370,10 @@ pub fn probe(input: SpanInput<'_>, remaining_checks: &mut u64) -> Result<SourceS
         return Ok(skip("missing_ctc_entry_evidence"));
     };
     let anchor_sets = views.iter().map(|(_, _, v)| v.clone()).collect::<Vec<_>>();
-    let Some(bounds) = ordered_partition(&anchor_sets, normalized.dimensions()) else {
+    let Some(partition) = ordered_partition(&anchor_sets, normalized.dimensions()) else {
         return Ok(skip("unresolved_ordered_partition"));
     };
-    let Some(bands) = measured_bands(normalized, sample.threshold, &bounds, remaining_checks)?
+    let Some(bands) = measured_bands(normalized, sample.threshold, &partition, remaining_checks)?
     else {
         return Ok(skip("source_pixel_budget"));
     };
@@ -313,13 +400,29 @@ pub fn probe(input: SpanInput<'_>, remaining_checks: &mut u64) -> Result<SourceS
     else {
         return Ok(skip("source_membership_budget"));
     };
+    // The representative midpoint partition conserves every physical pixel.
+    // Independently require that **any** admissible placement of its two
+    // neighboring boundaries cannot assign peer-owned ink to an edited slot.
+    let Some(columns) = &source_accounting.columns else {
+        return Err(Error::Invalid("missing source-column pixel ledger".into()));
+    };
     for position in edits.affected() {
-        if source_accounting.runs[position]
-            .peers
-            .values()
-            .any(|count| count.original != 0)
+        let band = &bands[position];
+        let l = usize::try_from(band.possible_bounds.left)
+            .map_err(|_| Error::Invalid("invalid envelope left".into()))?;
+        let r = usize::try_from(band.possible_bounds.right)
+            .map_err(|_| Error::Invalid("invalid envelope right".into()))?;
+        let column_range = columns.get(l..r).ok_or_else(|| {
+            Error::Invalid("source-column ownership envelope outside crop".into())
+        })?;
+        if column_range.iter().map(|c| c.foreground).sum::<u64>() != band.possible_foreground {
+            return Err(Error::Invalid("source-column union ink mismatch".into()));
+        }
+        if column_range
+            .iter()
+            .any(|column| column.peers.values().any(|&ink| ink != 0))
         {
-            return Ok(skip("competing_peer_foreground"));
+            return Ok(skip("possible_competing_peer_foreground"));
         }
     }
     Ok(SourceSpanOutcome::Measured {
@@ -328,6 +431,7 @@ pub fn probe(input: SpanInput<'_>, remaining_checks: &mut u64) -> Result<SourceS
             normalized_sha256: recognition.source_ink.normalized_sha256.clone(),
             revised_text: text.clone(),
             bands,
+            cut_ranges: partition.cut_ranges,
             edits,
             votes,
             source_accounting,
@@ -388,6 +492,42 @@ mod tests {
                 .all(|b| b.foreground > 0 && !b.touches_source_edge)
         );
         assert_eq!(measured[0].bounds.right, measured[1].bounds.left);
+        assert!(measured.iter().all(|x| x.guaranteed_foreground > 0));
+        assert!(
+            measured
+                .iter()
+                .all(|x| x.possible_foreground >= x.foreground
+                    && x.foreground >= x.guaranteed_foreground)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn uncertain_ctc_boundary_does_not_invent_owned_glyph_ink() -> Result<(), Error> {
+        // The only foreground pixel falls in the uncertain gap. Choosing a
+        // favorable midpoint would count it for one glyph, but neither glyph
+        // owns it under *all* admissible CTC partitions.
+        let raster = GrayImage::from_fn(20, 8, |x, y| {
+            if x == 9 && y == 4 {
+                Luma([0])
+            } else {
+                Luma([255])
+            }
+        });
+        let anchors = [
+            anchor('A', 4.5, [4.0, 5.0]),
+            anchor('B', 14.0, [13.0, 15.0]),
+        ];
+        let partition = ordered_partition(&[anchors.iter().collect()], raster.dimensions())
+            .ok_or_else(|| Error::Invalid("expected uncertainty interval".into()))?;
+        assert_eq!(partition.cut_ranges, vec![[0, 0], [6, 13], [20, 20]]);
+        let mut budget = 160;
+        let bands = measured_bands(&raster, 128, &partition, &mut budget)?
+            .ok_or_else(|| Error::Invalid("expected exact ink accounting".into()))?;
+        assert_eq!(bands.iter().map(|b| b.foreground).sum::<u64>(), 1);
+        assert!(bands.iter().all(|b| b.guaranteed_foreground == 0));
+        assert!(bands.iter().all(|b| b.possible_foreground == 1));
+        assert_eq!(budget, 0);
         Ok(())
     }
 
@@ -424,12 +564,16 @@ mod tests {
                 bottom: 10,
             },
         ];
+        let partition = OrderedPartition {
+            bounds: bounds.to_vec(),
+            cut_ranges: vec![[0, 0], [5, 5], [10, 10]],
+        };
         let mut budget = 99;
-        assert!(measured_bands(&raster, 128, &bounds, &mut budget)?.is_none());
+        assert!(measured_bands(&raster, 128, &partition, &mut budget)?.is_none());
         assert_eq!(budget, 99);
         let mut budget = 100;
         assert_eq!(
-            measured_bands(&raster, 128, &bounds, &mut budget)?
+            measured_bands(&raster, 128, &partition, &mut budget)?
                 .ok_or_else(|| Error::Invalid("budget".into()))?
                 .iter()
                 .map(|b| b.foreground)
@@ -451,7 +595,18 @@ mod tests {
                 bottom: 10,
             },
         ];
-        assert!(measured_bands(&raster, 128, &invalid, &mut budget).is_err());
+        assert!(
+            measured_bands(
+                &raster,
+                128,
+                &OrderedPartition {
+                    bounds: invalid.to_vec(),
+                    cut_ranges: vec![[0, 0], [5, 5], [10, 10]]
+                },
+                &mut budget
+            )
+            .is_err()
+        );
         Ok(())
     }
 }
