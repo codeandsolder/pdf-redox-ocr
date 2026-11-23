@@ -865,7 +865,7 @@ checksum = "626d4928326b646e70f65ed36fc7cf9f206bdb68a0019ee7c6b4709da4e084c4"
 dependencies = [
  "crc32fast",
  "miniz_oxide 0.9.1",
- "zlib-rs 0.6.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -1095,7 +1095,7 @@ dependencies = [
  "miniz_oxide 0.8.9",
  "rustc-hash",
  "smallvec",
- "zlib-rs 0.6.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zlib-rs",
  "zune-jpeg",
 ]
 
@@ -1975,7 +1975,7 @@ dependencies = [
  "smallvec",
  "thiserror",
  "write-fonts",
- "zlib-rs 0.6.8 (git+https://github.com/codeandsolder/zlib-rs-fast?rev=64c5fed5ad39bf28916e82d7fa955440e1f2c8f6)",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -3434,12 +3434,6 @@ dependencies = [
  "memchr",
  "typed-path",
 ]
-
-[[package]]
-name = "zlib-rs"
-version = "0.6.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zlib-rs"
