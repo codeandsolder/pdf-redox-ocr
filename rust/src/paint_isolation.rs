@@ -343,6 +343,6 @@ pub(crate) fn make_decoded_stream(
     );
     Ok(OwnedObject::Stream {
         dictionary: dict,
-        data: StreamData::Owned(data),
+        data: StreamData::Owned(data.into()),
     })
 }

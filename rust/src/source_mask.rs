@@ -227,7 +227,7 @@ pub fn mask_source_subset(
         )
     });
     dictionary.insert(b"Length".to_vec(), OwnedObject::Integer(length));
-    *data = StreamData::Owned(payload);
+    *data = StreamData::Owned(payload.into());
     Ok(Some(MaskedSourceObject {
         object: rewritten,
         metrics,
