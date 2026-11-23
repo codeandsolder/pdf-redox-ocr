@@ -69,12 +69,12 @@ pub enum RepairOutcome {
 }
 
 impl RepairOutcome {
-    #[must_use]
+    #[must_use = "check the crop repair decision before applying the proposed edit"]
     pub const fn accepted(&self) -> bool {
         matches!(self, Self::Accepted { .. })
     }
 
-    #[must_use]
+    #[must_use = "handle a rejected crop repair before updating the document"]
     pub const fn failed(&self) -> bool {
         matches!(self, Self::InferenceFailed { .. })
     }

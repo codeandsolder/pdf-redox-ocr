@@ -294,7 +294,7 @@ pub(crate) const fn edge_margin(height: u32) -> u32 {
 /// can propose. Orthogonal padding allows fully sampling any glyph-sized
 /// component intersecting the original band.
 #[cfg(feature = "pdf-integration")]
-#[must_use]
+#[must_use = "apply the calculated margin when searching for nearby edge ink"]
 pub const fn search_padding(height: u32) -> [u32; 4] {
     let axis = edge_extent(height)
         .saturating_add(edge_margin(height))
@@ -406,7 +406,7 @@ fn candidates_on_edge(
 /// independent checks, and no expansion is automatically accepted.
 ///
 /// Invalid or empty geometry yields no candidates.
-#[must_use]
+#[must_use = "inspect edge extension evidence before accepting source-paint edits"]
 pub fn audit_edge_extensions<'a>(
     components: impl IntoIterator<Item = &'a PixelRegion>,
     observation: InkBounds,

@@ -71,7 +71,7 @@ impl ConvexQuad {
 }
 
 /// Signed polygon area. Its sign records winding.
-#[must_use]
+#[must_use = "use oriented area when testing polygon winding"]
 pub fn signed_area(points: &[Point]) -> f64 {
     if points.len() < 3 {
         return 0.0;
@@ -86,13 +86,13 @@ pub fn signed_area(points: &[Point]) -> f64 {
 }
 
 /// Unsigned polygon area.
-#[must_use]
+#[must_use = "use polygon area when measuring ink coverage"]
 pub fn area(points: &[Point]) -> f64 {
     signed_area(points).abs()
 }
 
 /// Clip a polygon by convex geometry, with winding-independent edge tests.
-#[must_use]
+#[must_use = "use the clipped polygon to evaluate overlapping paint"]
 pub fn clip_convex(subject: &[Point], clip: &[Point]) -> Vec<Point> {
     if clip.len() < 3 {
         return Vec::new();
@@ -139,7 +139,7 @@ pub fn clip_convex(subject: &[Point], clip: &[Point]) -> Vec<Point> {
 }
 
 /// Intersection area divided by the smaller polygon area, not `IoU`.
-#[must_use]
+#[must_use = "use the overlap fraction to decide source-paint attribution"]
 pub fn overlap_fraction(first: &[Point], second: &[Point]) -> f64 {
     let minimum = area(first).min(area(second));
     if minimum <= 1e-9 {

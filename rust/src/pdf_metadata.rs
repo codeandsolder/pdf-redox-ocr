@@ -61,7 +61,7 @@ impl PdfMetadata {
     }
 
     /// Number of pages in PDF page-tree order.
-    #[must_use]
+    #[must_use = "use the page count to bound source-page operations"]
     pub fn page_count(&self) -> usize {
         self.mappers.len()
     }
@@ -78,19 +78,19 @@ impl PdfMetadata {
     }
 
     /// Validated effective page geometries in PDF page-tree order.
-    #[must_use]
+    #[must_use = "use source media boxes when reconstructing page geometry"]
     pub const fn media_boxes(&self) -> &BTreeMap<PageNumber, PageBox> {
         &self.media_boxes
     }
 
     /// Reuse the original Hayro-backed PDF source to examine content streams.
-    #[must_use]
+    #[must_use = "use the owning source PDF when resolving document objects"]
     pub const fn source(&self) -> &SourcePdf {
         &self.source
     }
 
     /// Original bytes, identical to those hashed in an OCR sidecar.
-    #[must_use]
+    #[must_use = "retain the original PDF bytes when applying byte-preserving edits"]
     pub fn original_bytes(&self) -> &[u8] {
         self.source.bytes()
     }

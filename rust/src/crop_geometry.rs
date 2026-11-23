@@ -38,7 +38,7 @@ impl CropGeometry {
     /// Reconstruct the four-point OAR crop orientation and verify the actual
     /// returned dimensions. The four input points must be actual detector
     /// corners, not a polygon envelope.
-    #[must_use]
+    #[must_use = "use the validated transform when mapping detector and source coordinates"]
     pub fn from_quad(mut points: Quad, parent: (u32, u32), crop: (u32, u32)) -> Option<Self> {
         if points.iter().any(|p| !p.0.is_finite() || !p.1.is_finite()) {
             return None;
@@ -96,7 +96,7 @@ impl CropGeometry {
     }
 
     /// Account for a classifier-selected half-turn after rectification.
-    #[must_use]
+    #[must_use = "use the adjusted transform when processing a half-turned crop"]
     pub const fn with_half_turn(mut self, rotate180: bool) -> Self {
         self.rotate180 = rotate180;
         self
@@ -109,7 +109,7 @@ impl CropGeometry {
     ///
     /// Unlike pixel-cell projection, this deliberately does not extrapolate
     /// half a sample beyond a perspective crop's original corners.
-    #[must_use]
+    #[must_use = "use the inferred corner order to position recognized characters"]
     pub fn reading_order(self, detector: Quad) -> Option<[usize; 4]> {
         let [tl, tr, br, bl] = self.parent_corners;
         let mut reading = if self.rotate270 {
@@ -128,7 +128,7 @@ impl CropGeometry {
     }
 
     /// Return a mapped ink bounding rectangle in parent RGB pixel corners.
-    #[must_use]
+    #[must_use = "use the mapped ink quadrilateral for source-paint localization"]
     pub fn ink_quad(self, ink: InkBounds) -> Option<Quad> {
         let bounds = [
             Point(f64::from(ink.left), f64::from(ink.bottom)),
