@@ -32,8 +32,7 @@ fn xml_attribute(event: &quick_xml::events::BytesStart<'_>, name: &str) -> Resul
         }
     }
     Err(Error::Invalid(format!(
-        "missing native word attribute {}",
-        name
+        "missing native word attribute {name}"
     )))
 }
 
