@@ -150,11 +150,11 @@ pub enum ConfirmationOutcome {
 }
 
 impl ConfirmationOutcome {
-    #[must_use]
+    #[must_use = "check acceptance before applying aligned character replacements"]
     pub const fn accepted(&self) -> bool {
         matches!(self,Self::Predicted{result} if result.decision.accepted())
     }
-    #[must_use]
+    #[must_use = "handle failed alignment before committing source edits"]
     pub const fn failed(&self) -> bool {
         matches!(self, Self::InferenceFailed { .. })
     }

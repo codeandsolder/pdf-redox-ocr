@@ -32,7 +32,7 @@ pub enum RefinementModel {
 }
 
 impl RefinementModel {
-    #[must_use]
+    #[must_use = "use the model label when reporting refinement provenance"]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Small => "PP-OCRv6 Small",
@@ -153,7 +153,7 @@ pub struct RefinementRecognizer {
 }
 
 impl RefinementRecognizer {
-    #[must_use]
+    #[must_use = "retain the configured refinement backend for OCR inference"]
     pub const fn new(profile: RefinementModel, threads: Option<NonZeroUsize>) -> Self {
         Self {
             profile,

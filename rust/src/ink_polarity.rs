@@ -154,7 +154,7 @@ impl PolarityEvidence {
     /// median. This preserves antialias coverage on a white background and
     /// avoids broadening faint strokes by stretching their median to black.
     /// A uniform observation has no measurable ink.
-    #[must_use]
+    #[must_use = "use the polarity-normalized image for downstream recognition"]
     pub fn normalize(&self, image: &GrayImage) -> GrayImage {
         let Some([low, high]) = self.class_medians else {
             return GrayImage::from_pixel(image.width(), image.height(), Luma([255]));

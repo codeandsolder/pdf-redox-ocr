@@ -63,7 +63,7 @@ impl InkCounts {
     }
 
     /// Total newly included foreground, regardless of direction.
-    #[must_use]
+    #[must_use = "include added ink evidence in the fragment-change calculation"]
     pub const fn added(self) -> u64 {
         self.axis_added + self.orthogonal_added
     }

@@ -45,7 +45,7 @@ pub enum RefinementDecision {
 }
 
 impl RefinementDecision {
-    #[must_use]
+    #[must_use = "use observed text when deciding whether refinement is meaningful"]
     pub fn text(&self) -> Option<&str> {
         match self {
             Self::Greedy { text } | Self::Consensus { text, .. } => Some(text),
@@ -145,7 +145,7 @@ pub struct RefinementReport {
 
 /// Ignore only whitespace; retain literal engineering symbols, punctuation,
 /// superscripts and full-width forms.
-#[must_use]
+#[must_use = "check whether the refinement changes recognized content"]
 pub fn meaningful_change(left: &str, right: &str) -> bool {
     canonical(left) != canonical(right)
 }

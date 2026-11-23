@@ -53,7 +53,7 @@ pub struct OcrLine {
 impl OcrLine {
     /// Match the importer's automatic text/confidence eligibility.
     /// Geometric native-text and duplicate checks are separate.
-    #[must_use]
+    #[must_use = "check overlay eligibility before replacing source text"]
     pub fn overlay_qualified(&self, threshold: f64) -> bool {
         !self.text.trim().is_empty() && (self.reviewed || self.confidence >= threshold)
     }
@@ -61,7 +61,7 @@ impl OcrLine {
 
 impl OcrDraft {
     /// Construct a draft with the supported importer schema.
-    #[must_use]
+    #[must_use = "retain the initialized draft for further OCR refinement"]
     pub const fn new(digest: String, model: String, pages: Vec<DraftPage>) -> Self {
         Self {
             schema_version: 3,

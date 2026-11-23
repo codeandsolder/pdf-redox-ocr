@@ -109,7 +109,7 @@ pub struct MosaicAxes {
 
 impl MosaicAxes {
     /// Project a page-display vector into source-aligned coordinates.
-    #[must_use]
+    #[must_use = "use transformed coordinates when locating mosaic elements"]
     pub fn project(self, Point(x, y): Point) -> Point {
         let det = self.x.0.mul_add(self.y.1, -(self.x.1 * self.y.0));
         Point(
@@ -119,7 +119,7 @@ impl MosaicAxes {
     }
 
     /// Convert source-aligned coordinates to page-display vector.
-    #[must_use]
+    #[must_use = "use inverse-transformed coordinates when mapping mosaic edits"]
     pub fn unproject(self, Point(x, y): Point) -> Point {
         Point(
             self.x.0.mul_add(x, self.y.0 * y),
@@ -175,7 +175,7 @@ pub(crate) fn compositor_handles_reason(reason: &str) -> bool {
 /// Unknown content, image placements, inline images and annotations remain
 /// excluded because the raster-only merger requires every painted mark to
 /// be accounted for by an image paint.
-#[must_use]
+#[must_use = "check paint eligibility before using mosaic recognition"]
 pub fn mosaic_page_eligible(summary: &PagePaintSummary, paints: &[ImagePaint]) -> bool {
     summary.image_paints > 0
         && summary.image_paints == paints.len()
@@ -368,7 +368,7 @@ fn group_region(items: &[Item], page: PageBox, pitch: f64) -> Option<PageBox> {
 ///
 /// This holds even when the subsequent crop plan fails a budget or geometry
 /// gate: deliberately avoid the raw-source shortcut in that case.
-#[must_use]
+#[must_use = "select composited recognition when separated paints are insufficient"]
 pub fn requires_composited_recognition(
     paints: &[ImagePaint],
     page: PageBox,

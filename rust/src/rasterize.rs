@@ -113,7 +113,7 @@ pub struct CropPixelMapper {
 
 impl CropPixelMapper {
     /// Inverse map from original PDF user space to cropped raster pixel frame.
-    #[must_use]
+    #[must_use = "use mapped raster coordinates when sampling page pixels"]
     pub fn to_raster(self, point: Point) -> Point {
         let Point(u, v) = self.mapper.to_raster(point);
         Point(
@@ -123,7 +123,7 @@ impl CropPixelMapper {
     }
 
     /// Map raster pixel corners directly into original PDF user coordinates.
-    #[must_use]
+    #[must_use = "use mapped PDF coordinates when placing recognized text"]
     pub fn to_pdf(self, Point(x, y): Point) -> Point {
         let u = (f64::from(self.origin_x) + x) * self.point_per_pixel / self.display_width;
         let v = (f64::from(self.origin_y) + y) * self.point_per_pixel / self.display_height;
@@ -134,13 +134,13 @@ impl CropPixelMapper {
 impl RenderedCrop {
     /// Preserve the exact pixel-to-page mapping when transferring the image
     /// buffer to the OCR backend.
-    #[must_use]
+    #[must_use = "retain the crop pixel mapper for coordinate conversion"]
     pub const fn pixel_mapper(&self) -> CropPixelMapper {
         self.mapper
     }
 
     /// Project cropped image pixel coordinates to original PDF user space.
-    #[must_use]
+    #[must_use = "use the PDF-mapped pixel position when reconstructing glyph geometry"]
     pub fn pixel_to_pdf(&self, point: Point) -> Point {
         self.pixel_mapper().to_pdf(point)
     }

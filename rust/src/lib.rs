@@ -148,7 +148,7 @@ impl PageNumber {
     }
 
     /// Underlying one-based page number.
-    #[must_use]
+    #[must_use = "use the source page number when indexing document pages"]
     pub const fn get(self) -> u32 {
         self.0
     }

@@ -37,7 +37,7 @@ pub struct SourceObservation {
 
 impl SourceObservation {
     /// Borrow the source-local polygons in the original detector output order.
-    #[must_use]
+    #[must_use = "use source-local recognized lines when attributing PDF text"]
     pub fn local_lines(&self) -> Vec<&OcrLine> {
         self.lines.iter().map(|entry| &entry.line).collect()
     }
@@ -104,7 +104,7 @@ pub fn map_observations_to_paint(
 ///
 /// Pages with visible vector content or unsupported graphics state still use
 /// page fallback. Only image-only pages are considered for the fast path.
-#[must_use]
+#[must_use = "use eligible source-only candidates when selecting OCR regions"]
 pub fn source_only_candidates(report: &PaintReport, max_pixels: u64) -> BTreeSet<String> {
     let mut eligible = report
         .pages

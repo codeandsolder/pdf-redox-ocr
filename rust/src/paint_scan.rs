@@ -30,7 +30,7 @@ impl PdfMatrix {
     pub const IDENTITY: Self = Self([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
 
     /// Compose the outer state transform with a new inner transformation.
-    #[must_use]
+    #[must_use = "use the composed transform for nested paint operations"]
     pub fn concat(self, inner: Self) -> Self {
         let outer = self.0;
         let inner = inner.0;
@@ -45,7 +45,7 @@ impl PdfMatrix {
     }
 
     /// Transform a point in the unit square into PDF user space.
-    #[must_use]
+    #[must_use = "use the transformed point when evaluating paint geometry"]
     pub const fn point(self, Point(point_x, point_y): Point) -> Point {
         let matrix = self.0;
         Point(
@@ -55,7 +55,7 @@ impl PdfMatrix {
     }
 
     /// Transform an axis-aligned rectangle into its original PDF-space quad.
-    #[must_use]
+    #[must_use = "use the transformed rectangle when evaluating paint bounds"]
     pub const fn rect_quad(self, bounds: PageBox) -> Quad {
         [
             self.point(Point(bounds.x0, bounds.y0)),
@@ -66,7 +66,7 @@ impl PdfMatrix {
     }
 
     /// Return the absolute determinant of this CTM.
-    #[must_use]
+    #[must_use = "apply the transform area factor when comparing paint coverage"]
     pub fn area_scale(self) -> f64 {
         let [a, b, c, d, _, _] = self.0;
         b.mul_add(-c, a * d).abs()
@@ -154,7 +154,7 @@ impl ImagePaint {
     }
 
     /// Every vertex must be within every known clipping polygon.
-    #[must_use]
+    #[must_use = "check clip visibility before attributing the paint"]
     pub fn wholly_visible_in_clip(&self, quad: &Quad) -> bool {
         self.unsafe_reasons.is_empty()
             && self
@@ -239,7 +239,7 @@ impl PagePaintSummary {
 
     /// All visible paint is native searchable text, or there is no visible paint.
     /// Native word extraction is checked separately by the caller.
-    #[must_use]
+    #[must_use = "choose the native-text path when no raster paint requires OCR"]
     pub fn native_text_only(&self) -> bool {
         self.image_paints == 0 && self.closed_visual_paint() && self.native_only_blockers.is_empty()
     }
