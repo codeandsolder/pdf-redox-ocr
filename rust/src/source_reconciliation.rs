@@ -12,6 +12,7 @@ use crate::{
     fragment_reconciliation::{Rejection, consistent_votes},
     line_audit::{AuditedLine, BoundaryPeer},
     refinement_evidence::{Recognition, RefinementDecision, ViewEvidence, canonical},
+    source_completeness::CompleteRun,
 };
 
 /// Token identities over every minimum-substitution complete embedding.
@@ -59,6 +60,7 @@ pub struct SourceCorrection {
     pub recognition: SourceRecognition,
     pub peers: Vec<BoundaryPeer>,
     pub run_accounting: RunAccounting,
+    pub complete_runs: Vec<CompleteRun>,
 }
 
 #[derive(Clone, Copy)]
@@ -256,6 +258,7 @@ fn vote(
     old: &str,
     revised: &str,
     ink: &SourceInk,
+    complete: &BTreeSet<usize>,
 ) -> Option<(Vec<usize>, SourceVote)> {
     let CtcOutcome::Measured { evidence } = &view.ctc else {
         return None;
@@ -300,6 +303,7 @@ fn vote(
 pub fn propose(
     line: &AuditedLine,
     recognition: &Recognition,
+    complete_runs: &[CompleteRun],
 ) -> Result<SourceRecognition, Rejection> {
     let RefinementDecision::Consensus { text, view_indices } = &recognition.decision else {
         return Err(Rejection::NoConsensus);
@@ -313,8 +317,9 @@ pub fn propose(
         return Err(Rejection::WouldDeleteSourceToken);
     }
     let ink = &recognition.source_ink;
+    let complete: BTreeSet<_> = complete_runs.iter().map(|p| p.run).collect();
     let (revised_runs, votes) = consistent_votes(recognition, view_indices, |i, v| {
-        vote(i, v, &old, &revised, ink)
+        vote(i, v, &old, &revised, ink, &complete)
     })
     .ok_or(Rejection::UnlocalizedSourceEdit)?;
     // Text and geometry are identical across all feasible explanations;

@@ -955,9 +955,13 @@ of insertions is fixed by the revised length. This permits substitutions,
 insertions, and mixed edits without inventing deletions or arbitrary old-token
 identities. Each view records all possible and required insertion/substitution
 positions across minimum-cost complete embeddings; their union and intersection
-are retained across accepted views. Every possibly edited run must have
-unclipped independent ink, with exact peer accounting rejecting overlapping
-OCR/native text. Explicit original CTC queries score even absent beam sequences;
+are retained across accepted views. Every possibly edited run must have independent ink which is either unclipped
+or independently proved complete by full padded-sample connected components.
+A whole-component partition fully inside a run and the original observation,
+with zero outside pixels, no sampled-image edge contact and an exact matching
+foreground pixel sum, proves that a crop-edge-touching run has no continuation.
+The report retains the component IDs and exact pixels for each such accepted
+run. Exact peer accounting still rejects overlapping OCR/native text. Explicit original CTC queries score even absent beam sequences;
 the consensus winner must have higher exact mass in each accepted view.
 Every text-only correction enters the same atomic conflict resolver and keeps
 unchanged original geometry.
@@ -992,7 +996,7 @@ peer additionally requires stable independently localized literal text inside th
 observation, and cannot have a shared component cut by the replacement boundary.
 Native-text conflicts and incomplete peer samples abstain.
 
-The schema 15 report retains the original observation identity, all considered extensions and contractions,
+The schema 16 report retains the original observation identity, all considered extensions and contractions,
 conditional CTC evidence, common-raster run counts, peer evidence, transactions and
 conflicts. Strictly nested candidates can supersede a shorter candidate only if all added
 foreground is bound to tokens, the larger component chain and crop contain the

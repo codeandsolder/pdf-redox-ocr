@@ -30,7 +30,7 @@ use crate::{
     refinement::{RefinementPolicy, RefinementScope, recognize_observation, refinement_plan},
     refinement_evidence::{Recognition, RefinementOutcome},
     refinement_recognition::{RefinementModel, RefinementRecognizer},
-    source_reconciliation, stroke_reconciliation,
+    source_completeness, source_reconciliation, stroke_reconciliation,
 };
 
 pub use crate::{
@@ -437,10 +437,17 @@ impl PageContext<'_> {
         recognition: &Recognition,
         budget: &mut u64,
     ) -> Result<Result<Transaction, Rejection>, Error> {
-        let proposal = match source_reconciliation::propose(&sampled.audit, recognition) {
-            Ok(proposal) => proposal,
-            Err(reason) => return Ok(Err(reason)),
-        };
+        let complete_runs = source_completeness::prove(
+            &recognition.source_ink,
+            sampled.audit.observation_bounds,
+            sampled.normalized.dimensions(),
+            &sampled.audit.components,
+        );
+        let proposal =
+            match source_reconciliation::propose(&sampled.audit, recognition, &complete_runs) {
+                Ok(proposal) => proposal,
+                Err(reason) => return Ok(Err(reason)),
+            };
         let bounds = QuadBounds::new(&sampled.audit.original_quad);
         let (peers, quads): (Vec<_>, Vec<_>) =
             self.page
@@ -486,6 +493,15 @@ impl PageContext<'_> {
         let Some(text) = recognition.decision.text() else {
             return Err(Error::Invalid("missing source revision decision".into()));
         };
+        let changed_runs: BTreeSet<_> = proposal
+            .edits
+            .affected()
+            .map(|position| proposal.revised_runs[position])
+            .collect();
+        let complete_runs = complete_runs
+            .into_iter()
+            .filter(|proof| changed_runs.contains(&proof.run))
+            .collect();
         Ok(Ok(Transaction {
             page: sampled.audit.page,
             line_index: sampled.audit.line_index,
@@ -495,6 +511,7 @@ impl PageContext<'_> {
                 recognition: proposal,
                 peers,
                 run_accounting,
+                complete_runs,
             }),
             consumed: Vec::new(),
         }))
@@ -940,7 +957,7 @@ pub fn reconcile_fragments(
     source.verify_pdf(pdf)?;
     Ok((
         FragmentReport {
-            schema_version: 15,
+            schema_version: 16,
             pdf_sha256: source.pdf_sha256.clone(),
             draft_model: source.model.clone(),
             secondary_model: RefinementModel::Consensus.label(),
