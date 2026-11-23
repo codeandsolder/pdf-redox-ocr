@@ -49,6 +49,9 @@ pub use crate::{
 #[derive(Debug)]
 pub struct FragmentPolicy {
     pub audit: LineAuditPolicy,
+    /// Enable expensive, research-only source ownership diagnostics on lines
+    /// where even connected glyphs prevent one-to-one run assignments.
+    pub source_span_diagnostics: bool,
     pub max_page_pixels: u64,
 }
 
@@ -59,6 +62,7 @@ impl Default for FragmentPolicy {
                 padding_pixels: None,
                 ..LineAuditPolicy::default()
             },
+            source_span_diagnostics: false,
             max_page_pixels: 32_000_000,
         }
     }
@@ -523,10 +527,32 @@ impl PageContext<'_> {
         let primary = &sampled.audit.original_text;
         let count = primary.chars().filter(|c| !c.is_whitespace()).count();
         let b = sampled.audit.observation_bounds;
-        // Recognition is required even when multiple touching characters
-        // share a single connected foreground projection run. The
-        // source-span probe remains diagnostic until independent evidence
-        // demonstrates that its new assignments can be safely committed.
+        // The costly two-model recognition of touching glyphs is opt-in.
+        // With source spans disabled retain the independently measured
+        // preselection used by the canonical nondeleting source reconciler.
+        if !self.policy.source_span_diagnostics && contractions.is_empty() && !has_mask {
+            let required = membership_checks(b.right - b.left, b.bottom - b.top, 0);
+            let Some(remaining) = budget.checked_sub(required) else {
+                return Ok(ObservationMeasurements::skipped(
+                    Rejection::InkBudgetExceeded,
+                    0,
+                    false,
+                ));
+            };
+            *budget = remaining;
+            if crate::glyph_isolation::occupied_run_count(
+                &sampled.normalized,
+                b,
+                self.policy.audit.segmentation_threshold,
+            ) < count
+            {
+                return Ok(ObservationMeasurements::skipped(
+                    Rejection::InsufficientIndependentRuns,
+                    0,
+                    false,
+                ));
+            }
+        }
         let Some((rgb, normalized, shared)) = self.prepare_crop(sampled, b)? else {
             return Ok(ObservationMeasurements::skipped(
                 Rejection::PixelBudgetExceeded,
@@ -576,8 +602,9 @@ impl PageContext<'_> {
         };
         let source_span = match &original.decision {
             crate::refinement_evidence::RefinementDecision::Consensus { text, .. }
-                if crate::refinement_evidence::canonical(text)
-                    != crate::refinement_evidence::canonical(primary) =>
+                if self.policy.source_span_diagnostics
+                    && crate::refinement_evidence::canonical(text)
+                        != crate::refinement_evidence::canonical(primary) =>
             {
                 let (_, peers) = self.observation_peer_quads(sampled);
                 let result = source_span::probe(

@@ -962,8 +962,10 @@ the consensus winner must have higher exact mass in each accepted view.
 Every text-only correction enters the same atomic conflict resolver and keeps
 unchanged original geometry.
 
-A separately reported schema16 diagnostic measures shared-raster CTC-derived
-**source pixel ownership spans**, without admitting them as document edits.
+The opt-in CLI flag `--source-spans` enables a separately reported schema16
+diagnostic measuring shared-raster CTC-derived **source pixel ownership spans**,
+without admitting them as document edits. Without this flag the existing
+cheap source-run preselection and document behavior remain unchanged.
 Every visible token is assigned a disjoint column band bounded by the
 intersection of all accepted view entry intervals. The exact thresholded
 foreground and peer ink must be conserved, and source image hashes must match

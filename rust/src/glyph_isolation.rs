@@ -140,7 +140,7 @@ fn projection_runs(
 
 /// Count exact occupied-column intervals in a subwindow, without computing
 /// component topology, allocating a crop or recognizing anything.
-#[cfg(test)]
+#[cfg(any(all(feature = "pdf-integration", feature = "native-inference"), test))]
 pub(crate) fn occupied_run_count(image: &GrayImage, bounds: InkBounds, threshold: u8) -> usize {
     let mut previous = false;
     let mut runs = 0;
