@@ -320,7 +320,7 @@ impl Sample<'_> {
                 }
                 let part = classify_pixel(observation, expanded, x, y);
                 run.sample.record(part);
-                if let Some(columns) = &mut columns {
+                if let Some(columns) = columns.as_mut() {
                     columns[usize::try_from(column)
                         .map_err(|_| Error::Invalid("invalid column index".into()))?]
                     .foreground += 1;
@@ -331,7 +331,7 @@ impl Sample<'_> {
                 for (peer, quad) in peer_quads.iter().enumerate() {
                     if quad.contains(point) {
                         run.peers.entry(peer).or_default().record(part);
-                        if let Some(columns) = &mut columns {
+                        if let Some(columns) = columns.as_mut() {
                             *columns[usize::try_from(column)
                                 .map_err(|_| Error::Invalid("invalid column index".into()))?]
                             .peers
