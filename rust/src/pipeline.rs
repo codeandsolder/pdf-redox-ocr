@@ -398,7 +398,7 @@ impl PipelineResult {
     }
 
     /// Borrow the complete source-bound diagnostic report without copying evidence.
-    #[must_use]
+    #[must_use = "inspect pipeline diagnostics before accepting the processed document"]
     pub const fn audit(&self) -> PipelineAudit<'_> {
         PipelineAudit {
             schema_version: 20,
@@ -658,7 +658,7 @@ impl PreparedOcr {
     }
 
     /// Exact original bytes for a subsequent semantic overlay.
-    #[must_use]
+    #[must_use = "retain original PDF bytes for non-destructive output construction"]
     pub fn original_bytes(&self) -> &[u8] {
         self.doc.original_bytes()
     }

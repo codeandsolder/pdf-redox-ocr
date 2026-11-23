@@ -766,7 +766,7 @@ impl OcrInference {
     /// Configure the official PP-OCRv6 Small detector/recognizer pair.
     /// Resolve and load models only on the first recognition. A native-only
     /// document needs no model or ONNX session.
-    #[must_use]
+    #[must_use = "retain the configured OCR backend for recognition"]
     pub fn pp_ocrv6(
         threads: Option<NonZeroUsize>,
         repair: RepairPolicy,

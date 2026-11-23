@@ -88,7 +88,7 @@ pub struct RasterPageDecision {
 ///
 /// An opaque image-only page is not automatically safe: every source must
 /// have been recognized, and overlapping images require compositing.
-#[must_use]
+#[must_use = "use page-level decisions to choose native or raster recognition"]
 pub fn approve_raster_only_pages(pages: &[RasterPageEvidence]) -> Vec<RasterPageDecision> {
     pages
         .iter()

@@ -26,7 +26,7 @@ pub enum ConfirmationDecision {
 }
 
 impl ConfirmationDecision {
-    #[must_use]
+    #[must_use = "check the glyph confirmation decision before applying replacements"]
     pub const fn accepted(self) -> bool {
         matches!(self, Self::Agreement | Self::InkSupportedSubstitution)
     }
@@ -49,7 +49,7 @@ pub struct ConfirmationPolicy {
 }
 
 impl ConfirmationPolicy {
-    #[must_use]
+    #[must_use = "retain the overlay confirmation policy when evaluating glyphs"]
     pub const fn for_overlay(threshold: f64) -> Self {
         Self {
             protected_score: threshold,
@@ -74,7 +74,7 @@ struct Cluster {
 /// both candidate graphs allows a genuinely joined glyph cluster; all edits
 /// must preserve its ink coverage and scalar cardinality. Exact canonical
 /// Unicode equivalence and whitespace changes do not require substitution.
-#[must_use]
+#[must_use = "use the glyph confirmation decision to filter tentative matches"]
 pub fn decide(
     primary_score: f64,
     alternative_score: f64,

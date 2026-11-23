@@ -33,7 +33,7 @@ pub struct PixelLine {
 
 impl PixelLine {
     /// Apply the exact occurrence-specific transform after recognition.
-    #[must_use]
+    #[must_use = "use PDF-space recognized lines when replacing source text"]
     pub fn into_pdf(self, mapper: &dyn Fn(Point) -> Point) -> OcrLine {
         OcrLine {
             text: self.text,
@@ -116,7 +116,7 @@ pub enum RasterLocation {
 
 impl RasterMappingScope {
     /// The occurrence identity is independent of which detections were admitted.
-    #[must_use]
+    #[must_use = "use the raster location when associating recognized text with a page"]
     pub const fn location(&self) -> RasterLocation {
         match self {
             Self::NativeImage { paint_index, .. } => RasterLocation::NativeImage {
@@ -193,7 +193,7 @@ impl RasterCharacterMapping {
     }
 
     /// Map actual raster pixel corners to PDF space with the occurrence affine transform.
-    #[must_use]
+    #[must_use = "use the converted quadrilateral for PDF-space character placement"]
     pub fn to_pdf(&self, quad: Quad) -> Quad {
         let [top_left, top_right, _, bottom_left] = self.raster_corners;
         quad.map(|Point(x, y)| {
@@ -321,7 +321,7 @@ pub struct RecognitionSession<'a, B> {
 }
 
 impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
-    #[must_use]
+    #[must_use = "retain the cache configured with the recognition budget"]
     pub const fn new(backend: &'a B, budget: RecognitionCacheBudget) -> Self {
         Self {
             backend,
@@ -351,7 +351,7 @@ impl<'a, B: RecognitionBackend> RecognitionSession<'a, B> {
         }
     }
 
-    #[must_use]
+    #[must_use = "use cache statistics when evaluating recognition work"]
     pub const fn stats(&self) -> RecognitionStats {
         self.stats
     }

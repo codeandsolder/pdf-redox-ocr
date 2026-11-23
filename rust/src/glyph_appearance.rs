@@ -83,7 +83,7 @@ impl GlyphShape {
     }
 
     /// Original tight ink dimensions.
-    #[must_use]
+    #[must_use = "use the glyph dimensions when comparing appearance samples"]
     pub const fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
     }
@@ -113,7 +113,7 @@ impl GlyphShape {
     /// Symmetric, scale-normalized distance including original aspect ratio.
     /// A one-cell translation search accounts for rasterization and tight-box
     /// rounding without permitting arbitrary deformation or rotation.
-    #[must_use]
+    #[must_use = "use the appearance distance when ranking glyph matches"]
     pub fn distance(&self, other: &Self) -> f64 {
         let aspect = (f64::from(self.width) * f64::from(other.height)
             / (f64::from(self.height) * f64::from(other.width)))

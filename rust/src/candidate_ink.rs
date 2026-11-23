@@ -47,7 +47,7 @@ pub struct CandidateAnchor {
 
 impl CandidateAnchor {
     /// Whether a token can occupy a run under the measured injective assignment.
-    #[must_use]
+    #[must_use = "check candidate support before associating it with a text run"]
     pub fn supports_run(&self, run: usize) -> bool {
         match self.anchor.alignment {
             RunAlignment::Unique { run: assigned } => assigned == run,
@@ -70,7 +70,7 @@ pub enum CandidateMapping {
 
 impl CandidateMapping {
     /// Localized non-whitespace tokens for the specified canonical text.
-    #[must_use]
+    #[must_use = "use visible anchors when localizing recognized text in the source"]
     pub fn visible_anchors(&self, text: &str) -> Option<Vec<&CandidateAnchor>> {
         let Self::Mapped { anchors } = self else {
             return None;
@@ -87,7 +87,7 @@ impl CandidateMapping {
     }
 
     /// A unique, strictly ordered source-run identity for each token.
-    #[must_use]
+    #[must_use = "use unambiguous source runs when attributing a recognition candidate"]
     pub fn unique_runs(&self, text: &str) -> Option<Vec<usize>> {
         let runs = self
             .visible_anchors(text)?
@@ -330,7 +330,7 @@ impl SourceInk {
     /// Apply the exact input-width contract of one actual single-crop view.
     /// Each candidate is localized independently against the same source
     /// groups. Uncertain intervals only broaden geometric compatibility.
-    #[must_use]
+    #[must_use = "use the mapped candidate ink view during source-paint validation"]
     pub fn map_view(
         &self,
         view_dimensions: (u32, u32),

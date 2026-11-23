@@ -207,7 +207,7 @@ fn extend_chain(dots: &[Dot], a: usize, b: usize) -> Vec<Dot> {
 ///
 /// The result is only evidence of layout ink; it does not classify glyphs or
 /// authorize edits to recognized text.
-#[must_use]
+#[must_use = "use leader detections when reconstructing layout structure"]
 pub fn detect_leaders(components: &[PixelRegion], observation: InkBounds) -> Vec<LeaderEvidence> {
     let dots = compact_dots(components, observation);
     let mut best = [None::<LeaderEvidence>, None];

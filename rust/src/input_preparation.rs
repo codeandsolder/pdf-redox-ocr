@@ -132,7 +132,7 @@ impl PreparedInput {
     }
 
     /// Exact PDF against which the recognition geometry must be interpreted.
-    #[must_use]
+    #[must_use = "use the prepared input path when opening the raster source"]
     pub fn path(&self) -> &Path {
         self.optimized
             .as_ref()
@@ -140,13 +140,13 @@ impl PreparedInput {
     }
 
     /// Provenance of the source preparation, independently of OCR.
-    #[must_use]
+    #[must_use = "inspect preparation diagnostics when validating OCR inputs"]
     pub const fn audit(&self) -> &PreparationAudit {
         &self.audit
     }
 
     /// Exact optimizer-produced outline catalog, if requested.
-    #[must_use]
+    #[must_use = "use the glyph catalog when matching source appearances"]
     pub const fn catalog(&self) -> Option<&GlyphCatalog> {
         self.catalog.as_ref()
     }

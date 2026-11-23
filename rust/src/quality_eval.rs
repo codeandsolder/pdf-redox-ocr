@@ -174,7 +174,7 @@ fn proportion(numerator: usize, denominator: usize) -> f64 {
 /// A missing observation has no model confidence and never counts as admitted.
 /// Tied confidence values are grouped, so a threshold cannot select an
 /// arbitrary subset of equally confident predictions.
-#[must_use]
+#[must_use = "use the confidence curve when evaluating OCR calibration"]
 pub fn confidence_curve(samples: &[QualitySample]) -> Vec<ConfidencePoint> {
     let mut scores = samples
         .iter()
@@ -211,7 +211,7 @@ pub fn confidence_curve(samples: &[QualitySample]) -> Vec<ConfidencePoint> {
 
 /// Aggregate independently aligned Unicode mistakes without losing insertions
 /// or deletions. All counts refer to normalized manual labels.
-#[must_use]
+#[must_use = "inspect character confusions when assessing recognition quality"]
 pub fn character_confusions(samples: &[QualitySample]) -> Vec<CharacterConfusion> {
     let mut counts = BTreeMap::<(Option<char>, Option<char>), (usize, Option<f64>)>::new();
     for sample in samples {
@@ -249,7 +249,7 @@ pub fn character_confusions(samples: &[QualitySample]) -> Vec<CharacterConfusion
 }
 
 /// Levenshtein distance over Unicode scalar values, not UTF-8 bytes.
-#[must_use]
+#[must_use = "use edit distance when measuring recognition errors"]
 pub fn character_edits(reference: &str, prediction: &str) -> usize {
     let first = reference.chars().collect::<Vec<_>>();
     let second = prediction.chars().collect::<Vec<_>>();

@@ -93,13 +93,13 @@ impl PageBox {
     }
 
     /// Width.
-    #[must_use]
+    #[must_use = "use the bounding-box width when positioning PDF geometry"]
     pub fn width(self) -> f64 {
         self.x1 - self.x0
     }
 
     /// Height.
-    #[must_use]
+    #[must_use = "use the bounding-box height when positioning PDF geometry"]
     pub fn height(self) -> f64 {
         self.y1 - self.y0
     }
@@ -146,7 +146,7 @@ pub struct DisplayMapper {
 
 impl DisplayMapper {
     /// Create a bidirectional mapper.
-    #[must_use]
+    #[must_use = "retain the page transform for subsequent coordinate conversions"]
     pub const fn new(box_: PageBox, rotation: Rotation) -> Self {
         Self { box_, rotation }
     }
@@ -156,7 +156,7 @@ impl DisplayMapper {
     /// The page rotation swaps dimensions for 90°/270°. Deriving this
     /// directly from the mapped box avoids repeated inverse transforms and
     /// keeps native image rectification and Poppler crop scaling consistent.
-    #[must_use]
+    #[must_use = "use the page display dimensions for raster placement"]
     pub fn display_dimensions(self) -> Point {
         match self.rotation {
             Rotation::Deg0 | Rotation::Deg180 => Point(self.box_.width(), self.box_.height()),
@@ -165,7 +165,7 @@ impl DisplayMapper {
     }
 
     /// Convert normalized raster U (right), V (down) into PDF user-space.
-    #[must_use]
+    #[must_use = "use the converted PDF coordinates when locating source elements"]
     pub fn to_pdf(self, raster_u: f64, raster_v: f64) -> Point {
         let page_box = self.box_;
         let width = page_box.width();
@@ -191,7 +191,7 @@ impl DisplayMapper {
     }
 
     /// Convert a PDF user-space point into normalized raster coordinates.
-    #[must_use]
+    #[must_use = "use the converted raster coordinates when sampling source pixels"]
     pub fn to_raster(self, Point(pdf_x, pdf_y): Point) -> Point {
         let page_box = self.box_;
         let width = page_box.width();

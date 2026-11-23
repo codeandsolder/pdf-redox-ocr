@@ -35,7 +35,7 @@ impl<T> Default for PaintAppearances<T> {
 impl<T> PaintAppearances<T> {
     /// Import an object-only raster inventory, as produced by pdfimages.
     /// Named resource-dependent images require an actual appearance binding.
-    #[must_use]
+    #[must_use = "use the appearance inventory for source-paint lookup"]
     pub fn from_object_inventory(values: BTreeMap<String, T>, paints: &[ImagePaint]) -> Self {
         let mut variants = values
             .into_iter()
@@ -72,7 +72,7 @@ impl<T> PaintAppearances<T> {
     }
 
     /// Look up only an observation associated with the exact paint and source.
-    #[must_use]
+    #[must_use = "inspect the resolved appearance before matching source paint"]
     pub fn get(&self, paint: &ImagePaint) -> Option<(AppearanceId, &T)> {
         let id = *self
             .paint_bindings
@@ -82,12 +82,12 @@ impl<T> PaintAppearances<T> {
         (appearance.source_id == paint.source_id).then_some((id, &appearance.value))
     }
 
-    #[must_use]
+    #[must_use = "use the inventory length when accounting for source appearances"]
     pub fn len(&self) -> usize {
         self.variants.len()
     }
 
-    #[must_use]
+    #[must_use = "check whether source appearances are available before matching"]
     pub fn is_empty(&self) -> bool {
         self.variants.is_empty()
     }
