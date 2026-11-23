@@ -514,6 +514,45 @@ impl PageContext<'_> {
         }))
     }
 
+    /// Extra CTC entry localization is never a default inference cost.
+    /// The report contains diagnostic evidence but no extra transactions.
+    fn source_span_diagnostic(
+        &self,
+        sampled: &SampledLine,
+        original: &Recognition,
+        rgb: &image::RgbImage,
+        normalized: &image::GrayImage,
+        budget: &mut u64,
+    ) -> Result<Option<Box<source_span::SourceSpanOutcome>>, Error> {
+        if !self.policy.source_span_diagnostics
+            || original.decision.text().is_none_or(|text| {
+                crate::refinement_evidence::canonical(text)
+                    == crate::refinement_evidence::canonical(&sampled.audit.original_text)
+            })
+        {
+            return Ok(None);
+        }
+        let (_, peers) = self.observation_peer_quads(sampled);
+        let result = source_span::probe(
+            source_span::SpanInput {
+                recognition: original,
+                original: &sampled.audit.original_text,
+                rgb,
+                normalized,
+                sample: Sample {
+                    image: &sampled.normalized,
+                    frame: sampled.frame,
+                    window: sampled.window,
+                    threshold: self.policy.audit.segmentation_threshold,
+                },
+                observation: sampled.audit.observation_bounds,
+                peers: &peers,
+            },
+            budget,
+        )?;
+        Ok(Some(Box::new(result)))
+    }
+
     fn recognize_original(
         &mut self,
         sampled: &SampledLine,
@@ -600,34 +639,8 @@ impl PageContext<'_> {
                 reason: Rejection::InsufficientIndependentRuns,
             }
         };
-        let source_span = match &original.decision {
-            crate::refinement_evidence::RefinementDecision::Consensus { text, .. }
-                if self.policy.source_span_diagnostics
-                    && crate::refinement_evidence::canonical(text)
-                        != crate::refinement_evidence::canonical(primary) =>
-            {
-                let (_, peers) = self.observation_peer_quads(sampled);
-                let result = source_span::probe(
-                    source_span::SpanInput {
-                        recognition: &original,
-                        original: primary,
-                        rgb: &rgb,
-                        normalized: &normalized,
-                        sample: Sample {
-                            image: &sampled.normalized,
-                            frame: sampled.frame,
-                            window: sampled.window,
-                            threshold: self.policy.audit.segmentation_threshold,
-                        },
-                        observation: b,
-                        peers: &peers,
-                    },
-                    budget,
-                )?;
-                Some(Box::new(result))
-            }
-            _ => None,
-        };
+        let source_span =
+            self.source_span_diagnostic(sampled, &original, &rgb, &normalized, budget)?;
         Ok(ObservationMeasurements {
             original: Some(Box::new(original)),
             source_edit,

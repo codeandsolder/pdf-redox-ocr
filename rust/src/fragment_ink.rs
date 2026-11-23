@@ -146,6 +146,17 @@ pub struct ColumnInk {
     pub peers: BTreeMap<usize, u64>,
 }
 
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+#[derive(Clone, Copy)]
+struct PartitionInput<'a> {
+    expanded: InkBounds,
+    bounds: &'a [InkBounds],
+    expected_pixels: &'a [u64],
+    peer_quads: &'a [Quad],
+    accounting: &'a InkAccounting,
+    capture_columns: bool,
+}
+
 struct MeasuredInk {
     sample: InkCounts,
     peer_union: InkCounts,
@@ -246,13 +257,15 @@ impl Sample<'_> {
             .map(|g| g.run.observation_support.inside_pixels)
             .collect::<Vec<_>>();
         self.account_partition(
-            expanded,
-            &bounds,
-            &pixels,
-            peer_quads,
-            accounting,
+            &PartitionInput {
+                expanded,
+                bounds: &bounds,
+                expected_pixels: &pixels,
+                peer_quads,
+                accounting,
+                capture_columns: false,
+            },
             remaining_checks,
-            false,
         )
     }
 
@@ -270,27 +283,82 @@ impl Sample<'_> {
         let bounds = spans.iter().map(|span| span.bounds).collect::<Vec<_>>();
         let pixels = spans.iter().map(|span| span.foreground).collect::<Vec<_>>();
         self.account_partition(
-            expanded,
-            &bounds,
-            &pixels,
-            peer_quads,
-            accounting,
+            &PartitionInput {
+                expanded,
+                bounds: &bounds,
+                expected_pixels: &pixels,
+                peer_quads,
+                accounting,
+                capture_columns: true,
+            },
             remaining_checks,
-            true,
         )
+    }
+
+    /// One physical pixel pass for a source partition member; the same peer
+    /// ownership and foreground threshold drive both segmentation approaches.
+    #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+    fn tally_partition_run(
+        &self,
+        index: usize,
+        bounds: InkBounds,
+        expanded: InkBounds,
+        observation: InkBounds,
+        peer_quads: &[ConvexQuad],
+        columns: &mut Option<Vec<ColumnInk>>,
+    ) -> Result<RunInk, Error> {
+        let mut run = RunInk {
+            run: index,
+            ..RunInk::default()
+        };
+        for y in bounds.top..bounds.bottom {
+            for x in bounds.left..bounds.right {
+                let column = x;
+                let (x, y) = (x + expanded.left, y + expanded.top);
+                if self.image.get_pixel(x, y).0[0] >= self.threshold {
+                    continue;
+                }
+                let part = classify_pixel(observation, expanded, x, y);
+                run.sample.record(part);
+                if let Some(columns) = &mut columns {
+                    columns[usize::try_from(column)
+                        .map_err(|_| Error::Invalid("invalid column index".into()))?]
+                    .foreground += 1;
+                }
+                let point = self
+                    .window
+                    .to_source(self.frame, Point(f64::from(x) + 0.5, f64::from(y) + 0.5));
+                for (peer, quad) in peer_quads.iter().enumerate() {
+                    if quad.contains(point) {
+                        run.peers.entry(peer).or_default().record(part);
+                        if let Some(columns) = &mut columns {
+                            *columns[usize::try_from(column)
+                                .map_err(|_| Error::Invalid("invalid column index".into()))?]
+                            .peers
+                            .entry(peer)
+                            .or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(run)
     }
 
     #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
     fn account_partition(
         &self,
-        expanded: InkBounds,
-        bounds: &[InkBounds],
-        expected_pixels: &[u64],
-        peer_quads: &[Quad],
-        accounting: &InkAccounting,
+        input: &PartitionInput<'_>,
         remaining_checks: &mut u64,
-        capture_columns: bool,
     ) -> Result<Option<RunAccounting>, Error> {
+        let PartitionInput {
+            expanded,
+            bounds,
+            expected_pixels,
+            peer_quads,
+            accounting,
+            capture_columns,
+        } = *input;
         let InkAccounting::Measured { sample, peers, .. } = accounting else {
             return Ok(None);
         };
@@ -335,42 +403,14 @@ impl Sample<'_> {
                 ));
             }
             previous_right = bounds.right;
-            let mut run = RunInk {
-                run: index,
-                ..RunInk::default()
-            };
-            for y in bounds.top..bounds.bottom {
-                for x in bounds.left..bounds.right {
-                    let column = x;
-                    let (x, y) = (x + expanded.left, y + expanded.top);
-                    if self.image.get_pixel(x, y).0[0] >= self.threshold {
-                        continue;
-                    }
-                    let part = classify_pixel(observation, expanded, x, y);
-                    run.sample.record(part);
-                    if let Some(columns) = &mut columns {
-                        columns[usize::try_from(column)
-                            .map_err(|_| Error::Invalid("invalid column index".into()))?]
-                        .foreground += 1;
-                    }
-                    let point = self
-                        .window
-                        .to_source(self.frame, Point(f64::from(x) + 0.5, f64::from(y) + 0.5));
-                    for (peer, quad) in peer_quads.iter().enumerate() {
-                        if quad.contains(point) {
-                            run.peers.entry(peer).or_default().record(part);
-                            if let Some(columns) = &mut columns {
-                                *columns[usize::try_from(column).map_err(|_| {
-                                    Error::Invalid("invalid column index".into())
-                                })?]
-                                .peers
-                                .entry(peer)
-                                .or_default() += 1;
-                            }
-                        }
-                    }
-                }
-            }
+            let run = self.tally_partition_run(
+                index,
+                bounds,
+                expanded,
+                observation,
+                &peer_quads,
+                &mut columns,
+            )?;
             if run.sample.original + run.sample.added() != expected {
                 return Err(Error::Invalid(
                     "recognized partition band differs from shared raster ink".into(),
