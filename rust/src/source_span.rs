@@ -82,7 +82,7 @@ pub fn ordered_partition(
         if a >= b {
             return None;
         }
-        let cut = ((a + b) / 2.0).round().to_u32()?;
+        let cut = a.midpoint(b).round().to_u32()?;
         if cut <= *cuts.last()? || cut >= width {
             return None;
         }
@@ -181,7 +181,7 @@ pub struct SourceSpanEvidence {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum SourceSpanOutcome {
     Skipped { reason: &'static str },
-    Measured { evidence: SourceSpanEvidence },
+    Measured { evidence: Box<SourceSpanEvidence> },
 }
 
 /// Build all-view token bands without relying on injective projection runs.
@@ -334,7 +334,7 @@ pub fn probe(input: SpanInput<'_>, remaining_checks: &mut u64) -> Result<SourceS
         }
     }
     Ok(SourceSpanOutcome::Measured {
-        evidence: SourceSpanEvidence {
+        evidence: Box::new(SourceSpanEvidence {
             source_rgb_sha256: recognition.source_ink.rgb_sha256.clone(),
             normalized_sha256: recognition.source_ink.normalized_sha256.clone(),
             revised_text: text.clone(),
@@ -342,7 +342,7 @@ pub fn probe(input: SpanInput<'_>, remaining_checks: &mut u64) -> Result<SourceS
             edits,
             votes,
             source_accounting,
-        },
+        }),
     })
 }
 

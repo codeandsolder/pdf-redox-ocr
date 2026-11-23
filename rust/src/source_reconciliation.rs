@@ -212,7 +212,7 @@ impl SourceEdits {
 /// Solve every minimum-substitution ordered complete embedding, independent
 /// of whether the source supports tokens by projection runs or by disjoint
 /// pixel-ownership bands. The caller supplies measured geometric compatibility.
-pub(crate) fn embedding_compatible(
+pub fn embedding_compatible(
     old: &[char],
     revised: &[char],
     editable: &[bool],
