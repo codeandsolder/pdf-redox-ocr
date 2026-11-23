@@ -30,7 +30,7 @@ use crate::{
     refinement::{RefinementPolicy, RefinementScope, recognize_observation, refinement_plan},
     refinement_evidence::{Recognition, RefinementOutcome},
     refinement_recognition::{RefinementModel, RefinementRecognizer},
-    source_reconciliation, stroke_reconciliation,
+    source_reconciliation, source_span, stroke_reconciliation,
 };
 
 pub use crate::{
@@ -122,6 +122,8 @@ pub enum SourceEditOutcome {
 pub struct ObservationMeasurements {
     pub original: Option<Box<Recognition>>,
     pub source_edit: SourceEditOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_span: Option<Box<source_span::SourceSpanOutcome>>,
     pub contractions: Vec<ContractionOutcome>,
     pub orthogonal: Option<Box<OrthogonalOutcome>>,
 }
@@ -131,6 +133,7 @@ impl ObservationMeasurements {
         Self {
             original: None,
             source_edit: SourceEditOutcome::Skipped { reason },
+            source_span: None,
             contractions: (0..contractions)
                 .map(|_| ContractionOutcome::Skipped { reason })
                 .collect(),
@@ -346,12 +349,12 @@ impl PageContext<'_> {
         &mut self,
         sampled: &SampledLine,
         b: InkBounds,
-    ) -> Result<Option<(image::RgbImage, SourceInk)>, Error> {
+    ) -> Result<Option<(image::RgbImage, image::GrayImage, SourceInk)>, Error> {
         let Some((rgb, normalized)) = self.crop_pixels(sampled, b) else {
             return Ok(None);
         };
         let shared = self.measure_crop(sampled, &rgb, &normalized)?;
-        Ok(Some((rgb, shared)))
+        Ok(Some((rgb, normalized, shared)))
     }
 
     fn prepare_mask(
@@ -415,7 +418,9 @@ impl PageContext<'_> {
         };
         let mut variants = Vec::new();
         for c in &strokes.contractions {
-            let Some((rgb, shared)) = self.prepare_crop(sampled, c.evidence.retained)? else {
+            let Some((rgb, _normalized, shared)) =
+                self.prepare_crop(sampled, c.evidence.retained)?
+            else {
                 variants.push(ContractionOutcome::Skipped {
                     reason: Rejection::PixelBudgetExceeded,
                 });
@@ -431,16 +436,7 @@ impl PageContext<'_> {
         Ok(variants)
     }
 
-    fn source_edit_proposal(
-        &self,
-        sampled: &SampledLine,
-        recognition: &Recognition,
-        budget: &mut u64,
-    ) -> Result<Result<Transaction, Rejection>, Error> {
-        let proposal = match source_reconciliation::propose(&sampled.audit, recognition) {
-            Ok(proposal) => proposal,
-            Err(reason) => return Ok(Err(reason)),
-        };
+    fn observation_peer_quads(&self, sampled: &SampledLine) -> (Vec<BoundaryPeer>, Vec<Quad>) {
         let bounds = QuadBounds::new(&sampled.audit.original_quad);
         let (peers, quads): (Vec<_>, Vec<_>) =
             self.page
@@ -456,6 +452,20 @@ impl PageContext<'_> {
                 )
                 .filter(|(_, quad)| bounds.intersects(QuadBounds::new(quad)))
                 .unzip();
+        (peers, quads)
+    }
+
+    fn source_edit_proposal(
+        &self,
+        sampled: &SampledLine,
+        recognition: &Recognition,
+        budget: &mut u64,
+    ) -> Result<Result<Transaction, Rejection>, Error> {
+        let proposal = match source_reconciliation::propose(&sampled.audit, recognition) {
+            Ok(proposal) => proposal,
+            Err(reason) => return Ok(Err(reason)),
+        };
+        let (peers, quads) = self.observation_peer_quads(sampled);
         let sample = Sample {
             image: &sampled.normalized,
             frame: sampled.frame,
@@ -513,33 +523,11 @@ impl PageContext<'_> {
         let primary = &sampled.audit.original_text;
         let count = primary.chars().filter(|c| !c.is_whitespace()).count();
         let b = sampled.audit.observation_bounds;
-        // A nondeleting injective revised assignment requires at least as
-        // many foreground runs as original tokens. Test the exact in-box projection cheaply
-        // before allocating a crop or loading a recognizer session.
-        if contractions.is_empty() && !has_mask {
-            let required = membership_checks(b.right - b.left, b.bottom - b.top, 0);
-            let Some(remaining) = budget.checked_sub(required) else {
-                return Ok(ObservationMeasurements::skipped(
-                    Rejection::InkBudgetExceeded,
-                    0,
-                    false,
-                ));
-            };
-            *budget = remaining;
-            if crate::glyph_isolation::occupied_run_count(
-                &sampled.normalized,
-                b,
-                self.policy.audit.segmentation_threshold,
-            ) < count
-            {
-                return Ok(ObservationMeasurements::skipped(
-                    Rejection::InsufficientIndependentRuns,
-                    0,
-                    false,
-                ));
-            }
-        }
-        let Some((rgb, shared)) = self.prepare_crop(sampled, b)? else {
+        // Recognition is required even when multiple touching characters
+        // share a single connected foreground projection run. The
+        // source-span probe remains diagnostic until independent evidence
+        // demonstrates that its new assignments can be safely committed.
+        let Some((rgb, normalized, shared)) = self.prepare_crop(sampled, b)? else {
             return Ok(ObservationMeasurements::skipped(
                 Rejection::PixelBudgetExceeded,
                 contractions.len(),
@@ -586,9 +574,37 @@ impl PageContext<'_> {
                 reason: Rejection::InsufficientIndependentRuns,
             }
         };
+        let source_span = match &original.decision {
+            crate::refinement_evidence::RefinementDecision::Consensus { text, .. }
+                if crate::refinement_evidence::canonical(text)
+                    != crate::refinement_evidence::canonical(primary) =>
+            {
+                let (_, peers) = self.observation_peer_quads(sampled);
+                let result = source_span::probe(
+                    source_span::SpanInput {
+                        recognition: &original,
+                        original: primary,
+                        rgb: &rgb,
+                        normalized: &normalized,
+                        sample: Sample {
+                            image: &sampled.normalized,
+                            frame: sampled.frame,
+                            window: sampled.window,
+                            threshold: self.policy.audit.segmentation_threshold,
+                        },
+                        observation: b,
+                        peers: &peers,
+                    },
+                    budget,
+                )?;
+                Some(Box::new(result))
+            }
+            _ => None,
+        };
         Ok(ObservationMeasurements {
             original: Some(Box::new(original)),
             source_edit,
+            source_span,
             contractions: variants,
             orthogonal,
         })
@@ -614,7 +630,7 @@ impl PageContext<'_> {
             });
         }
         let b = extension.evidence.expanded;
-        let Some((rgb, shared)) = self.prepare_crop(sampled, b)? else {
+        let Some((rgb, _normalized, shared)) = self.prepare_crop(sampled, b)? else {
             return Ok(VariantOutcome::Skipped {
                 reason: Rejection::PixelBudgetExceeded,
             });
@@ -940,7 +956,7 @@ pub fn reconcile_fragments(
     source.verify_pdf(pdf)?;
     Ok((
         FragmentReport {
-            schema_version: 15,
+            schema_version: 16,
             pdf_sha256: source.pdf_sha256.clone(),
             draft_model: source.model.clone(),
             secondary_model: RefinementModel::Consensus.label(),

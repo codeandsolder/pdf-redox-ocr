@@ -962,6 +962,17 @@ the consensus winner must have higher exact mass in each accepted view.
 Every text-only correction enters the same atomic conflict resolver and keeps
 unchanged original geometry.
 
+A separately reported schema16 diagnostic measures shared-raster CTC-derived
+**source pixel ownership spans**, without admitting them as document edits.
+Every visible token is assigned a disjoint column band bounded by the
+intersection of all accepted view entry intervals. The exact thresholded
+foreground and peer ink must be conserved, and source image hashes must match
+the recognized pixels. Unlike projection-run identity, a connected component
+may cross character boundaries, with each physical pixel counted exactly once.
+This is intentionally not yet an admission proof: token entry modes are
+model-localization estimates, not true glyph boundaries. The independent
+nineteen-document holdout is the acceptance gate for any later use.
+
 The observation band can widen orthogonally only to fully measured,
 locally supported components with majority foreground and vertical extent
 inside the original band. Their measured height is not capped by the
@@ -992,7 +1003,7 @@ peer additionally requires stable independently localized literal text inside th
 observation, and cannot have a shared component cut by the replacement boundary.
 Native-text conflicts and incomplete peer samples abstain.
 
-The schema 15 report retains the original observation identity, all considered extensions and contractions,
+The schema 16 report retains the original observation identity, all considered extensions and contractions,
 conditional CTC evidence, common-raster run counts, peer evidence, transactions and
 conflicts. Strictly nested candidates can supersede a shorter candidate only if all added
 foreground is bound to tokens, the larger component chain and crop contain the

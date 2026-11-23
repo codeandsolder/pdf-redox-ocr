@@ -217,13 +217,61 @@ impl Sample<'_> {
         })
     }
 
-    /// Measure recognized projection runs in the *same* thresholded raster
-    /// as the boundary extension. Their coordinates are relative to expanded.
+    /// Preserve the original independently segmented projection-run source
+    /// accounting, with the same exact measured partition conservation check.
     #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
     pub(crate) fn account_runs(
         &self,
         expanded: InkBounds,
         groups: &[crate::glyph_isolation::InkGroup],
+        peer_quads: &[Quad],
+        accounting: &InkAccounting,
+        remaining_checks: &mut u64,
+    ) -> Result<Option<RunAccounting>, Error> {
+        let bounds = groups.iter().map(|g| g.run.ink).collect::<Vec<_>>();
+        let pixels = groups
+            .iter()
+            .map(|g| g.run.observation_support.inside_pixels)
+            .collect::<Vec<_>>();
+        self.account_partition(
+            expanded,
+            &bounds,
+            &pixels,
+            peer_quads,
+            accounting,
+            remaining_checks,
+        )
+    }
+
+    /// Disjoint column bands can split connected glyph components without
+    /// duplicating foreground or exempting competing peer-owned ink.
+    #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+    pub(crate) fn account_spans(
+        &self,
+        expanded: InkBounds,
+        spans: &[crate::source_span::ColumnBand],
+        peer_quads: &[Quad],
+        accounting: &InkAccounting,
+        remaining_checks: &mut u64,
+    ) -> Result<Option<RunAccounting>, Error> {
+        let bounds = spans.iter().map(|span| span.bounds).collect::<Vec<_>>();
+        let pixels = spans.iter().map(|span| span.foreground).collect::<Vec<_>>();
+        self.account_partition(
+            expanded,
+            &bounds,
+            &pixels,
+            peer_quads,
+            accounting,
+            remaining_checks,
+        )
+    }
+
+    #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+    fn account_partition(
+        &self,
+        expanded: InkBounds,
+        bounds: &[InkBounds],
+        expected_pixels: &[u64],
         peer_quads: &[Quad],
         accounting: &InkAccounting,
         remaining_checks: &mut u64,
@@ -245,9 +293,13 @@ impl Sample<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         let observation = self.window.observation(self.frame);
         let mut previous_right = 0;
-        let mut runs = Vec::with_capacity(groups.len());
-        for (index, group) in groups.iter().enumerate() {
-            let bounds = group.run.ink;
+        if bounds.len() != expected_pixels.len() {
+            return Err(Error::Invalid(
+                "source-ink partition support count mismatch".into(),
+            ));
+        }
+        let mut runs = Vec::with_capacity(bounds.len());
+        for (index, (&bounds, &expected)) in bounds.iter().zip(expected_pixels).enumerate() {
             if bounds.left < previous_right
                 || bounds.left >= bounds.right
                 || bounds.top >= bounds.bottom
@@ -281,11 +333,9 @@ impl Sample<'_> {
                     }
                 }
             }
-            if run.sample.original + run.sample.added()
-                != group.run.observation_support.inside_pixels
-            {
+            if run.sample.original + run.sample.added() != expected {
                 return Err(Error::Invalid(
-                    "recognized run differs from shared raster ink".into(),
+                    "recognized partition band differs from shared raster ink".into(),
                 ));
             }
             runs.push(run);
@@ -306,7 +356,7 @@ impl Sample<'_> {
             || covered_peers.keys().any(|peer| !peers.contains_key(peer))
         {
             return Err(Error::Invalid(
-                "recognition runs do not conserve measured source ink".into(),
+                "recognition partition does not conserve measured source ink".into(),
             ));
         }
         Ok(Some(RunAccounting {
