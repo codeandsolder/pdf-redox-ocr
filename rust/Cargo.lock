@@ -1086,7 +1086,7 @@ source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56
 [[package]]
 name = "hayro-syntax"
 version = "0.9.0"
-source = "git+https://github.com/codeandsolder/pdf-redox?rev=3f00775cb6d38561451d226adf5125d7b0bf554c#3f00775cb6d38561451d226adf5125d7b0bf554c"
+source = "git+https://github.com/codeandsolder/pdf-redox?rev=c9d5df7d12c98c407f416cc557d2eeded0c4fca1#c9d5df7d12c98c407f416cc557d2eeded0c4fca1"
 dependencies = [
  "hayro-ccitt",
  "hayro-jbig2",
@@ -1960,7 +1960,7 @@ checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 [[package]]
 name = "pdf-redox"
 version = "0.1.0"
-source = "git+https://github.com/codeandsolder/pdf-redox?rev=3f00775cb6d38561451d226adf5125d7b0bf554c#3f00775cb6d38561451d226adf5125d7b0bf554c"
+source = "git+https://github.com/codeandsolder/pdf-redox?rev=c9d5df7d12c98c407f416cc557d2eeded0c4fca1#c9d5df7d12c98c407f416cc557d2eeded0c4fca1"
 dependencies = [
  "color_quant 2.0.0",
  "fast_image_resize",
@@ -1975,7 +1975,7 @@ dependencies = [
  "smallvec",
  "thiserror",
  "write-fonts",
- "zlib-rs 0.6.8 (git+https://github.com/codeandsolder/zlib-rs-fast?rev=64c5fed5ad39bf28916e82d7fa955440e1f2c8f6)",
+ "zlib-rs 0.6.8 (git+https://github.com/codeandsolder/zlib-rs-fast?rev=1ec3a5612ee28803a7756fa52bd013389507a2db)",
 ]
 
 [[package]]
@@ -3444,7 +3444,7 @@ checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 [[package]]
 name = "zlib-rs"
 version = "0.6.8"
-source = "git+https://github.com/codeandsolder/zlib-rs-fast?rev=64c5fed5ad39bf28916e82d7fa955440e1f2c8f6#64c5fed5ad39bf28916e82d7fa955440e1f2c8f6"
+source = "git+https://github.com/codeandsolder/zlib-rs-fast?rev=1ec3a5612ee28803a7756fa52bd013389507a2db#1ec3a5612ee28803a7756fa52bd013389507a2db"
 dependencies = [
  "rayon-core",
 ]
