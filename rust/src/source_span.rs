@@ -573,7 +573,9 @@ mod tests {
                 .any(|c| c.peers.values().any(|&n| n > 0))
         );
         assert!(bands[0].possible_peer_ink(&columns)?);
-        assert!(!bands[1].possible_peer_ink(&columns)?);
+        // The uncertain boundary also allows the exact same pixel to
+        // belong to the second token. Neither token may claim exclusivity.
+        assert!(bands[1].possible_peer_ink(&columns)?);
         Ok(())
     }
 
