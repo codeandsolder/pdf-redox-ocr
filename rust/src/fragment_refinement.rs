@@ -437,16 +437,17 @@ impl PageContext<'_> {
         recognition: &Recognition,
         budget: &mut u64,
     ) -> Result<Result<Transaction, Rejection>, Error> {
+        let padded_components = sampled
+            .audit
+            .components
+            .iter()
+            .enumerate()
+            .map(|(index, mapped)| (index, &mapped.component));
         let complete_runs = source_completeness::prove(
             &recognition.source_ink,
             sampled.audit.observation_bounds,
             sampled.normalized.dimensions(),
-            sampled
-                .audit
-                .components
-                .iter()
-                .enumerate()
-                .map(|(i, c)| (i, &c.component)),
+            &padded_components,
         );
         let proposal =
             match source_reconciliation::propose(&sampled.audit, recognition, &complete_runs) {

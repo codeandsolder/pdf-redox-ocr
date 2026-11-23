@@ -79,14 +79,14 @@ pub fn prove<'a>(
     source_ink: &SourceInk,
     observation: InkBounds,
     sample_size: (u32, u32),
-    components: impl Clone + IntoIterator<Item = (usize, &'a PixelRegion)>,
+    components: &(impl Clone + IntoIterator<Item = (usize, &'a PixelRegion)>),
 ) -> Vec<CompleteRun> {
     source_ink
         .groups
         .iter()
         .enumerate()
         .filter_map(|(run, group)| {
-            prove_one(run, group, observation, sample_size, components.clone())
+            prove_one(run, group, observation, sample_size, (*components).clone())
         })
         .collect()
 }
@@ -110,8 +110,8 @@ mod tests {
     fn regions_on_both(
         image: &GrayImage,
         observation: InkBounds,
-    ) -> (Vec<PixelRegion>, Vec<InkGroup>) {
-        let full = isolate_ink(image, observation, 128, &[128]).unwrap();
+    ) -> Result<(Vec<PixelRegion>, Vec<InkGroup>), crate::Error> {
+        let full = isolate_ink(image, observation, 128, &[128])?;
         let crop = imageops::crop_imm(
             image,
             observation.left,
@@ -121,12 +121,12 @@ mod tests {
         )
         .to_image();
         let local = bounds(0, 0, crop.width(), crop.height());
-        let groups = isolate_ink(&crop, local, 128, &[128]).unwrap().groups;
-        (full.components, groups)
+        let groups = isolate_ink(&crop, local, 128, &[128])?.groups;
+        Ok((full.components, groups))
     }
 
     #[test]
-    fn complete_boundary_touch_is_not_truncation() {
+    fn complete_boundary_touch_is_not_truncation() -> Result<(), crate::Error> {
         let o = bounds(5, 5, 15, 15);
         let mut image = GrayImage::from_pixel(25, 25, Luma([255]));
         for x in 5..7 {
@@ -134,7 +134,7 @@ mod tests {
                 image.put_pixel(x, y, Luma([0]));
             }
         }
-        let (components, groups) = regions_on_both(&image, o);
+        let (components, groups) = regions_on_both(&image, o)?;
         assert_eq!(groups.len(), 1);
         assert!(groups[0].touches_line_edge);
         let proof = prove_one(
@@ -144,13 +144,13 @@ mod tests {
             image.dimensions(),
             components.iter().enumerate(),
         )
-        .unwrap();
+        .ok_or_else(|| crate::Error::Invalid("expected complete source run".into()))?;
         assert_eq!(proof.component_indices, vec![0]);
         assert_eq!(proof.ink_pixels, 16);
         // Exactly the same ink at the same apparent crop edge, but
         // physically joined to exterior foreground: now not complete.
         image.put_pixel(4, 10, Luma([0]));
-        let (components, groups) = regions_on_both(&image, o);
+        let (components, groups) = regions_on_both(&image, o)?;
         assert!(
             prove_one(
                 0,
@@ -161,16 +161,17 @@ mod tests {
             )
             .is_none()
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_unobserved_sample_edge_and_partial_component() {
+    fn rejects_unobserved_sample_edge_and_partial_component() -> Result<(), crate::Error> {
         let o = bounds(0, 5, 10, 15);
         let mut image = GrayImage::from_pixel(25, 25, Luma([255]));
         for y in 6..14 {
             image.put_pixel(0, y, Luma([0]));
         }
-        let (components, groups) = regions_on_both(&image, o);
+        let (components, groups) = regions_on_both(&image, o)?;
         assert!(
             prove_one(
                 0,
@@ -187,7 +188,7 @@ mod tests {
         for y in 6..14 {
             image.put_pixel(5, y, Luma([0]));
         }
-        let (mut components, groups) = regions_on_both(&image, o);
+        let (mut components, groups) = regions_on_both(&image, o)?;
         assert!(
             prove_one(
                 0,
@@ -221,5 +222,6 @@ mod tests {
             )
             .is_none()
         );
+        Ok(())
     }
 }
