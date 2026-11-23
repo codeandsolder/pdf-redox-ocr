@@ -1,0 +1,5 @@
+# Shared nightly compiler for portable SIMD dependencies and strict CI.
+[toolchain]
+channel = "nightly-2026-11-19"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
