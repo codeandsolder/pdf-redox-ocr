@@ -14,17 +14,16 @@ use crate::{
 };
 use quick_xml::{Reader, events::Event};
 
-fn local_name(bytes: &[u8]) -> &[u8] {
-    bytes.rsplit(|byte| *byte == b':').next().unwrap_or(bytes)
+fn local_name(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
 }
 
-fn xml_attribute(event: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> Result<f64, Error> {
+fn xml_attribute(event: &quick_xml::events::BytesStart<'_>, name: &str) -> Result<f64, Error> {
     for attribute in event.attributes() {
         let attribute =
             attribute.map_err(|e| Error::Invalid(format!("invalid XML attribute: {e}")))?;
         if local_name(attribute.key.as_ref()) == name {
-            let value = std::str::from_utf8(&attribute.value)
-                .map_err(|e| Error::Invalid(format!("invalid attribute UTF-8: {e}")))?;
+            let value = attribute.value.as_ref();
             let parsed = value.parse::<f64>()?;
             if parsed.is_finite() {
                 return Ok(parsed);
@@ -34,7 +33,7 @@ fn xml_attribute(event: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> Resu
     }
     Err(Error::Invalid(format!(
         "missing native word attribute {}",
-        String::from_utf8_lossy(name)
+        name
     )))
 }
 
@@ -49,10 +48,10 @@ struct WordBounds {
 impl WordBounds {
     fn new(event: &quick_xml::events::BytesStart<'_>) -> Result<Self, Error> {
         Ok(Self {
-            x0: xml_attribute(event, b"xMin")?,
-            y0: xml_attribute(event, b"yMin")?,
-            x1: xml_attribute(event, b"xMax")?,
-            y1: xml_attribute(event, b"yMax")?,
+            x0: xml_attribute(event, "xMin")?,
+            y0: xml_attribute(event, "yMin")?,
+            x1: xml_attribute(event, "xMax")?,
+            y1: xml_attribute(event, "yMax")?,
         })
     }
 
@@ -96,9 +95,9 @@ pub fn parse_bbox_xhtml(
 
     loop {
         match reader.read_event_into(&mut buffer)? {
-            Event::Start(ref start) if local_name(start.name().as_ref()) == b"page" => {
-                page_width = xml_attribute(start, b"width")?;
-                page_height = xml_attribute(start, b"height")?;
+            Event::Start(ref start) if local_name(start.name().as_ref()) == "page" => {
+                page_width = xml_attribute(start, "width")?;
+                page_height = xml_attribute(start, "height")?;
                 if page_width <= 0.0 || page_height <= 0.0 {
                     return Err(Error::Invalid("invalid native-text page dimensions".into()));
                 }
@@ -107,18 +106,16 @@ pub fn parse_bbox_xhtml(
                 }
                 pages.push(Vec::new());
             }
-            Event::Start(ref start) if local_name(start.name().as_ref()) == b"word" => {
+            Event::Start(ref start) if local_name(start.name().as_ref()) == "word" => {
                 word = Some(WordBounds::new(start)?);
                 word_has_text = false;
             }
             Event::Text(ref text) if word.is_some() => {
-                let decoded = std::str::from_utf8(text.as_ref())
-                    .map_err(|e| Error::Invalid(format!("invalid XHTML text UTF-8: {e}")))?;
-                let unescaped = quick_xml::escape::unescape(decoded)
+                let unescaped = quick_xml::escape::unescape(text.as_ref())
                     .map_err(|e| Error::Invalid(format!("invalid XHTML text entity: {e}")))?;
                 word_has_text |= !unescaped.trim().is_empty();
             }
-            Event::End(ref end) if local_name(end.name().as_ref()) == b"word" => {
+            Event::End(ref end) if local_name(end.name().as_ref()) == "word" => {
                 if let Some(bounds) = word.take()
                     && word_has_text
                 {
@@ -249,6 +246,18 @@ mod tests {
         assert_eq!(pages[0][0][0], Point(200.0, 455.0));
         assert!((pages[0][0][2].0 - 250.0).abs() < 1e-9);
         assert!((pages[0][0][2].1 - 470.0).abs() < 1e-9);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_namespaced_elements_and_decodes_text_entities() -> Result<(), crate::Error> {
+        let box_ = PageBox::new([0.0, 0.0, 100.0, 100.0])?;
+        let mapper = DisplayMapper::new(box_, Rotation::Deg0);
+        let xml = br#"<x:page xmlns:x="urn:poppler" width="100" height="100"><x:word x:xMin="10" x:yMin="20" x:xMax="30" x:yMax="40">&#65; &amp; &#233;</x:word><x:word xMin="50" yMin="60" xMax="80" yMax="90">&#32;</x:word></x:page>"#;
+        let pages = parse_bbox_xhtml(xml, &[mapper])?;
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].len(), 1);
+        assert_eq!(pages[0][0][0], Point(10.0, 60.0));
         Ok(())
     }
 
