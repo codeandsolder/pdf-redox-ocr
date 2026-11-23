@@ -1,6 +1,8 @@
 //! Source-localized insertion of omitted tokens without changing the
 //! observation geometry or pixels.
 
+use std::collections::BTreeSet;
+
 use serde::Serialize;
 
 use crate::{
@@ -12,13 +14,21 @@ use crate::{
     refinement_evidence::{Recognition, RefinementDecision, ViewEvidence, canonical},
 };
 
+/// Positions of omitted tokens over every feasible complete embedding.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct InsertionPositions {
+    /// Union: every slot which can be an insertion in some embedding.
+    pub possible: Vec<usize>,
+    /// Intersection: slots which must be an insertion in every embedding.
+    pub required: Vec<usize>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct InsertionVote {
     pub view: usize,
     pub primary: SequenceReference,
     pub log_odds: f64,
-    /// Each original character's position in the revised transcription.
-    pub retained_positions: Vec<usize>,
+    pub positions: InsertionPositions,
 }
 
 #[derive(Debug, Serialize)]
@@ -26,7 +36,7 @@ pub struct InsertionRecognition {
     pub source_rgb_sha256: String,
     /// One uniquely assigned run per revised non-whitespace character.
     pub revised_runs: Vec<usize>,
-    pub inserted_positions: Vec<usize>,
+    pub positions: InsertionPositions,
     pub votes: Vec<InsertionVote>,
 }
 
@@ -43,58 +53,86 @@ fn retained_match(old: &[&CandidateAnchor], j: usize, c: char, run: usize) -> bo
         .is_some_and(|a| a.anchor.character == c && a.supports_run(run))
 }
 
-/// Count feasible embeddings of the primary sequence in the revised one,
-/// capping counts at two. Insertion is allowed only at clean, independent
-/// source runs. Every retained character preserves its measured run support.
+/// An ordered path consumes a revised token by retaining the next old
+/// token (compatible literal and ink run) or inserting at a clean run.
+///
+/// Forward and reverse reachability characterize *all* complete paths,
+/// without enumerating exponentially many equivalent embeddings.
 fn embedding(
     old: &[&CandidateAnchor],
     new: &[char],
     runs: &[usize],
     insertable: &[bool],
-) -> Option<Vec<usize>> {
+) -> Option<InsertionPositions> {
     if new.len() != runs.len() || new.len() != insertable.len() || old.len() >= new.len() {
         return None;
     }
     let width = old.len().checked_add(1)?;
     let height = new.len().checked_add(1)?;
-    if height.checked_mul(width)? > crate::ctc_alignment::MAX_CELLS {
+    let cells = height.checked_mul(width)?;
+    if cells > crate::ctc_alignment::MAX_CELLS {
         return None;
     }
-    let mut counts = vec![0_u8; height * width];
-    counts[0] = 1;
+    let mut prefix = vec![false; cells];
+    prefix[0] = true;
     for (i, ((&c, &run), &insert)) in new.iter().zip(runs).zip(insertable).enumerate() {
         for j in 0..width {
-            let n = counts[i * width + j];
-            if n == 0 {
+            if !prefix[i * width + j] {
                 continue;
             }
             let row = (i + 1) * width;
-            if insert {
-                counts[row + j] = (counts[row + j] + n).min(2);
-            }
+            prefix[row + j] |= insert;
             if retained_match(old, j, c, run) {
-                counts[row + j + 1] = (counts[row + j + 1] + n).min(2);
+                prefix[row + j + 1] = true;
             }
         }
     }
-    let mut j = old.len();
-    if counts[new.len() * width + j] != 1 {
+    if !prefix[cells - 1] {
         return None;
     }
-    let mut retained = Vec::with_capacity(j);
+    let mut suffix = vec![false; width];
+    suffix[old.len()] = true;
+    let mut positions = InsertionPositions {
+        possible: Vec::new(),
+        required: Vec::new(),
+    };
     for i in (0..new.len()).rev() {
-        // A unique complete path has precisely one reachable predecessor.
-        if insertable[i] && counts[i * width + j] > 0 {
-            continue;
+        // Read the next row in place: ascending j leaves suffix[j+1]
+        // unchanged until after the current retain transition is tested.
+        let mut can_insert = false;
+        let mut can_retain = false;
+        for j in 0..width {
+            let insert = insertable[i] && suffix[j];
+            let retain = retained_match(old, j, new[i], runs[i]) && suffix[j + 1];
+            if prefix[i * width + j] {
+                can_insert |= insert;
+                can_retain |= retain;
+            }
+            suffix[j] = insert || retain;
         }
-        j = j.checked_sub(1)?;
-        if !retained_match(old, j, new[i], runs[i]) {
-            return None;
+        if can_insert {
+            positions.possible.push(i);
+            if !can_retain {
+                positions.required.push(i);
+            }
         }
-        retained.push(i);
     }
-    retained.reverse();
-    (j == 0).then_some(retained)
+    positions.possible.reverse();
+    positions.required.reverse();
+    Some(positions)
+}
+
+fn combine_positions(votes: &[InsertionVote]) -> Option<InsertionPositions> {
+    let mut possible = BTreeSet::new();
+    let mut required: BTreeSet<_> = votes.first()?.positions.required.iter().copied().collect();
+    for vote in votes {
+        possible.extend(vote.positions.possible.iter().copied());
+        required.retain(|i| vote.positions.required.binary_search(i).is_ok());
+    }
+    Some(InsertionPositions {
+        possible: possible.into_iter().collect(),
+        required: required.into_iter().collect(),
+    })
 }
 
 fn vote(
@@ -127,7 +165,7 @@ fn vote(
                 .map(|g| !g.touches_line_edge && g.run.observation_support.inside_pixels > 0)
         })
         .collect::<Option<Vec<_>>>()?;
-    let retained_positions = embedding(
+    let positions = embedding(
         &old,
         &revised.chars().collect::<Vec<_>>(),
         &runs,
@@ -139,7 +177,7 @@ fn vote(
             view: view_index,
             primary,
             log_odds: odds,
-            retained_positions,
+            positions,
         },
     ))
 }
@@ -164,20 +202,13 @@ pub fn propose(
         vote(i, v, &old, &revised, ink)
     })
     .ok_or(Rejection::UnlocalizedInsertedTokens)?;
-    let kept = &votes
-        .first()
-        .ok_or(Rejection::UnlocalizedInsertedTokens)?
-        .retained_positions;
-    if votes.iter().any(|v| &v.retained_positions != kept) {
-        return Err(Rejection::UnlocalizedInsertedTokens);
-    }
-    let inserted_positions = (0..revised_runs.len())
-        .filter(|i| kept.binary_search(i).is_err())
-        .collect();
+    // Text and geometry are identical across all feasible explanations;
+    // keep the whole uncertainty set, not a fabricated unique old identity.
+    let positions = combine_positions(&votes).ok_or(Rejection::UnlocalizedInsertedTokens)?;
     Ok(InsertionRecognition {
         source_rgb_sha256: ink.rgb_sha256.clone(),
         revised_runs,
-        inserted_positions,
+        positions,
         votes,
     })
 }
@@ -203,8 +234,15 @@ mod tests {
         }
     }
 
+    fn positions(possible: &[usize], required: &[usize]) -> InsertionPositions {
+        InsertionPositions {
+            possible: possible.to_vec(),
+            required: required.to_vec(),
+        }
+    }
+
     #[test]
-    fn unique_embedding_preserves_original_ink_and_rejects_clipped_additions() {
+    fn embedding_preserves_original_ink_and_rejects_clipped_additions() {
         let a = anchor('A', vec![0, 1]);
         let b = anchor('B', vec![1, 2]);
         assert_eq!(
@@ -214,7 +252,7 @@ mod tests {
                 &[0, 1, 2],
                 &[true, true, true]
             ),
-            Some(vec![0, 2])
+            Some(positions(&[1], &[1]))
         );
         assert_eq!(
             embedding(
@@ -246,17 +284,88 @@ mod tests {
     }
 
     #[test]
-    fn repeated_literal_requires_one_geometrically_supported_embedding() {
+    fn repeated_literals_preserve_the_complete_uncertainty_set() {
         let a = anchor('A', vec![0, 1]);
-        assert_eq!(embedding(&[&a], &['A', 'A'], &[0, 1], &[true, true]), None);
+        assert_eq!(
+            embedding(&[&a], &['A', 'A'], &[0, 1], &[true, true]),
+            Some(positions(&[0, 1], &[]))
+        );
         assert_eq!(
             embedding(&[&a], &['A', 'A'], &[0, 1], &[false, true]),
-            Some(vec![0])
+            Some(positions(&[1], &[1]))
+        );
+        assert_eq!(
+            embedding(&[&a], &['A', 'A', 'B'], &[0, 1, 2], &[true, true, true]),
+            Some(positions(&[0, 1, 2], &[2]))
         );
         let a = anchor('A', vec![0]);
         assert_eq!(
             embedding(&[&a], &['A', 'A'], &[0, 1], &[true, true]),
-            Some(vec![0])
+            Some(positions(&[1], &[1]))
         );
+    }
+
+    #[test]
+    fn reachability_matches_exhaustive_subsets() {
+        // All length-four binary strings, length-two primary strings,
+        // support masks for each primary token and clean-run masks.
+        let runs = [0, 1, 2, 3];
+        for word in 0_u8..16 {
+            let new = runs.map(|i| if word & (1 << i) == 0 { 'A' } else { 'B' });
+            for old_word in 0_u8..4 {
+                for support in 0_u16..256 {
+                    let a = anchor(
+                        if old_word & 1 == 0 { 'A' } else { 'B' },
+                        runs.iter()
+                            .copied()
+                            .filter(|&r| support & (1 << r) != 0)
+                            .collect(),
+                    );
+                    let b = anchor(
+                        if old_word & 2 == 0 { 'A' } else { 'B' },
+                        runs.iter()
+                            .copied()
+                            .filter(|&r| support & (1 << (r + 4)) != 0)
+                            .collect(),
+                    );
+                    let old = [&a, &b];
+                    for clean in 0_u8..16 {
+                        let allowed = runs.map(|r| clean & (1 << r) != 0);
+                        let mut possible = 0;
+                        let mut required = 15;
+                        let mut found = false;
+                        for skip in 0_u8..16 {
+                            if skip.count_ones() != 2 || skip & !clean != 0 {
+                                continue;
+                            }
+                            if runs
+                                .iter()
+                                .copied()
+                                .filter(|&r| skip & (1 << r) == 0)
+                                .enumerate()
+                                .all(|(j, r)| retained_match(&old, j, new[r], r))
+                            {
+                                possible |= skip;
+                                required &= skip;
+                                found = true;
+                            }
+                        }
+                        let expected = found.then(|| InsertionPositions {
+                            possible: runs
+                                .iter()
+                                .copied()
+                                .filter(|&r| possible & (1 << r) != 0)
+                                .collect(),
+                            required: runs
+                                .iter()
+                                .copied()
+                                .filter(|&r| required & (1 << r) != 0)
+                                .collect(),
+                        });
+                        assert_eq!(embedding(&old, &new, &runs, &allowed), expected);
+                    }
+                }
+            }
+        }
     }
 }

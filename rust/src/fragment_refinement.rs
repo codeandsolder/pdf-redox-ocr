@@ -472,7 +472,7 @@ impl PageContext<'_> {
         else {
             return Ok(Err(Rejection::InkBudgetExceeded));
         };
-        for &position in &proposal.inserted_positions {
+        for &position in &proposal.positions.possible {
             let run = &run_accounting.runs[proposal.revised_runs[position]];
             if let Some((&peer, _)) = run.peers.iter().find(|(_, ink)| ink.original != 0) {
                 return Ok(Err(match peers[peer] {
@@ -938,7 +938,7 @@ pub fn reconcile_fragments(
     source.verify_pdf(pdf)?;
     Ok((
         FragmentReport {
-            schema_version: 13,
+            schema_version: 14,
             pdf_sha256: source.pdf_sha256.clone(),
             draft_model: source.model.clone(),
             secondary_model: RefinementModel::Consensus.label(),
