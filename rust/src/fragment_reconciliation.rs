@@ -756,6 +756,7 @@ mod tests {
                 })
                 .collect(),
             charged_checks: 0,
+            columns: None,
         }
     }
 
