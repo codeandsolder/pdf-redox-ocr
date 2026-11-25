@@ -1019,12 +1019,12 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 [[package]]
 name = "hayro-ccitt"
 version = "0.5.0"
-source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56fe01b6186132#e7ada1354dff4041cdeed3d8ba56fe01b6186132"
+source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
 
 [[package]]
 name = "hayro-cmap"
 version = "0.1.1"
-source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56fe01b6186132#e7ada1354dff4041cdeed3d8ba56fe01b6186132"
+source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
 dependencies = [
  "brotli",
  "hayro-postscript",
@@ -1033,7 +1033,7 @@ dependencies = [
 [[package]]
 name = "hayro-font"
 version = "0.5.0"
-source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56fe01b6186132#e7ada1354dff4041cdeed3d8ba56fe01b6186132"
+source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
 dependencies = [
  "bitflags",
  "hayro-cmap",
@@ -1048,6 +1048,7 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.9.0"
+source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
 dependencies = [
  "bitflags",
  "hayro-cmap",
@@ -1064,7 +1065,7 @@ dependencies = [
 [[package]]
 name = "hayro-jbig2"
 version = "0.4.0"
-source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56fe01b6186132#e7ada1354dff4041cdeed3d8ba56fe01b6186132"
+source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
 dependencies = [
  "fearless_simd",
  "hayro-ccitt",
@@ -1073,7 +1074,7 @@ dependencies = [
 [[package]]
 name = "hayro-jpeg2000"
 version = "0.5.0"
-source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56fe01b6186132#e7ada1354dff4041cdeed3d8ba56fe01b6186132"
+source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
 dependencies = [
  "fearless_simd",
 ]
@@ -1081,12 +1082,12 @@ dependencies = [
 [[package]]
 name = "hayro-postscript"
 version = "0.2.0"
-source = "git+https://github.com/LaurenzV/hayro?rev=e7ada1354dff4041cdeed3d8ba56fe01b6186132#e7ada1354dff4041cdeed3d8ba56fe01b6186132"
+source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
 
 [[package]]
 name = "hayro-syntax"
 version = "0.9.0"
-source = "git+https://github.com/codeandsolder/pdf-redox?rev=c9d5df7d12c98c407f416cc557d2eeded0c4fca1#c9d5df7d12c98c407f416cc557d2eeded0c4fca1"
+source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
 dependencies = [
  "hayro-ccitt",
  "hayro-jbig2",
@@ -1960,7 +1961,7 @@ checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 [[package]]
 name = "pdf-redox"
 version = "0.1.0"
-source = "git+https://github.com/codeandsolder/pdf-redox?rev=d178372d519744f30dae69bf139d00c90ced6b8b#d178372d519744f30dae69bf139d00c90ced6b8b"
+source = "git+https://github.com/codeandsolder/pdf-redox?rev=2a19406a5e5ba28435e37b115143fb5b863ba754#2a19406a5e5ba28435e37b115143fb5b863ba754"
 dependencies = [
  "color_quant 2.0.0",
  "fast_image_resize",
@@ -1975,7 +1976,7 @@ dependencies = [
  "smallvec",
  "thiserror",
  "write-fonts",
- "zlib-rs 0.6.8 (git+https://github.com/codeandsolder/zlib-rs-fast?rev=692f6a52b19a95665be098c71e5a4f383ef0d76a)",
+ "zlib-rs 0.6.8 (git+https://github.com/codeandsolder/zlib-rs-fast?rev=98f76b3a242099f2229b048360eeb4707246a68f)",
 ]
 
 [[package]]
@@ -3444,7 +3445,7 @@ checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 [[package]]
 name = "zlib-rs"
 version = "0.6.8"
-source = "git+https://github.com/codeandsolder/zlib-rs-fast?rev=692f6a52b19a95665be098c71e5a4f383ef0d76a#692f6a52b19a95665be098c71e5a4f383ef0d76a"
+source = "git+https://github.com/codeandsolder/zlib-rs-fast?rev=98f76b3a242099f2229b048360eeb4707246a68f#98f76b3a242099f2229b048360eeb4707246a68f"
 dependencies = [
  "rayon-core",
 ]
