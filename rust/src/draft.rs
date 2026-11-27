@@ -233,7 +233,7 @@ mod tests {
             |draft| {
                 draft.pages[0]
                     .native_text_regions
-                    .push([Point(f64::NAN, 1.0); 4])
+                    .push([Point(f64::NAN, 1.0); 4]);
             },
         ];
         for mutate in mutations {
