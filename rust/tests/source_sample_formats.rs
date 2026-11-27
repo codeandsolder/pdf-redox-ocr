@@ -252,7 +252,7 @@ fn contextual_palette_masks_preserve_form_appearances_without_false_visibility()
         BTreeMap::from([(
             "7:0".into(),
             recognized
-                .variants
+                .variants()
                 .values()
                 .next()
                 .ok_or("missing recognition")?
@@ -271,45 +271,31 @@ fn contextual_palette_masks_preserve_form_appearances_without_false_visibility()
 fn contextual_observations(
     decoded: &PaintAppearances<image::RgbImage>,
 ) -> PaintAppearances<SourceObservation> {
-    use pdf_redox_ocr::source_appearances::SourceAppearance;
-    PaintAppearances {
-        variants: decoded
-            .variants
-            .iter()
-            .map(|(&id, appearance)| {
-                let text = if appearance.value.get_pixel(0, 0).0 == [255, 255, 255] {
-                    "BLACK LABEL"
-                } else {
-                    "BLUE LABEL"
-                };
-                (
-                    id,
-                    SourceAppearance {
-                        source_id: appearance.source_id.clone(),
-                        value: SourceObservation {
-                            width: 96,
-                            height: 32,
-                            lines: vec![pdf_redox_ocr::source_ocr::SourceLine {
-                                detection_index: 0,
-                                line: OcrLine {
-                                    text: text.into(),
-                                    confidence: 0.99,
-                                    reviewed: false,
-                                    quad: [
-                                        Point(12., 6.),
-                                        Point(76., 6.),
-                                        Point(76., 26.),
-                                        Point(12., 26.),
-                                    ],
-                                },
-                            }],
-                        },
-                    },
-                )
-            })
-            .collect(),
-        paint_bindings: decoded.paint_bindings.clone(),
-    }
+    decoded.map_values(|rgb| {
+        let text = if rgb.get_pixel(0, 0).0 == [255, 255, 255] {
+            "BLACK LABEL"
+        } else {
+            "BLUE LABEL"
+        };
+        SourceObservation {
+            width: 96,
+            height: 32,
+            lines: vec![pdf_redox_ocr::source_ocr::SourceLine {
+                detection_index: 0,
+                line: OcrLine {
+                    text: text.into(),
+                    confidence: 0.99,
+                    reviewed: false,
+                    quad: [
+                        Point(12., 6.),
+                        Point(76., 6.),
+                        Point(76., 26.),
+                        Point(12., 26.),
+                    ],
+                },
+            }],
+        }
+    })
 }
 
 fn assert_isolated_contextual_masks(

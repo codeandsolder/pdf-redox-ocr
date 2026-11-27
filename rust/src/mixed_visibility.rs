@@ -968,7 +968,7 @@ mod tests {
                     },
                 );
                 for page in recognized.paint_bindings.values_mut() {
-                    *page.values_mut().next_back().ok_or("no second paint")? = AppearanceId(1);
+                    page.values_mut().next_back().ok_or("no second paint")?.id = AppearanceId(1);
                 }
             }
             check_grouped_residual(&path, &doc, &scan, &recognized, pages, distinct)?;

@@ -251,11 +251,11 @@ impl<'b> PageDevice<'_, 'b> {
     fn match_paint(
         &mut self,
         id: ObjectIdentifier,
-        path: Option<&[u32]>,
+        path: &[u32],
         dimensions: (u32, u32),
         transform: Affine,
     ) -> Option<&'b ImagePaint> {
-        let entry = path.and_then(|path| self.expected.get_mut(path))?;
+        let entry = self.expected.get_mut(path)?;
         if entry.seen
             || entry.paint.object_number != id.obj_number
             || i32::from(entry.paint.generation) != id.gen_number
@@ -358,15 +358,19 @@ impl Device<'_> for PageDevice<'_, '_> {
         if self.invalid_page.is_some() {
             return;
         }
+        // The interpreter explicitly distinguishes page/Form Do invocations
+        // from image draws in Type3 glyphs, patterns, inline images and other
+        // nested programs. Those draws are not candidate source occurrences;
+        // the scanner and rendered-visibility verifier account for their ink.
+        let Some(path) = props.page_xobject_path.as_deref() else {
+            return;
+        };
         let stream = match &image {
             Image::Stencil(stencil) => stencil.stream(),
             Image::Raster(raster) => raster.stream(),
         };
-        let path = props.page_xobject_path.as_deref();
         let Some(id) = stream.dict().obj_id() else {
-            if path.is_some() {
-                self.invalid_page = Some("unmatched_interpreter_occurrence");
-            }
+            self.invalid_page = Some("unmatched_interpreter_occurrence");
             return;
         };
         let dimensions = (image.width(), image.height());
