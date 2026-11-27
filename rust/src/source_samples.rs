@@ -7,7 +7,7 @@
 
 /// One native-image sample buffer with up to 32 interleaved color components.
 #[derive(Clone)]
-pub(super) struct PackedSamples {
+pub struct PackedSamples {
     width: usize,
     height: usize,
     components: usize,
@@ -18,13 +18,7 @@ pub(super) struct PackedSamples {
 
 impl PackedSamples {
     /// Validate the complete byte layout, including per-row bit padding.
-    pub(super) fn new(
-        width: u32,
-        height: u32,
-        components: usize,
-        bpc: u8,
-        data: Vec<u8>,
-    ) -> Option<Self> {
+    pub fn new(width: u32, height: u32, components: usize, bpc: u8, data: Vec<u8>) -> Option<Self> {
         if !matches!(bpc, 1 | 2 | 4 | 8 | 16) || !(1..=32).contains(&components) {
             return None;
         }
@@ -49,19 +43,19 @@ impl PackedSamples {
         })
     }
 
-    pub(super) const fn width(&self) -> usize {
+    pub const fn width(&self) -> usize {
         self.width
     }
 
-    pub(super) const fn height(&self) -> usize {
+    pub const fn height(&self) -> usize {
         self.height
     }
 
-    pub(super) const fn components(&self) -> usize {
+    pub const fn components(&self) -> usize {
         self.components
     }
 
-    pub(super) fn into_data(self) -> Vec<u8> {
+    pub fn into_data(self) -> Vec<u8> {
         self.data
     }
 
@@ -76,7 +70,7 @@ impl PackedSamples {
     ///
     /// Supported component depths divide a byte exactly, or use two whole
     /// bytes. No component spans a partial byte boundary.
-    pub(super) fn get(&self, x: usize, y: usize, channel: usize) -> u16 {
+    pub fn get(&self, x: usize, y: usize, channel: usize) -> u16 {
         let (index, bit) = self.position(x, y, channel);
         if self.bpc == 16 {
             return u16::from_be_bytes([self.data[index], self.data[index + 1]]);
@@ -86,7 +80,7 @@ impl PackedSamples {
     }
 
     /// Replace only a sample's exact bits, leaving neighbors and row padding.
-    pub(super) fn set(&mut self, x: usize, y: usize, channel: usize, value: u16) {
+    pub fn set(&mut self, x: usize, y: usize, channel: usize, value: u16) {
         let (index, bit) = self.position(x, y, channel);
         if self.bpc == 16 {
             self.data[index..index + 2].copy_from_slice(&value.to_be_bytes());
@@ -101,7 +95,7 @@ impl PackedSamples {
     /// Count changed packed sample tuples exactly. Palette indices and
     /// non-linear color components have no universal numerical contrast scale.
     /// The renderer, not the sample codes, establishes visible contrast.
-    pub(super) fn pixel_changed(&self, other: &Self, x: usize, y: usize) -> bool {
+    pub fn pixel_changed(&self, other: &Self, x: usize, y: usize) -> bool {
         (0..self.components).any(|channel| self.get(x, y, channel) != other.get(x, y, channel))
     }
 }
