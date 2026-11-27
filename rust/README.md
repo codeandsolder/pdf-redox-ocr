@@ -594,7 +594,7 @@ retained, not invented. Failed or conflicting crops leave original
 observations unchanged. Failed repair attempts prevent caching the incomplete
 raster result; successful exact RGB reuse includes the confirmed repairs.
 
-Pipeline audit schema 21 records original pixel-space observations, sample
+Pipeline audit schema 22 records original pixel-space observations, sample
 frame, component bounds, typed crop reason, proposed quad and each actual
 prediction/decision by exact RGB SHA-256 and dimensions. Full-raster inference
 calls remain separate from recognition-only batch counters. Disable the stage

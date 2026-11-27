@@ -112,6 +112,7 @@ pub fn source_only_candidates(report: &PaintReport, max_pixels: u64) -> BTreeSet
         .collect::<BTreeMap<_, _>>();
     for paint in &report.placements {
         let safe = paint.unsafe_reasons.is_empty()
+            && !paint.optional_content
             && paint.width > 0
             && paint.height > 0
             && u64::from(paint.width) * u64::from(paint.height) <= max_pixels;
@@ -147,6 +148,7 @@ pub struct SourceOnlyResult {
 /// at least one positive text observation, and every image layer must be
 /// mutually non-overlapping. Named `XObject` color-space aliases require a
 /// separate rendered visibility proof, even if every paint decoded natively.
+/// The same applies to optional-content visibility.
 ///
 /// # Errors
 /// Returns an error for invalid page numbering; unusable source observations trigger page fallback.
@@ -174,6 +176,7 @@ pub fn source_only_pages(
             // by the actual page renderer. They require a differential proof.
             let mut safe = paint.unsafe_reasons.is_empty()
                 && !paint.sample_layout.contextual
+                && !paint.optional_content
                 && known_source.is_some();
             if safe && let Some((_, observation)) = known_source {
                 match map_observations_to_paint(observation, paint) {
@@ -271,6 +274,7 @@ mod tests {
             width: 200,
             height: 100,
             sample_layout: crate::sample_layout::ImageSampleLayout::default(),
+            optional_content: false,
             ctm: [200.0, 0.0, 0.0, 100.0, tx, 20.0],
             page_quad: [
                 Point(tx, 20.0),
@@ -337,6 +341,7 @@ mod tests {
                 width: 200,
                 height: 100,
                 sample_layout: crate::sample_layout::ImageSampleLayout::default(),
+                optional_content: false,
                 ctm: [200.0, 0.0, 0.0, 100.0, 20.0, 20.0],
                 page_quad: [
                     Point(20.0, 20.0),
@@ -451,6 +456,39 @@ mod tests {
         )?;
         assert!(result.approved_pages.is_empty());
 
+        Ok(())
+    }
+
+    #[test]
+    fn optional_content_requires_a_rendered_visibility_proof_even_with_a_source_observation()
+    -> Result<(), crate::Error> {
+        let mut report = single_paint_report();
+        report.placements[0].optional_content = true;
+        let source = SourceObservation {
+            width: 200,
+            height: 100,
+            lines: vec![SourceLine {
+                detection_index: 0,
+                line: OcrLine {
+                    text: "HIDDEN".into(),
+                    confidence: 0.99,
+                    quad: quad(10.0, 10.0),
+                    reviewed: false,
+                },
+            }],
+        };
+        let recognized = PaintAppearances::from_object_inventory(
+            BTreeMap::from([("9:0".into(), source)]),
+            &report.placements,
+        );
+        assert!(recognized.get(&report.placements[0]).is_some());
+        // The individual binding must also prevent approval even if the
+        // caller incorrectly supplies a positive page purity certificate.
+        assert!(
+            source_only_pages(&report, &recognized)?
+                .approved_pages
+                .is_empty()
+        );
         Ok(())
     }
 

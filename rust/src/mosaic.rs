@@ -494,6 +494,7 @@ mod tests {
             width: w,
             height: h,
             sample_layout: crate::sample_layout::ImageSampleLayout::default(),
+            optional_content: false,
             ctm,
             page_quad: PdfMatrix(ctm).rect_quad(PageBox::UNIT),
             clips: vec![],

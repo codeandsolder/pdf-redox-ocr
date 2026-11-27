@@ -26,6 +26,7 @@ pub(crate) struct PaintBinding {
     dimensions: [u32; 2],
     ctm: [f64; 6],
     sample_layout: crate::sample_layout::ImageSampleLayout,
+    optional_content: bool,
 }
 
 impl PaintBinding {
@@ -38,6 +39,7 @@ impl PaintBinding {
             dimensions: [paint.width, paint.height],
             ctm: paint.ctm,
             sample_layout: paint.sample_layout,
+            optional_content: paint.optional_content,
         }
     }
 
@@ -48,6 +50,7 @@ impl PaintBinding {
             && self.dimensions == [paint.width, paint.height]
             && self.ctm.map(f64::to_bits) == paint.ctm.map(f64::to_bits)
             && self.sample_layout == paint.sample_layout
+            && self.optional_content == paint.optional_content
             && paint.unsafe_reasons.is_empty()
     }
 }

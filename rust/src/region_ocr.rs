@@ -86,6 +86,7 @@ fn request_region(
     // A normal independent native source already has its own recognition
     // and visibility path. Only request regions that require the compositor.
     if !paint.sample_layout.contextual
+        && !paint.optional_content
         && !paint
             .unsafe_reasons
             .iter()
