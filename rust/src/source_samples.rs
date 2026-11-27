@@ -8,12 +8,12 @@
 /// One native-image sample buffer with up to 32 interleaved color components.
 #[derive(Clone)]
 pub struct PackedSamples {
-    pub width: usize,
-    pub height: usize,
-    pub components: usize,
+    width: usize,
+    height: usize,
+    components: usize,
     bpc: usize,
     row_bytes: usize,
-    pub data: Vec<u8>,
+    data: Vec<u8>,
 }
 
 impl PackedSamples {
@@ -43,6 +43,23 @@ impl PackedSamples {
         })
     }
 
+    pub const fn width(&self) -> usize {
+        self.width
+    }
+
+    pub const fn height(&self) -> usize {
+        self.height
+    }
+
+    pub const fn components(&self) -> usize {
+        self.components
+    }
+
+    pub fn into_data(self) -> Vec<u8> {
+        self.data
+    }
+
+    // Callers iterate over bounds derived from this validated layout.
     #[inline]
     const fn position(&self, x: usize, y: usize, channel: usize) -> (usize, usize) {
         let bit = (x * self.components + channel) * self.bpc;
