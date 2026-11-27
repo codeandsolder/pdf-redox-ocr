@@ -460,6 +460,39 @@ mod tests {
     }
 
     #[test]
+    fn optional_content_requires_a_rendered_visibility_proof_even_with_a_source_observation()
+    -> Result<(), crate::Error> {
+        let mut report = single_paint_report();
+        report.placements[0].optional_content = true;
+        let source = SourceObservation {
+            width: 200,
+            height: 100,
+            lines: vec![SourceLine {
+                detection_index: 0,
+                line: OcrLine {
+                    text: "HIDDEN".into(),
+                    confidence: 0.99,
+                    quad: quad(10.0, 10.0),
+                    reviewed: false,
+                },
+            }],
+        };
+        let recognized = PaintAppearances::from_object_inventory(
+            BTreeMap::from([("9:0".into(), source)]),
+            &report.placements,
+        );
+        assert!(recognized.get(&report.placements[0]).is_some());
+        // The individual binding must also prevent approval even if the
+        // caller incorrectly supplies a positive page purity certificate.
+        assert!(
+            source_only_pages(&report, &recognized)?
+                .approved_pages
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn blank_line_does_not_prevent_valid_source_admission() -> Result<(), crate::Error> {
         let report = single_paint_report();
         let meaningful = OcrLine {

@@ -1257,7 +1257,6 @@ impl ScanContext<'_> {
                         state.gs_unsafe = true;
                     }
                 }
-                b"BT" | b"ET" => {}
                 b"Tj" | b"TJ" | b"'" | b"\"" => self.handle_text_show(&state),
                 b"sh" => self.summary.non_image_visual_paint += 1,
                 b"Do" => {
@@ -1270,7 +1269,7 @@ impl ScanContext<'_> {
                 b"w" | b"J" | b"j" | b"M" | b"d" | b"ri" | b"i" | b"g" | b"G" | b"rg" | b"RG"
                 | b"k" | b"K" | b"cs" | b"CS" | b"sc" | b"SC" | b"scn" | b"SCN" | b"Tc" | b"Tw"
                 | b"Tz" | b"TL" | b"Ts" | b"Td" | b"TD" | b"Tm" | b"T*" | b"BMC" | b"BDC"
-                | b"EMC" | b"MP" | b"DP" | b"BX" | b"EX" => {}
+                | b"EMC" | b"MP" | b"DP" | b"BX" | b"EX" | b"BT" | b"ET" => {}
                 _ => self.summary.unknown_paint += 1,
             }
         }
