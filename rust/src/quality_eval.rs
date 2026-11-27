@@ -334,22 +334,43 @@ pub(crate) fn validate(reference: &GroundTruth, draft: &OcrDraft) -> Result<(), 
     Ok(())
 }
 
-/// Kuhn augmenting path: maximum cardinality even with overlapping detections.
+/// Kuhn augmenting path, using heap-backed DFS frames to avoid a call-stack
+/// depth proportional to the number of overlapping observations.
+/// Candidate order and the original recursive tie-breaking are preserved.
 fn claim(
     reference: usize,
     options: &[Vec<usize>],
     owners: &mut [Option<usize>],
     visited: &mut [bool],
+    stack: &mut Vec<(usize, usize)>,
 ) -> bool {
-    for &candidate in &options[reference] {
+    stack.clear();
+    visited.fill(false);
+    stack.push((reference, 0));
+    while let Some((current, next)) = stack.last_mut() {
+        let Some(&candidate) = options[*current].get(*next) else {
+            stack.pop();
+            continue;
+        };
+        *next += 1;
         if visited[candidate] {
             continue;
         }
         visited[candidate] = true;
-        if owners[candidate].is_none_or(|previous| claim(previous, options, owners, visited)) {
-            owners[candidate] = Some(reference);
-            return true;
+        if let Some(previous) = owners[candidate] {
+            stack.push((previous, 0));
+            continue;
         }
+        let mut free = candidate;
+        while let Some((owner, _)) = stack.pop() {
+            owners[free] = Some(owner);
+            if let Some(&(parent, next)) = stack.last() {
+                // A suspended parent has advanced past the edge used to
+                // enter its child. Reassign that edge on successful unwind.
+                free = options[parent][next - 1];
+            }
+        }
+        return true;
     }
     false
 }
@@ -406,9 +427,10 @@ pub fn evaluate(reference: &GroundTruth, draft: &OcrDraft) -> Result<QualityRepo
     validate(reference, draft)?;
     let (lines, options) = candidate_lines(reference, draft);
     let mut owners = vec![None; lines.len()];
+    let mut visited = vec![false; lines.len()];
+    let mut stack = Vec::new();
     for index in 0..reference.samples.len() {
-        let mut visited = vec![false; lines.len()];
-        claim(index, &options, &mut owners, &mut visited);
+        claim(index, &options, &mut owners, &mut visited, &mut stack);
     }
     let mut matched = vec![None; reference.samples.len()];
     for (line, owner) in owners.into_iter().enumerate() {
@@ -656,6 +678,67 @@ mod tests {
         assert_eq!(result.overall.matched, 1);
         assert_eq!(result.overall.missing, 2);
         Ok(())
+    }
+
+    #[test]
+    fn augmenting_path_handles_deep_overlap_without_recursive_stack_growth() {
+        let count = 100_000;
+        let options: Vec<_> = (0..count).map(|index| vec![index]).collect();
+        let mut owners: Vec<_> = (1..count).map(Some).chain([None]).collect();
+        let mut visited = vec![false; count];
+        let mut stack = Vec::new();
+        assert!(super::claim(
+            0,
+            &options,
+            &mut owners,
+            &mut visited,
+            &mut stack
+        ));
+        assert!(owners.iter().copied().eq((0..count).map(Some)));
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn augmenting_path_matches_recursive_reference_on_every_three_by_three_graph() {
+        fn recursive(
+            reference: usize,
+            options: &[Vec<usize>],
+            owners: &mut [Option<usize>],
+            visited: &mut [bool],
+        ) -> bool {
+            for &candidate in &options[reference] {
+                if visited[candidate] {
+                    continue;
+                }
+                visited[candidate] = true;
+                if owners[candidate]
+                    .is_none_or(|previous| recursive(previous, options, owners, visited))
+                {
+                    owners[candidate] = Some(reference);
+                    return true;
+                }
+            }
+            false
+        }
+        for graph in 0..512_u16 {
+            let options: Vec<_> = (0..3)
+                .map(|reference| {
+                    (0..3)
+                        .filter(|&candidate| graph & (1 << (reference * 3 + candidate)) != 0)
+                        .collect()
+                })
+                .collect();
+            let (mut expected, mut actual) = ([None; 3], [None; 3]);
+            let mut visited = [false; 3];
+            let mut stack = Vec::new();
+            for reference in 0..3 {
+                assert_eq!(
+                    super::claim(reference, &options, &mut actual, &mut visited, &mut stack),
+                    recursive(reference, &options, &mut expected, &mut [false; 3])
+                );
+                assert_eq!(actual, expected);
+            }
+        }
     }
 
     #[test]
