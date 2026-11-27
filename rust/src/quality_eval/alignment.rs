@@ -6,7 +6,7 @@ pub(super) type Aligned = (Option<char>, Option<char>);
 
 fn fill_last_row<'a>(
     reference: impl Iterator<Item = &'a char>,
-    predicted: impl ExactSizeIterator<Item = &'a char> + Clone,
+    predicted: &(impl ExactSizeIterator<Item = &'a char> + Clone),
     row: &mut Vec<usize>,
     scratch: &mut Vec<usize>,
 ) {
@@ -27,7 +27,7 @@ fn fill_last_row<'a>(
 pub(super) fn last_row(reference: &[char], predicted: &[char]) -> Vec<usize> {
     let mut row = Vec::with_capacity(predicted.len() + 1);
     let mut scratch = Vec::with_capacity(row.capacity());
-    fill_last_row(reference.iter(), predicted.iter(), &mut row, &mut scratch);
+    fill_last_row(reference.iter(), &predicted.iter(), &mut row, &mut scratch);
     row
 }
 
@@ -52,13 +52,13 @@ impl Rows {
     fn split(&mut self, reference: &[char], predicted: &[char], midpoint: usize) -> usize {
         fill_last_row(
             reference[..midpoint].iter(),
-            predicted.iter(),
+            &predicted.iter(),
             &mut self.forward,
             &mut self.scratch,
         );
         fill_last_row(
             reference[midpoint..].iter().rev(),
-            predicted.iter().rev(),
+            &predicted.iter().rev(),
             &mut self.backward,
             &mut self.scratch,
         );
