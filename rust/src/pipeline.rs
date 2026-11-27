@@ -401,7 +401,7 @@ impl PipelineResult {
     #[must_use = "inspect pipeline diagnostics before accepting the processed document"]
     pub const fn audit(&self) -> PipelineAudit<'_> {
         PipelineAudit {
-            schema_version: 20,
+            schema_version: 21,
             preparation: None,
             pdf_sha256: self.draft.pdf_sha256.as_str(),
             model: self.draft.model.as_str(),

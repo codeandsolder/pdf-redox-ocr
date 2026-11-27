@@ -20,7 +20,7 @@ pub struct SourceAppearance<T> {
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct PaintBinding {
     pub(crate) id: AppearanceId,
-    path: Vec<u32>,
+    paint_path: Vec<u32>,
     object_number: u32,
     generation: u16,
     dimensions: [u32; 2],
@@ -32,7 +32,7 @@ impl PaintBinding {
     fn new(paint: &ImagePaint, id: AppearanceId) -> Self {
         Self {
             id,
-            path: paint.paint_path.clone(),
+            paint_path: paint.paint_path.clone(),
             object_number: paint.object_number,
             generation: paint.generation,
             dimensions: [paint.width, paint.height],
@@ -42,7 +42,7 @@ impl PaintBinding {
     }
 
     fn matches(&self, paint: &ImagePaint) -> bool {
-        self.path == paint.paint_path
+        self.paint_path == paint.paint_path
             && self.object_number == paint.object_number
             && self.generation == paint.generation
             && self.dimensions == [paint.width, paint.height]
