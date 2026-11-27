@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   stable-core:
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@0306b47dabb5bb6c2e62b33f7ab7cec216e07dd7 # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@4c7fc62a9f9ec37aaa7c155d263cd5025e446a53 # main
     with:
       command: |
         bash -n run-auto.sh
@@ -28,7 +28,7 @@ jobs:
       rust-toolchain: "nightly-2026-11-19"
       rust-components: "rustfmt clippy"
   native-pdf:
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@0306b47dabb5bb6c2e62b33f7ab7cec216e07dd7 # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@4c7fc62a9f9ec37aaa7c155d263cd5025e446a53 # main
     with:
       command: |
         if ! command -v pdfimages >/dev/null || ! command -v pdftoppm >/dev/null || ! command -v pdftotext >/dev/null; then
