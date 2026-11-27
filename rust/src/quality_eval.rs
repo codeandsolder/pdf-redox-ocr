@@ -695,7 +695,7 @@ mod tests {
             &mut stack
         ));
         assert!(owners.iter().copied().eq((0..count).map(Some)));
-        assert!(stack.is_empty());
+        assert_eq!(stack, []);
     }
 
     #[test]
