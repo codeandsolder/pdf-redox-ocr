@@ -52,8 +52,8 @@ pub struct RegionObservation {
     pub detection_index: usize,
     pub line: OcrLine,
     pub within_crop: bool,
-    pub page_overlap: f64,
-    pub native_overlap: f64,
+    pub page_overlap: Option<f64>,
+    pub native_overlap: Option<f64>,
     pub included_as_extra: bool,
 }
 

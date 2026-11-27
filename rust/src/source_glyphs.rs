@@ -15,7 +15,7 @@ use crate::{
     geometry::{Quad, QuadBounds},
     line_audit::{AuditedLine, LineAuditPolicy, audit_line},
     pdf_metadata::PdfMetadata,
-    polygon::{area, clip_convex},
+    polygon::{area, convex, intersection_area},
     recognition::{RasterCharacterAudit, RasterCharacterMapping, RasterLocation},
     reviewed_glyphs::{
         ReviewedGlyphBank, SourceGlyphAppearance, SourceSampling, SourceSamplingFailure,
@@ -28,6 +28,16 @@ type LineKey = (u32, RasterLocation, usize);
 /// independently segmented rasters in the same source coordinate space.
 /// Partial, split and merged groups cannot transfer a glyph association.
 fn corresponding_groups(primary: &[Option<Quad>], source: &[Quad]) -> BTreeMap<usize, usize> {
+    let Some(source_geometry) = source
+        .iter()
+        .map(|quad| {
+            let measure = area(quad);
+            (measure > 1e-9 && convex(quad)).then(|| (QuadBounds::new(quad), measure))
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return BTreeMap::new();
+    };
     let mut forward = vec![Vec::new(); primary.len()];
     let mut reverse = vec![0_usize; source.len()];
     for (i, ink) in primary.iter().enumerate() {
@@ -35,19 +45,18 @@ fn corresponding_groups(primary: &[Option<Quad>], source: &[Quad]) -> BTreeMap<u
             continue;
         };
         let primary_area = area(ink);
-        if !primary_area.is_finite() || primary_area <= 1e-9 {
-            continue;
+        if primary_area <= 1e-9 || !convex(ink) {
+            return BTreeMap::new();
         }
         let primary_bounds = QuadBounds::new(ink);
-        for (j, group) in source.iter().enumerate() {
-            if !primary_bounds.intersects(QuadBounds::new(group)) {
+        for (j, (group, &(bounds, source_area))) in source.iter().zip(&source_geometry).enumerate()
+        {
+            if !primary_bounds.intersects(bounds) {
                 continue;
             }
-            let source_area = area(group);
-            if !source_area.is_finite() || source_area <= 1e-9 {
-                continue;
-            }
-            let intersection = area(&clip_convex(ink, group));
+            let Some(intersection) = intersection_area(ink, group) else {
+                return BTreeMap::new();
+            };
             let (a, b) = (intersection / primary_area, intersection / source_area);
             // A small isolated mark may belong to a much larger primary
             // run. Count substantial coverage of EITHER group as a

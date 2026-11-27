@@ -21,7 +21,7 @@ use crate::{
     line_audit::{BoundaryPeer, MappedBoundaryExtension},
     line_frame::LineFrame,
     pixel_regions::InkBounds,
-    polygon::{area, clip_convex},
+    polygon::{area, convex, intersection_area},
     recognition_model::RecognitionModel,
     refinement_evidence::{Recognition, RefinementDecision, RefinementOutcome, canonical},
 };
@@ -320,17 +320,22 @@ fn run_quad(quad: Quad, recognition: &Recognition, run: usize) -> Option<Quad> {
     Some([Point(l, b), Point(r, b), Point(r, t), Point(l, t)].map(|p| frame.to_source(p)))
 }
 
-fn intersection(a: &Quad, b: &Quad) -> f64 {
+fn intersection(a: &Quad, b: &Quad) -> Option<f64> {
+    if !convex(a) || !convex(b) {
+        return None;
+    }
     if QuadBounds::new(a).intersects(QuadBounds::new(b)) {
-        area(&clip_convex(a, b))
+        intersection_area(a, b)
     } else {
-        0.0
+        Some(0.0)
     }
 }
 
 fn contained(a: &Quad, b: &Quad) -> bool {
     let size = area(a);
-    size > 0.0 && (size - intersection(a, b)).abs() <= size.max(1.0) * 1e-8
+    size.is_finite()
+        && size > 0.0
+        && intersection(a, b).is_some_and(|overlap| (size - overlap).abs() <= size.max(1.0) * 1e-8)
 }
 
 /// Stable first-entry intervals are stronger localization evidence than a
@@ -394,7 +399,8 @@ fn preserve_partial_peer(
                     .peers
                     .get(&peer_index)
                     .is_some_and(|c| c.axis_added > 0)
-                && run_quad(quad, variant, b.run).is_some_and(|q| intersection(&source, &q) > 0.0)
+                && run_quad(quad, variant, b.run)
+                    .is_some_and(|q| intersection(&source, &q).is_some_and(|overlap| overlap > 0.0))
         });
         let b = matched.next()?;
         if matched.next().is_some() {
@@ -684,9 +690,12 @@ pub fn conflicts(
                 blocked.extend([previous, i]);
             }
         }
+        if !convex(&op.quad) {
+            blocked.insert(i);
+        }
         let earlier = pages.entry(op.page).or_default();
         for &j in earlier.iter() {
-            if intersection(&op.quad, &operations[j].quad) > 1e-8 {
+            if intersection(&op.quad, &operations[j].quad).is_none_or(|overlap| overlap > 1e-8) {
                 blocked.extend([i, j]);
             }
         }

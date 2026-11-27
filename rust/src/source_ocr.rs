@@ -12,7 +12,7 @@ use crate::{
     geometry::{DisplayMapper, PageBox, Point, Rotation},
     hybrid::{ImagePaintEvidence, RasterPageEvidence, approve_raster_only_pages},
     paint_scan::{ImagePaint, PaintReport, PdfMatrix},
-    polygon::area,
+    polygon::convex,
     source_appearances::PaintAppearances,
 };
 
@@ -71,7 +71,7 @@ pub fn map_observations_to_paint(
             let line = &source.line;
             if !line.confidence.is_finite()
                 || !(0.0..=1.0).contains(&line.confidence)
-                || area(&line.quad) <= 1e-9
+                || !convex(&line.quad)
                 || line.quad.iter().any(|point| {
                     !point.0.is_finite()
                         || !point.1.is_finite()
@@ -86,11 +86,10 @@ pub fn map_observations_to_paint(
             let projected = line
                 .quad
                 .map(|point| matrix.point(Point(point.0 / width, point.1 / height)));
-            if projected
-                .iter()
-                .any(|point| !point.0.is_finite() || !point.1.is_finite())
-            {
-                return Err(Error::Invalid("source OCR projection was nonfinite".into()));
+            if !convex(&projected) {
+                return Err(Error::Invalid(
+                    "source OCR projection is not a usable quad".into(),
+                ));
             }
             let mut projected_line = line.clone();
             projected_line.quad = projected;
