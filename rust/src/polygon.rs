@@ -218,7 +218,7 @@ pub fn intersection_area(subject: &[Point], clip: &[Point]) -> Option<f64> {
     measure.is_finite().then_some(measure)
 }
 
-/// Intersection area divided by the smaller polygon area, not IoU. Invalid
+/// Intersection area divided by the smaller polygon area, not `IoU`. Invalid
 /// or degenerate input has no defined overlap fraction.
 #[must_use = "distinguish unknown overlap from a measured overlap fraction"]
 pub fn overlap_fraction(first: &[Point], second: &[Point]) -> Option<f64> {
