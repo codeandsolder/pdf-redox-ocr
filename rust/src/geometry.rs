@@ -49,23 +49,60 @@ impl QuadBounds {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PageBox {
     /// Left.
-    pub x0: f64,
+    x0: f64,
     /// Bottom.
-    pub y0: f64,
+    y0: f64,
     /// Right.
-    pub x1: f64,
+    x1: f64,
     /// Top.
-    pub y1: f64,
+    y1: f64,
 }
 
 impl PageBox {
+    /// Unit square in PDF user-space coordinates.
+    pub const UNIT: Self = Self {
+        x0: 0.0,
+        y0: 0.0,
+        x1: 1.0,
+        y1: 1.0,
+    };
+
+    /// Left coordinate.
+    #[must_use = "use the coordinate when positioning PDF geometry"]
+    pub const fn x0(self) -> f64 {
+        self.x0
+    }
+
+    /// Bottom coordinate.
+    #[must_use = "use the coordinate when positioning PDF geometry"]
+    pub const fn y0(self) -> f64 {
+        self.y0
+    }
+
+    /// Right coordinate.
+    #[must_use = "use the coordinate when positioning PDF geometry"]
+    pub const fn x1(self) -> f64 {
+        self.x1
+    }
+
+    /// Top coordinate.
+    #[must_use = "use the coordinate when positioning PDF geometry"]
+    pub const fn y1(self) -> f64 {
+        self.y1
+    }
+
     /// Reject non-finite and degenerate rectangles.
     ///
     /// # Errors
-    /// Returns an error when a rectangle contains nonfinite coordinates or has zero area.
+    /// Returns an error when coordinates or extents are nonfinite, or an extent is nonpositive.
     pub fn new(values: [f64; 4]) -> Result<Self, Error> {
         let [x0, y0, x1, y1] = values;
-        if !values.iter().all(|v| v.is_finite()) || x1 <= x0 || y1 <= y0 {
+        if !values.iter().all(|v| v.is_finite())
+            || x1 <= x0
+            || y1 <= y0
+            || !(x1 - x0).is_finite()
+            || !(y1 - y0).is_finite()
+        {
             return Err(Error::Invalid("invalid PDF page box".into()));
         }
         Ok(Self { x0, y0, x1, y1 })
@@ -285,6 +322,9 @@ mod tests {
     fn invalid_boxes_and_rotations_are_rejected() {
         assert!(PageBox::new([0.0, 0.0, f64::NAN, 1.0]).is_err());
         assert!(PageBox::new([1.0, 0.0, 1.0, 5.0]).is_err());
+        assert!(PageBox::new([-f64::MAX, 0.0, f64::MAX, 1.0]).is_err());
+        assert!(PageBox::new([0.0, -f64::MAX, 1.0, f64::MAX]).is_err());
+        assert!(PageBox::from_unordered_corners([f64::MAX, 0.0, -f64::MAX, 1.0]).is_err());
         assert!(Rotation::try_from(42).is_err());
     }
 }

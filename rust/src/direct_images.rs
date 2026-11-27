@@ -639,7 +639,7 @@ fn decode_selected(
         };
         let mut context = Context::new(
             Affine::IDENTITY,
-            Rect::new(bbox.x0, bbox.y0, bbox.x1, bbox.y1),
+            Rect::new(bbox.x0(), bbox.y0(), bbox.x1(), bbox.y1()),
             &cache,
             pdf.xref(),
             settings,

@@ -58,10 +58,10 @@ impl PdfMatrix {
     #[must_use = "use the transformed rectangle when evaluating paint bounds"]
     pub const fn rect_quad(self, bounds: PageBox) -> Quad {
         [
-            self.point(Point(bounds.x0, bounds.y0)),
-            self.point(Point(bounds.x1, bounds.y0)),
-            self.point(Point(bounds.x1, bounds.y1)),
-            self.point(Point(bounds.x0, bounds.y1)),
+            self.point(Point(bounds.x0(), bounds.y0())),
+            self.point(Point(bounds.x1(), bounds.y0())),
+            self.point(Point(bounds.x1(), bounds.y1())),
+            self.point(Point(bounds.x0(), bounds.y1())),
         ]
     }
 

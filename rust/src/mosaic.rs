@@ -226,25 +226,25 @@ fn clipped_item(paint: &ImagePaint, page: PageBox, mapper: DisplayMapper) -> Opt
         .iter()
         .map(|p| p.0)
         .fold(f64::INFINITY, f64::min)
-        .max(page.x0);
+        .max(page.x0());
     let x1 = paint
         .page_quad
         .iter()
         .map(|p| p.0)
         .fold(f64::NEG_INFINITY, f64::max)
-        .min(page.x1);
+        .min(page.x1());
     let y0 = paint
         .page_quad
         .iter()
         .map(|p| p.1)
         .fold(f64::INFINITY, f64::min)
-        .max(page.y0);
+        .max(page.y0());
     let y1 = paint
         .page_quad
         .iter()
         .map(|p| p.1)
         .fold(f64::NEG_INFINITY, f64::max)
-        .min(page.y1);
+        .min(page.y1());
     Some(Item {
         paint_index: paint.paint_index,
         box_: PageBox::new([x0, y0, x1, y1]).ok()?,
@@ -258,19 +258,19 @@ fn compatible(a: Item, b: Item) -> bool {
         return false;
     }
     let gap_x = 0.0_f64
-        .max(a.box_.x0 - b.box_.x1)
-        .max(b.box_.x0 - a.box_.x1);
+        .max(a.box_.x0() - b.box_.x1())
+        .max(b.box_.x0() - a.box_.x1());
     let gap_y = 0.0_f64
-        .max(a.box_.y0 - b.box_.y1)
-        .max(b.box_.y0 - a.box_.y1);
+        .max(a.box_.y0() - b.box_.y1())
+        .max(b.box_.y0() - a.box_.y1());
     gap_x <= 2.5 * a.pitch.max(b.pitch) && gap_y <= 2.5 * a.pitch.max(b.pitch)
 }
 
 fn bucket_cells(box_: PageBox, page: PageBox, cell: f64) -> Option<Vec<(i64, i64)>> {
-    let start_x = num_traits::ToPrimitive::to_i64(&((box_.x0 - page.x0) / cell).floor())?;
-    let end_x = num_traits::ToPrimitive::to_i64(&((box_.x1 - page.x0) / cell).floor())?;
-    let start_y = num_traits::ToPrimitive::to_i64(&((box_.y0 - page.y0) / cell).floor())?;
-    let end_y = num_traits::ToPrimitive::to_i64(&((box_.y1 - page.y0) / cell).floor())?;
+    let start_x = num_traits::ToPrimitive::to_i64(&((box_.x0() - page.x0()) / cell).floor())?;
+    let end_x = num_traits::ToPrimitive::to_i64(&((box_.x1() - page.x0()) / cell).floor())?;
+    let start_y = num_traits::ToPrimitive::to_i64(&((box_.y0() - page.y0()) / cell).floor())?;
+    let end_y = num_traits::ToPrimitive::to_i64(&((box_.y1() - page.y0()) / cell).floor())?;
     let span_x = u64::try_from(end_x.checked_sub(start_x)?.checked_add(1)?).ok()?;
     let span_y = u64::try_from(end_y.checked_sub(start_y)?.checked_add(1)?).ok()?;
     if span_x.checked_mul(span_y)? > MAX_BUCKETS_PER_PAINT {
@@ -312,13 +312,16 @@ fn connected_components(items: &[Item], page: PageBox) -> BTreeMap<usize, Vec<It
         // times coarser than this source. Expand old boxes accordingly,
         // then query future boxes without missing symmetric pairs.
         let margin = 2.5 * item.pitch / (1.0 - 0.075);
-        let expanded = PageBox {
-            x0: item.box_.x0 - margin,
-            y0: item.box_.y0 - margin,
-            x1: item.box_.x1 + margin,
-            y1: item.box_.y1 + margin,
-        };
-        if let Some(cells) = bucket_cells(expanded, page, cell) {
+        let expanded = PageBox::new([
+            item.box_.x0() - margin,
+            item.box_.y0() - margin,
+            item.box_.x1() + margin,
+            item.box_.y1() + margin,
+        ]);
+        if let Some(cells) = expanded
+            .ok()
+            .and_then(|bounds| bucket_cells(bounds, page, cell))
+        {
             for key in cells {
                 buckets.entry(key).or_default().push(i);
             }
@@ -338,28 +341,28 @@ fn group_region(items: &[Item], page: PageBox, pitch: f64) -> Option<PageBox> {
     PageBox::new([
         (items
             .iter()
-            .map(|p| p.box_.x0)
+            .map(|p| p.box_.x0())
             .fold(f64::INFINITY, f64::min)
             - pad)
-            .max(page.x0),
+            .max(page.x0()),
         (items
             .iter()
-            .map(|p| p.box_.y0)
+            .map(|p| p.box_.y0())
             .fold(f64::INFINITY, f64::min)
             - pad)
-            .max(page.y0),
+            .max(page.y0()),
         (items
             .iter()
-            .map(|p| p.box_.x1)
+            .map(|p| p.box_.x1())
             .fold(f64::NEG_INFINITY, f64::max)
             + pad)
-            .min(page.x1),
+            .min(page.x1()),
         (items
             .iter()
-            .map(|p| p.box_.y1)
+            .map(|p| p.box_.y1())
             .fold(f64::NEG_INFINITY, f64::max)
             + pad)
-            .min(page.y1),
+            .min(page.y1()),
     ])
     .ok()
 }
@@ -492,12 +495,7 @@ mod tests {
             height: h,
             sample_layout: crate::sample_layout::ImageSampleLayout::default(),
             ctm,
-            page_quad: PdfMatrix(ctm).rect_quad(PageBox {
-                x0: 0.0,
-                y0: 0.0,
-                x1: 1.0,
-                y1: 1.0,
-            }),
+            page_quad: PdfMatrix(ctm).rect_quad(PageBox::UNIT),
             clips: vec![],
             unsafe_reasons: vec![],
         }
