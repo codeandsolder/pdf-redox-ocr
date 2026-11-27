@@ -16,7 +16,7 @@ mod support;
 fn image<'a>(result: &'a DirectImages, source: &str) -> Option<&'a image::RgbImage> {
     result
         .appearances
-        .variants
+        .variants()
         .values()
         .find(|v| v.source_id == source)
         .map(|v| &v.value)
@@ -508,5 +508,60 @@ fn late_page_mismatch_discards_only_its_appearance_bindings()
             &[255, 0, 0, 0, 255, 0]
         );
     }
+    Ok(())
+}
+
+#[test]
+fn appearance_lookup_rejects_recycled_ordinals_and_changed_paint_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let bytes = context_fixture(true, "0000ffffffff", [0, 1], 1);
+    let doc = PdfMetadata::from_bytes(bytes.clone())?;
+    let pages = [PageNumber::new(1)?];
+    let scan = enumerate_image_paints(&doc, &pages)?;
+    let result = extract(&bytes, &pages, NativeImageBudget::default())?;
+    let [first, second] = scan.placements.as_slice() else {
+        return Err("missing two contextual paints".into());
+    };
+    assert_ne!(
+        result.appearances.get(first).ok_or("missing first")?.0,
+        result.appearances.get(second).ok_or("missing second")?.0
+    );
+    let mut stale = second.clone();
+    stale.paint_index = first.paint_index;
+    assert!(result.appearances.get(&stale).is_none());
+    stale = first.clone();
+    stale.ctm[4] += 1.;
+    assert!(result.appearances.get(&stale).is_none());
+    stale = first.clone();
+    stale.width += 1;
+    assert!(result.appearances.get(&stale).is_none());
+    stale = first.clone();
+    stale.unsafe_reasons.push("newly_unsafe");
+    assert!(result.appearances.get(&stale).is_none());
+    Ok(())
+}
+
+#[test]
+fn legacy_inventory_rejects_duplicate_invocations_without_losing_other_pages()
+-> Result<(), Box<dyn std::error::Error>> {
+    use pdf_redox_ocr::source_appearances::PaintAppearances;
+    use std::collections::BTreeMap;
+    let bytes = include_bytes!("fixtures/repeated-image-six-pages.pdf");
+    let doc = PdfMetadata::from_bytes(bytes.to_vec())?;
+    let pages = [PageNumber::new(1)?, PageNumber::new(2)?];
+    let mut scan = enumerate_image_paints(&doc, &pages)?;
+    let mut duplicate = scan.placements[0].clone();
+    duplicate.paint_index += 1; // same path, different expanded index
+    scan.placements.push(duplicate);
+    let bound = PaintAppearances::from_object_inventory(
+        BTreeMap::from([("9:0".to_owned(), 42)]),
+        &scan.placements,
+    );
+    assert!(bound.get(&scan.placements[0]).is_none());
+    assert_eq!(
+        bound.get(&scan.placements[1]).map(|(_, value)| *value),
+        Some(42)
+    );
+    assert_eq!(bound.len(), 1);
     Ok(())
 }

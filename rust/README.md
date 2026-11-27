@@ -594,7 +594,7 @@ retained, not invented. Failed or conflicting crops leave original
 observations unchanged. Failed repair attempts prevent caching the incomplete
 raster result; successful exact RGB reuse includes the confirmed repairs.
 
-Pipeline audit schema 20 records original pixel-space observations, sample
+Pipeline audit schema 21 records original pixel-space observations, sample
 frame, component bounds, typed crop reason, proposed quad and each actual
 prediction/decision by exact RGB SHA-256 and dimensions. Full-raster inference
 calls remain separate from recognition-only batch counters. Disable the stage
@@ -873,9 +873,9 @@ paint is not retried through object-ID-only extraction. Source visibility
 proofs, source-local coordinates, OCR recognition, cache and overlay gates
 remain unchanged.
 
-Schema-15 `source_rasters` and `source_observations` contain a `variants` map
+Schema-21 `source_rasters` and `source_observations` contain a `variants` map
 keyed by document-local appearance ID (each entry holds `source_id` and
-`value`), and a `paint_bindings` map indexed by page and paint index. RGB
+`value`), and a `paint_bindings` map indexed by page and paint index. Each binding records the appearance ID, nested Do path, original object number and generation, dimensions, CTM and packed sample layout. RGB
 SHA256 and native dimensions identify each raster; visibility audits identify
 the exact appearance. Each paint records its native packed-sample layout.
 Named XObject color-space aliases require actual differential visibility proof,
