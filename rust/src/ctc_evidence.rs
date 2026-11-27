@@ -16,6 +16,7 @@ use crate::{
     ctc_alignment::{SequenceAlignment, align},
 };
 
+const ROW_SUM_TOLERANCE: f64 = 0.01;
 const EMISSION_CLASSES: usize = 8;
 const BEAM_WIDTH: usize = 12;
 // One blank and one repeated last class can have different transition
@@ -163,7 +164,7 @@ fn top_classes(row: &[f32], labels: &[char]) -> Result<Vec<ClassScore>, Error> {
         let position = top.partition_point(|&current| stronger(current, score));
         top.insert(position, score);
     }
-    if (sum - 1.0).abs() > 0.01 {
+    if (sum - 1.0).abs() > ROW_SUM_TOLERANCE {
         return Err(invalid("CTC output is not a probability distribution"));
     }
     Ok(top)
@@ -395,8 +396,31 @@ impl EvidenceValidator {
             .classes
             .first()
             .ok_or_else(|| invalid("empty CTC emission"))?;
-        if winner.probability < emission.blank_probability {
-            return Err(invalid("CTC emission is weaker than blank"));
+        // Blank wins every exact probability tie because its class index is zero.
+        if winner.probability <= emission.blank_probability {
+            return Err(invalid("CTC emission does not beat blank"));
+        }
+        let blank_recorded = seen.contains(&0);
+        let mut sum = emission
+            .classes
+            .iter()
+            .map(|class| f64::from(class.probability))
+            .sum::<f64>();
+        if !blank_recorded {
+            if emission
+                .classes
+                .last()
+                .is_some_and(|last| last.probability <= emission.blank_probability)
+            {
+                return Err(invalid("omitted blank outranks a retained CTC class"));
+            }
+            sum += f64::from(emission.blank_probability);
+        }
+        if sum > 1.0 + ROW_SUM_TOLERANCE
+            || (seen.len() + usize::from(!blank_recorded) == self.vocabulary_size
+                && sum < 1.0 - ROW_SUM_TOLERANCE)
+        {
+            return Err(invalid("invalid recorded CTC probability mass"));
         }
         winner
             .character
@@ -473,10 +497,10 @@ impl CtcEvidence {
             greedy.push(validator.emission(emission, self.row_class_limit)?);
         }
         if greedy != self.greedy_text
-            || self
-                .emissions
-                .windows(2)
-                .any(|pair| pair[0].column >= pair[1].column)
+            || self.emissions.windows(2).any(|pair| {
+                let repeated = pair[0].classes[0].class_index == pair[1].classes[0].class_index;
+                pair[1].column.saturating_sub(pair[0].column) < 1 + usize::from(repeated)
+            })
         {
             return Err(invalid("inconsistent recorded greedy CTC sequence"));
         }
@@ -701,9 +725,51 @@ mod tests {
         let mut evidence = evidence;
         evidence.emissions[1].column = 0;
         assert!(evidence.validate().is_err());
+        evidence.emissions[1].column = 1;
+        assert!(evidence.validate().is_err());
         evidence.emissions[1].column = 2;
+        evidence.emissions[0].classes[0].probability = 1.0;
+        assert!(evidence.validate().is_err());
+        evidence.emissions[0].classes[0].probability = 0.8;
         evidence.hypotheses[0].text = "BB".into();
         assert!(evidence.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_contract_accepts_measured_greedy_paths_and_queries() -> Result<(), Error> {
+        let labels = ['\0', 'A', 'B'];
+        let distributions = [
+            [0.8, 0.1, 0.1],
+            [0.1, 0.8, 0.1],
+            [0.1, 0.1, 0.8],
+            [1.0, -0.0, 0.0],
+        ];
+        for a in 0..distributions.len() {
+            for b in 0..distributions.len() {
+                for c in 0..distributions.len() {
+                    let rows = [
+                        distributions[a].as_slice(),
+                        distributions[b].as_slice(),
+                        distributions[c].as_slice(),
+                    ];
+                    let mut greedy = String::new();
+                    let mut columns = Vec::new();
+                    let mut previous = 0;
+                    for (column, index) in [a, b, c].into_iter().enumerate() {
+                        let winner = if index == 3 { 0 } else { index };
+                        if winner != 0 && winner != previous {
+                            greedy.push(labels[winner]);
+                            columns.push(column);
+                        }
+                        previous = winner;
+                    }
+                    let mut evidence = CtcEvidence::measure(&labels, rows, &greedy, &columns)?;
+                    evidence.query(&labels, &rows, &[2, 1, 2]);
+                    evidence.validate()?;
+                }
+            }
+        }
         Ok(())
     }
 
