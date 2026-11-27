@@ -14,12 +14,16 @@ use crate::{
     Error, PageNumber,
     geometry::{PageBox, Point, Quad},
     pdf_metadata::{PdfMetadata, resolve_owned},
-    polygon::area,
+    polygon::{area, convex},
     sample_layout::{ImageSampleLayout, image_sample_layout},
 };
 
 pub(crate) const MAX_FORM_DEPTH: usize = 32;
 const MAX_CONTENT_STREAM_NEST: usize = 64;
+
+const fn finite_point(point: &Point) -> bool {
+    point.0.is_finite() && point.1.is_finite()
+}
 
 /// A linear affine PDF transformation (a,b,c,d,e,f).
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -140,10 +144,14 @@ impl ImagePaint {
                     "image OCR point outside native raster".into(),
                 ));
             }
-            Ok(matrix.point(Point(
+            let transformed = matrix.point(Point(
                 point.0 / f64::from(self.width),
                 1.0 - point.1 / f64::from(self.height),
-            )))
+            ));
+            if !finite_point(&transformed) {
+                return Err(Error::Invalid("nonfinite transformed OCR point".into()));
+            }
+            Ok(transformed)
         };
         Ok([
             to_pdf(pixels[3])?,
@@ -157,10 +165,10 @@ impl ImagePaint {
     #[must_use = "check clip visibility before attributing the paint"]
     pub fn wholly_visible_in_clip(&self, quad: &Quad) -> bool {
         self.unsafe_reasons.is_empty()
-            && self
-                .clips
-                .iter()
-                .all(|clip| quad.iter().all(|point| inside_convex(*point, clip, 1e-3)))
+            && convex(quad)
+            && self.clips.iter().all(|clip| {
+                convex(clip) && quad.iter().all(|point| inside_convex(*point, clip, 1e-3))
+            })
     }
 }
 
@@ -277,14 +285,24 @@ struct State {
 
 impl State {
     fn for_page(box_: PageBox) -> Self {
-        Self {
+        let mut state = Self {
             ctm: PdfMatrix::IDENTITY,
-            clips: vec![PdfMatrix::IDENTITY.rect_quad(box_)],
+            clips: Vec::new(),
             clip_unknown: false,
             gs_unsafe: false,
             font: SelectedFont::default(),
             render_mode: 0,
             text_open: false,
+        };
+        state.add_clip(PdfMatrix::IDENTITY.rect_quad(box_));
+        state
+    }
+
+    fn add_clip(&mut self, quad: Quad) {
+        if convex(&quad) {
+            self.clips.push(quad);
+        } else {
+            self.clip_unknown = true;
         }
     }
 }
@@ -310,10 +328,10 @@ impl PathState {
             return;
         }
         if !self.curved_or_unknown && self.rects.len() == 1 && self.subpaths.is_empty() {
-            state.clips.push(self.rects[0]);
+            state.add_clip(self.rects[0]);
         } else if !self.curved_or_unknown && self.rects.is_empty() && self.subpaths.len() == 1 {
             if let Some(quad) = rectangle_path_quad(&self.subpaths[0]) {
-                state.clips.push(quad);
+                state.add_clip(quad);
             } else {
                 state.clip_unknown = true;
             }
@@ -328,7 +346,7 @@ impl PathState {
                 if let Some([x, y, width, height]) = arguments {
                     let x1 = x + width;
                     let y1 = y + height;
-                    if let Ok(bounds) = PageBox::new([x.min(x1), y.min(y1), x.max(x1), y.max(y1)]) {
+                    if let Ok(Some(bounds)) = PageBox::from_unordered_corners([*x, *y, x1, y1]) {
                         self.rects.push(state.ctm.rect_quad(bounds));
                     } else {
                         self.curved_or_unknown = true;
@@ -380,6 +398,9 @@ impl PathState {
 }
 
 fn rectangle_path_quad(points: &[Point]) -> Option<Quad> {
+    if !points.iter().all(finite_point) {
+        return None;
+    }
     let mut cleaned = Vec::with_capacity(points.len());
     for &point in points {
         if cleaned.last().is_none_or(|previous: &Point| {
@@ -396,7 +417,14 @@ fn rectangle_path_quad(points: &[Point]) -> Option<Quad> {
     let lengths = (0..4)
         .map(|i| (quad[(i + 1) % 4].0 - quad[i].0).hypot(quad[(i + 1) % 4].1 - quad[i].1))
         .collect::<Vec<_>>();
-    if lengths.iter().any(|&length| length < 1e-4) || area(&quad) < 1e-8 {
+    let quad_area = area(&quad);
+    if !convex(&quad)
+        || !quad_area.is_finite()
+        || quad_area < 1e-8
+        || lengths
+            .iter()
+            .any(|&length| !length.is_finite() || length < 1e-4)
+    {
         return None;
     }
     for index in 0..4 {
@@ -405,18 +433,16 @@ fn rectangle_path_quad(points: &[Point]) -> Option<Quad> {
         let end = quad[(index + 2) % 4];
         let edge_a = Point(middle.0 - begin.0, middle.1 - begin.1);
         let edge_b = Point(end.0 - middle.0, end.1 - middle.1);
-        let dot = edge_a.0.mul_add(edge_b.0, edge_a.1 * edge_b.1);
-        if dot.abs() > 0.025 * lengths[index] * lengths[(index + 1) % 4] {
+        let a = lengths[index];
+        let b = lengths[(index + 1) % 4];
+        let dot = (edge_a.0 / a).mul_add(edge_b.0 / b, (edge_a.1 / a) * (edge_b.1 / b));
+        if !dot.is_finite() || dot.abs() > 0.025 {
             return None;
         }
     }
-    let expected_fourth = Point(
-        (quad[1].0 + quad[3].0) - quad[2].0,
-        (quad[1].1 + quad[3].1) - quad[2].1,
-    );
-    if (expected_fourth.0 - quad[0].0).hypot(expected_fourth.1 - quad[0].1)
-        > 0.02 * lengths.iter().copied().fold(0.0, f64::max)
-    {
+    let closure = ((quad[1].0 - quad[0].0) - (quad[2].0 - quad[3].0))
+        .hypot((quad[1].1 - quad[0].1) - (quad[2].1 - quad[3].1));
+    if !closure.is_finite() || closure > 0.02 * lengths.iter().copied().fold(0.0, f64::max) {
         return None;
     }
     Some(quad)
@@ -430,6 +456,9 @@ fn inside_convex(point: Point, polygon: &Quad, epsilon: f64) -> bool {
         let end = polygon[(index + 1) % 4];
         let cross =
             (end.0 - begin.0).mul_add(point.1 - begin.1, -(end.1 - begin.1) * (point.0 - begin.0));
+        if !cross.is_finite() {
+            return false;
+        }
         minimum = minimum.min(cross);
         maximum = maximum.max(cross);
     }
@@ -873,6 +902,13 @@ impl ScanContext<'_> {
             self.summary.unknown_paint += 1;
             return Ok(());
         };
+        let page_quad = state.ctm.rect_quad(PageBox::UNIT);
+        if !state.ctm.0.iter().all(|value| value.is_finite()) || !page_quad.iter().all(finite_point)
+        {
+            self.summary.unsafe_image_paints += 1;
+            self.summary.unknown_paint += 1;
+            return Ok(());
+        }
         let mut unsafe_reasons = Vec::new();
         if self.summary.root_group {
             unsafe_reasons.push("page_transparency_group");
@@ -880,7 +916,8 @@ impl ScanContext<'_> {
         if width == 0 || height == 0 || width > 100_000 || height > 100_000 {
             unsafe_reasons.push("invalid_source_dimensions");
         }
-        if state.ctm.area_scale() < 1e-9 || !state.ctm.area_scale().is_finite() {
+        let area_scale = state.ctm.area_scale();
+        if !convex(&page_quad) || area_scale < 1e-9 || !area_scale.is_finite() {
             unsafe_reasons.push("degenerate_image_placement");
         }
         if image_mask(self.source, dict)? {
@@ -927,7 +964,7 @@ impl ScanContext<'_> {
             height,
             sample_layout: image_sample_layout(self.source, dict, resources),
             ctm: state.ctm.0,
-            page_quad: state.ctm.rect_quad(PageBox::new([0.0, 0.0, 1.0, 1.0])?),
+            page_quad,
             clips: state.clips.clone(),
             unsafe_reasons,
         });
@@ -955,7 +992,7 @@ impl ScanContext<'_> {
         }
         if let Some(bounds) = dict.get(b"BBox".as_slice()) {
             match PageBox::from_unordered_corners(array_numbers::<4>(self.source, bounds)?)? {
-                Some(page_box) => child.clips.push(child.ctm.rect_quad(page_box)),
+                Some(page_box) => child.add_clip(child.ctm.rect_quad(page_box)),
                 // A degenerate Form BBox cannot justify visibility proof:
                 // still traverse the content but mark all contained paints
                 // unsafe for source-only or independently admitted OCR.
@@ -1165,6 +1202,10 @@ impl ScanContext<'_> {
                         && let Ok(next) = PdfMatrix::try_from(args)
                     {
                         state.ctm = state.ctm.concat(next);
+                        if !state.ctm.0.iter().all(|value| value.is_finite()) {
+                            self.summary.unknown_paint += 1;
+                            state.clip_unknown = true;
+                        }
                     } else {
                         self.summary.unknown_paint += 1;
                         state.clip_unknown = true;
@@ -1297,7 +1338,7 @@ pub fn enumerate_image_paints(
 
 #[cfg(test)]
 mod tests {
-    use super::{PdfMatrix, enumerate_image_paints};
+    use super::{PdfMatrix, State, enumerate_image_paints, rectangle_path_quad};
     use crate::{PageNumber, geometry::Point, pdf_metadata::PdfMetadata};
 
     fn two_page_pdf_with_one_repeated_image() -> Vec<u8> {
@@ -1329,6 +1370,37 @@ mod tests {
             format!("trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n{table}\n%%EOF\n").as_bytes(),
         );
         source
+    }
+
+    #[test]
+    fn invalid_clips_never_prove_visibility() -> Result<(), crate::Error> {
+        let metadata = PdfMetadata::from_bytes(two_page_pdf_with_one_repeated_image())?;
+        let mut paints = enumerate_image_paints(&metadata, &[PageNumber::new(1)?])?;
+        let mut paint = paints
+            .placements
+            .pop()
+            .ok_or_else(|| crate::Error::Invalid("missing fixture paint".into()))?;
+        let quad = paint.page_quad;
+        assert!(paint.wholly_visible_in_clip(&quad));
+        paint.clips.push([Point(0.0, 0.0); 4]);
+        assert!(!paint.wholly_visible_in_clip(&quad));
+        paint.clips.clear();
+        let mut invalid = quad;
+        invalid[0].0 = f64::NAN;
+        assert!(!paint.wholly_visible_in_clip(&invalid));
+        assert!(rectangle_path_quad(&invalid).is_none());
+        let mut state = State::for_page(crate::geometry::PageBox::UNIT);
+        state.add_clip([Point(0.0, 0.0); 4]);
+        assert!(state.clip_unknown);
+        paint.ctm = [f64::MAX, 0.0, 0.0, 1.0, f64::MAX, 0.0];
+        let native = [
+            Point(0.0, 0.0),
+            Point(2.0, 0.0),
+            Point(2.0, 2.0),
+            Point(0.0, 2.0),
+        ];
+        assert!(paint.source_box_to_pdf(&native).is_err());
+        Ok(())
     }
 
     #[test]
