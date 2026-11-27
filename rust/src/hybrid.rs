@@ -338,8 +338,8 @@ pub fn merge_ocr(
         ..
     } = input;
     let fallback_pages = input.validate_partition()?;
-    let raster_map = pages_by_number(&raster.pages)?;
-    let baseline_map = pages_by_number(&baseline.pages)?;
+    let raster_map = raster.validated_pages()?;
+    let baseline_map = baseline.validated_pages()?;
     if !raster_map.keys().eq(routes.keys())
         || baseline_map.keys().copied().collect::<BTreeSet<_>>() != fallback_pages
     {
@@ -544,16 +544,6 @@ pub(crate) fn masked_source_conflicts(
         .enumerate()
         .filter(|(index, proposal)| required.contains(index) && !proposal.included_as_extra)
         .collect())
-}
-
-fn pages_by_number(pages: &[DraftPage]) -> Result<BTreeMap<PageNumber, &DraftPage>, Error> {
-    let mut output = BTreeMap::new();
-    for page in pages {
-        if output.insert(PageNumber::new(page.page)?, page).is_some() {
-            return Err(Error::Invalid("duplicate OCR page".into()));
-        }
-    }
-    Ok(output)
 }
 
 fn round4(value: f64) -> f64 {

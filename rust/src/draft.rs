@@ -3,6 +3,7 @@
 //! OCR observations are tied to one exact source PDF, not only a filename.
 
 use std::{
+    collections::BTreeMap,
     fs::File,
     io::{BufReader, Read, Write},
     path::Path,
@@ -11,7 +12,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{Error, geometry::Quad};
+use crate::{Error, PageNumber, geometry::Quad};
 
 /// A PDF-bound OCR draft with original, unmodified Unicode observations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,14 +72,64 @@ impl OcrDraft {
         }
     }
 
-    /// Verify exact input provenance before any merge or overlay.
+    /// Validate the importer schema and shared structural constraints.
+    ///
+    /// The returned index borrows the draft, preventing mutation while it
+    /// is in use. Empty drafts, blank text, and finite degenerate quads are
+    /// legitimate observations; sampling and import eligibility impose
+    /// their own stronger constraints.
     ///
     /// # Errors
-    /// Returns an error for an unreadable PDF, unsupported schema or differing digest.
-    pub fn verify_pdf(&self, pdf: &Path) -> Result<(), Error> {
+    /// Rejects unsupported schema, malformed source identity, duplicate or
+    /// zero page numbers, invalid confidence or nonfinite coordinates.
+    pub fn validated_pages(&self) -> Result<BTreeMap<PageNumber, &DraftPage>, Error> {
         if self.schema_version != 3 {
             return Err(Error::Invalid("unsupported OCR importer schema".into()));
         }
+        if self.pdf_sha256.len() != 64
+            || !self
+                .pdf_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(Error::Invalid(
+                "invalid lowercase OCR source SHA-256".into(),
+            ));
+        }
+        let mut pages = BTreeMap::new();
+        let finite = |quad: &Quad| {
+            quad.iter()
+                .all(|point| point.0.is_finite() && point.1.is_finite())
+        };
+        for page in &self.pages {
+            let number = PageNumber::new(page.page)?;
+            if pages.insert(number, page).is_some() {
+                return Err(Error::Invalid(format!("duplicate OCR page {}", page.page)));
+            }
+            for (index, line) in page.lines.iter().enumerate() {
+                if !(0.0..=1.0).contains(&line.confidence) || !finite(&line.quad) {
+                    return Err(Error::Invalid(format!(
+                        "invalid OCR confidence or coordinates on page {}, line {index}",
+                        page.page
+                    )));
+                }
+            }
+            if !page.native_text_regions.iter().all(finite) {
+                return Err(Error::Invalid(format!(
+                    "invalid native text coordinates on page {}",
+                    page.page
+                )));
+            }
+        }
+        Ok(pages)
+    }
+
+    /// Verify exact input provenance before any merge or overlay.
+    ///
+    /// # Errors
+    /// Returns an error for an unreadable PDF, invalid draft or differing digest.
+    pub fn verify_pdf(&self, pdf: &Path) -> Result<(), Error> {
+        self.validated_pages()?;
         if self.pdf_sha256 != sha256_file(pdf)? {
             return Err(Error::Invalid("OCR source PDF changed".into()));
         }
@@ -114,7 +165,7 @@ pub fn sha256_file(path: &Path) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DraftPage, OcrDraft, OcrLine};
+    use super::{DraftPage, OcrDraft, OcrLine, sha256_file};
     use crate::geometry::Point;
 
     #[test]
@@ -126,6 +177,83 @@ mod tests {
         let decoded: Point = serde_json::from_str(&encoded)?;
         assert_eq!(point.0.to_bits(), decoded.0.to_bits());
         assert_eq!(point.1.to_bits(), decoded.1.to_bits());
+        Ok(())
+    }
+
+    #[test]
+    fn admission_rejects_malformed_structure_before_any_consumer_uses_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pdf = tempfile::NamedTempFile::new()?;
+        let original = OcrDraft::new(
+            sha256_file(pdf.path())?,
+            "fixture".into(),
+            vec![DraftPage {
+                page: 1,
+                lines: vec![OcrLine {
+                    text: String::new(),
+                    confidence: 0.0,
+                    quad: [Point(1.0, 2.0); 4],
+                    reviewed: false,
+                }],
+                native_text_regions: vec![],
+            }],
+        );
+        assert_eq!(original.validated_pages()?.len(), 1);
+        original.verify_pdf(pdf.path())?;
+        let mut empty = original.clone();
+        empty.pages.clear();
+        empty.verify_pdf(pdf.path())?;
+
+        let truth = crate::quality_eval::GroundTruth {
+            schema_version: 1,
+            source_pdf_sha256: original.pdf_sha256.clone(),
+            provenance: "fixture".into(),
+            coordinate_system: "PDF user space".into(),
+            samples: vec![crate::quality_eval::ReferenceSample {
+                page: 1,
+                center: Point(1.0, 2.0),
+                text: "reference".into(),
+                kind: "fixture".into(),
+            }],
+        };
+        assert_eq!(
+            crate::quality_eval::evaluate(&truth, &original)?
+                .overall
+                .missing,
+            1
+        );
+        let mutations: [fn(&mut OcrDraft); 8] = [
+            |draft| draft.schema_version = 0,
+            |draft| draft.pdf_sha256.make_ascii_uppercase(),
+            |draft| draft.pages[0].page = 0,
+            |draft| draft.pages.push(draft.pages[0].clone()),
+            |draft| draft.pages[0].lines[0].confidence = f64::NAN,
+            |draft| draft.pages[0].lines[0].confidence = 1.1,
+            |draft| draft.pages[0].lines[0].quad[2].0 = f64::INFINITY,
+            |draft| {
+                draft.pages[0]
+                    .native_text_regions
+                    .push([Point(f64::NAN, 1.0); 4])
+            },
+        ];
+        for mutate in mutations {
+            let mut invalid = original.clone();
+            mutate(&mut invalid);
+            assert!(invalid.validated_pages().is_err());
+            assert!(invalid.verify_pdf(pdf.path()).is_err());
+            assert!(crate::draft_compare::compare(&original, &invalid, 0.5, 0.9).is_err());
+            assert!(crate::quality_eval::evaluate(&truth, &invalid).is_err());
+            #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+            assert!(
+                crate::refinement::refinement_plan(
+                    &invalid,
+                    crate::refinement::RefinementScope::ByConfidence { pages: None },
+                    1,
+                    crate::refinement::RefinementPolicy::default(),
+                )
+                .is_err()
+            );
+        }
         Ok(())
     }
 

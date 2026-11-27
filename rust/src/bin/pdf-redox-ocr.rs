@@ -204,6 +204,7 @@ fn configured_policy(args: &Args) -> PipelinePolicy {
 }
 
 fn importer_document(draft: &OcrDraft) -> Result<OcrDocument, Box<dyn Error>> {
+    draft.validated_pages()?;
     let mut pages = Vec::with_capacity(draft.pages.len());
     for page in &draft.pages {
         let lines = page
