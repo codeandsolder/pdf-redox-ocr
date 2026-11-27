@@ -1,10 +1,8 @@
 name: Shared workflow policy
 on:
   pull_request:
-    paths: [".github/workflows/**"]
   push:
     branches: [main]
-    paths: [".github/workflows/**"]
   workflow_dispatch:
 
 concurrency:
@@ -17,3 +15,12 @@ permissions:
 jobs:
   validate:
     uses: codeandsolder/ci-workflows/.github/workflows/workflow-concurrency.yml@4c7fc62a9f9ec37aaa7c155d263cd5025e446a53 # main
+
+  merge-gate:
+    name: Workflow policy merge gate
+    if: ${{ always() }}
+    needs: [validate]
+    uses: codeandsolder/ci-workflows/.github/workflows/merge-gate.yml@4c7fc62a9f9ec37aaa7c155d263cd5025e446a53 # main
+    with:
+      needs-json: ${{ toJSON(needs) }}
+      expected-results: '[["validate","success"]]'

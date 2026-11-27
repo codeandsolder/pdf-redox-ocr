@@ -39,3 +39,12 @@ jobs:
         cargo test --locked --all-features
         RUSTDOCFLAGS=-Dwarnings cargo doc --locked --all-features --no-deps
       rust-components: "clippy"
+
+  merge-gate:
+    name: Rust CI merge gate
+    if: ${{ always() }}
+    needs: [stable-core, native-pdf]
+    uses: codeandsolder/ci-workflows/.github/workflows/merge-gate.yml@4c7fc62a9f9ec37aaa7c155d263cd5025e446a53 # main
+    with:
+      needs-json: ${{ toJSON(needs) }}
+      expected-results: '[["stable-core","success"],["native-pdf","success"]]'
