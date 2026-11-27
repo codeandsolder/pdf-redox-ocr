@@ -131,10 +131,10 @@ fn request_region(
     // touching an artificial crop edge.
     let pad = 12.0 / scale;
     let region = PageBox::new([
-        (bounds.min_x - pad).max(page.x0),
-        (bounds.min_y - pad).max(page.y0),
-        (bounds.max_x + pad).min(page.x1),
-        (bounds.max_y + pad).min(page.y1),
+        (bounds.min_x - pad).max(page.x0()),
+        (bounds.min_y - pad).max(page.y0()),
+        (bounds.max_x + pad).min(page.x1()),
+        (bounds.max_y + pad).min(page.y1()),
     ])
     .ok()?;
     let estimate = num_traits::ToPrimitive::to_u64(&region.width().mul_add(scale, 4.0).ceil())?
@@ -151,7 +151,10 @@ fn request_region(
 }
 
 fn contains(outer: PageBox, inner: PageBox) -> bool {
-    inner.x0 >= outer.x0 && inner.y0 >= outer.y0 && inner.x1 <= outer.x1 && inner.y1 <= outer.y1
+    inner.x0() >= outer.x0()
+        && inner.y0() >= outer.y0()
+        && inner.x1() <= outer.x1()
+        && inner.y1() <= outer.y1()
 }
 
 fn plan_regions(
@@ -240,10 +243,10 @@ impl RegionPass<'_> {
                     page,
                     seed_paint_index: request.paint_index,
                     requested_region: [
-                        request.region.x0,
-                        request.region.y0,
-                        request.region.x1,
-                        request.region.y1,
+                        request.region.x0(),
+                        request.region.y0(),
+                        request.region.x1(),
+                        request.region.y1(),
                     ],
                     dpi: request.dpi,
                     outcome,
