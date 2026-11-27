@@ -1979,7 +1979,7 @@ checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 [[package]]
 name = "pdf-redox"
 version = "0.1.0"
-source = "git+https://github.com/codeandsolder/pdf-redox?rev=21766b57d14e98ed54da3d39b05b1a79f5ba8666#21766b57d14e98ed54da3d39b05b1a79f5ba8666"
+source = "git+https://github.com/codeandsolder/pdf-redox?rev=39dcd198e5aba6fa1628b9da91022af2c3668407#39dcd198e5aba6fa1628b9da91022af2c3668407"
 dependencies = [
  "color_quant 2.0.0",
  "fast_image_resize",
