@@ -112,6 +112,8 @@ pub struct ImagePaint {
     pub height: u32,
     /// Resolved packed sample layout for counterfactual masks.
     pub sample_layout: ImageSampleLayout,
+    /// Paint visibility depends on an optional-content group or membership dictionary.
+    pub optional_content: bool,
     /// PDF user-space CTM at paint invocation.
     pub ctm: [f64; 6],
     /// Image unit square in PDF user coordinates.
@@ -190,6 +192,8 @@ pub enum NativeOnlyBlocker {
     StreamState,
     /// Unclassified page-level rendering context.
     PageContext,
+    /// An optional-content scope requires the actual renderer to establish visibility.
+    OptionalContent,
 }
 
 /// Source paint totals and page purity evidence.
@@ -230,8 +234,12 @@ pub struct PagePaintSummary {
 }
 
 impl PagePaintSummary {
-    const fn certify(&mut self) {
-        self.image_only_after_native = self.image_paints > 0 && self.closed_visual_paint();
+    fn certify(&mut self) {
+        self.image_only_after_native = self.image_paints > 0
+            && self.closed_visual_paint()
+            && !self
+                .native_only_blockers
+                .contains(&NativeOnlyBlocker::OptionalContent);
     }
 
     const fn closed_visual_paint(&self) -> bool {
@@ -276,6 +284,7 @@ struct State {
     clips: Vec<Quad>,
     clip_unknown: bool,
     gs_unsafe: bool,
+    optional_content: bool,
     // The PDF graphics state holds an already selected *font object*.
     // Once Tf executes, nested Forms must inherit its classification even
     // when their own Resources reuse the same font name for another font.
@@ -291,6 +300,7 @@ impl State {
             clips: Vec::new(),
             clip_unknown: false,
             gs_unsafe: false,
+            optional_content: false,
             font: SelectedFont::default(),
             render_mode: 0,
             text_open: false,
@@ -862,6 +872,11 @@ impl ScanContext<'_> {
             self.summary.unknown_paint += 1;
             return Ok(());
         };
+        if dict.contains_key(b"OC".as_slice()) {
+            self.summary
+                .native_only_blockers
+                .insert(NativeOnlyBlocker::OptionalContent);
+        }
         match subtype(self.source, dict)?.as_deref() {
             Some(b"Image") => self.visit_image(id, dict, resources, state),
             Some(b"Form") => self.visit_form(id, dict, resources, state, depth),
@@ -948,6 +963,7 @@ impl ScanContext<'_> {
             width,
             height,
             sample_layout: image_sample_layout(self.source, dict, resources),
+            optional_content: state.optional_content || dict.contains_key(b"OC".as_slice()),
             ctm: state.ctm.0,
             page_quad,
             clips: state.clips.clone(),
@@ -970,6 +986,7 @@ impl ScanContext<'_> {
         }
         self.summary.forms_visited += 1;
         let mut child = state.clone();
+        child.optional_content |= dict.contains_key(b"OC".as_slice());
         if let Some(matrix) = dict.get(b"Matrix".as_slice()) {
             child.ctm = child
                 .ctm
@@ -1010,7 +1027,8 @@ impl ScanContext<'_> {
 #[derive(Default)]
 struct NativeStreamClosure {
     text_open: bool,
-    marked_content: usize,
+    marked_content: Vec<bool>,
+    marked_content_invalid: bool,
     compatibility: usize,
 }
 
@@ -1045,9 +1063,20 @@ impl NativeStreamClosure {
             b"Tj" | b"TJ" | b"'" | b"\"" if !self.text_open => {
                 return Some(NativeOnlyBlocker::StreamState);
             }
-            b"BMC" | b"BDC" => self.marked_content += 1,
+            b"BMC" | b"BDC" => {
+                let optional = match instruction.operands().next() {
+                    Some(HayroObject::Name(name)) => name.as_ref() == b"OC",
+                    _ => true,
+                };
+                self.marked_content
+                    .push(optional || self.optional_content());
+                if optional {
+                    return Some(NativeOnlyBlocker::OptionalContent);
+                }
+            }
             b"EMC" => {
-                if !Self::close_scope(&mut self.marked_content) {
+                if self.marked_content.pop().is_none() {
+                    self.marked_content_invalid = true;
                     return Some(NativeOnlyBlocker::StreamState);
                 }
             }
@@ -1073,8 +1102,12 @@ impl NativeStreamClosure {
         None
     }
 
-    const fn balanced(&self) -> bool {
-        !self.text_open && self.marked_content == 0 && self.compatibility == 0
+    fn optional_content(&self) -> bool {
+        self.marked_content.last().copied().unwrap_or(false)
+    }
+
+    fn balanced(&self) -> bool {
+        !self.text_open && self.marked_content.is_empty() && self.compatibility == 0
     }
 }
 
@@ -1170,6 +1203,7 @@ impl ScanContext<'_> {
         let mut path = PathState::default();
         let mut next_do = 0_u32;
         let mut closure = NativeStreamClosure::default();
+        let inherited_optional_content = state.optional_content;
 
         while let Some(instruction) = iter.next() {
             let op: &[u8] = &instruction.operator[..];
@@ -1179,6 +1213,9 @@ impl ScanContext<'_> {
             {
                 self.summary.native_only_blockers.insert(blocker);
             }
+            // Marked-content scopes are independent of q/Q. Recompute the
+            // effective scope even when graphics state was restored.
+            state.optional_content = inherited_optional_content || closure.optional_content();
             if let Some(visual) = path.consume(op, numbers.as_deref(), &mut state) {
                 if visual {
                     self.summary.non_image_visual_paint += 1;
@@ -1240,7 +1277,12 @@ impl ScanContext<'_> {
                 _ => self.summary.unknown_paint += 1,
             }
         }
-        if !saved_states.is_empty() || path.pending_clip || state.text_open {
+        if !saved_states.is_empty()
+            || path.pending_clip
+            || state.text_open
+            || closure.marked_content_invalid
+            || !closure.marked_content.is_empty()
+        {
             self.summary.unbalanced_stream += 1;
         }
         if !closure.balanced()

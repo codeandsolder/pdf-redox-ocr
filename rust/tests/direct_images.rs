@@ -565,3 +565,58 @@ fn legacy_inventory_rejects_duplicate_invocations_without_losing_other_pages()
     assert_eq!(bound.len(), 1);
     Ok(())
 }
+
+#[test]
+fn optional_content_scopes_require_rendered_visibility() -> Result<(), Box<dyn std::error::Error>> {
+    use pdf_redox_ocr::paint_scan::NativeOnlyBlocker;
+    let bytes = support::pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [8 0 R] /D << /OFF [8 0 R] >> >> >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Resources << /XObject << /Im 5 0 R /Fm 6 0 R /Layered 7 0 R >> /Properties << /Hidden 8 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        support::stream("", b"q /OC /Hidden BDC Q /Span BMC q 20 0 0 20 0 0 cm /Im Do Q EMC EMC q 20 0 0 20 30 0 cm /Im Do Q /Fm Do q 20 0 0 20 90 0 cm /Layered Do Q"),
+        support::stream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", &[0]),
+        support::stream("/Type /XObject /Subtype /Form /BBox [0 0 300 300] /OC 8 0 R /Resources << /XObject << /Im 5 0 R >> >>", b"q 20 0 0 20 60 0 cm /Im Do Q"),
+        support::stream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /OC 8 0 R", &[0]),
+        b"<< /Type /OCG /Name (Hidden) >>".to_vec(),
+    ]);
+    let doc = PdfMetadata::from_bytes(bytes)?;
+    let pages = [PageNumber::new(1)?];
+    let report = enumerate_image_paints(&doc, &pages)?;
+    assert_eq!(
+        report
+            .placements
+            .iter()
+            .map(|paint| paint.optional_content)
+            .collect::<Vec<_>>(),
+        [true, false, true, true]
+    );
+    assert!(!report.pages[0].image_only_after_native);
+    assert!(
+        report.pages[0]
+            .native_only_blockers
+            .contains(&NativeOnlyBlocker::OptionalContent)
+    );
+    assert!(
+        report
+            .placements
+            .iter()
+            .all(|paint| paint.unsafe_reasons.is_empty())
+    );
+    assert!(pdf_redox_ocr::source_ocr::source_only_candidates(&report, 100).is_empty());
+    let result = direct_native_images(
+        &doc,
+        &pages,
+        &BTreeSet::from(["5:0".into(), "7:0".into()]),
+        &report.placements,
+        NativeImageBudget::default(),
+    )?;
+    assert!(
+        result.appearances.get(&report.placements[1]).is_some(),
+        "{:?}",
+        result.stats
+    );
+    assert!(result.appearances.get(&report.placements[0]).is_none());
+    assert!(result.appearances.get(&report.placements[2]).is_none());
+    assert!(result.appearances.get(&report.placements[3]).is_none());
+    Ok(())
+}
