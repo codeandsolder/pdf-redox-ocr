@@ -479,8 +479,12 @@ fn assert_low_confidence_residual_accepted(
     );
     assert_eq!(accepted.draft.pages[0].lines[0].confidence, 0.64);
     assert_eq!(accepted.draft.pages[0].lines[1].text, "CAPACITOR 47uF 16V");
-    assert_eq!(accepted.proposals[0].page_overlap, 0.0);
-    assert!(accepted.proposals[0].raw_page_overlap > 0.99);
+    assert_eq!(accepted.proposals[0].page_overlap, Some(0.0));
+    assert!(
+        accepted.proposals[0]
+            .raw_page_overlap
+            .is_some_and(|overlap| overlap > 0.99)
+    );
     assert!(accepted.proposals[0].included_as_extra);
     Ok(())
 }
@@ -511,7 +515,11 @@ fn invisible_native_text_still_excludes_duplicate_proven_source_lines()
         .find(|p| p.page == 1)
         .ok_or("missing visible proposal")?;
     assert!(visible.verified_visible_source);
-    assert!(visible.native_overlap >= 0.20);
+    assert!(
+        visible
+            .native_overlap
+            .is_some_and(|overlap| overlap >= 0.20)
+    );
     assert!(!visible.included_as_extra);
     assert!(
         output

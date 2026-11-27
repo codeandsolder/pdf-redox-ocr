@@ -263,26 +263,7 @@ pub fn character_edits(reference: &str, prediction: &str) -> usize {
 
 /// Half-plane membership for an arbitrary convex OCR quadrilateral.
 pub(crate) fn contains(quad: &Quad, point: Point) -> bool {
-    if !point.0.is_finite()
-        || !point.1.is_finite()
-        || quad.iter().any(|p| !p.0.is_finite() || !p.1.is_finite())
-    {
-        return false;
-    }
-    let (mut positive, mut negative, mut signed_area) = (false, false, 0.0_f64);
-    let origin = quad[0];
-    for (index, &a) in quad.iter().enumerate() {
-        let b = quad[(index + 1) % quad.len()];
-        let cross = (b.0 - a.0).mul_add(point.1 - a.1, -(b.1 - a.1) * (point.0 - a.0));
-        positive |= cross > 1e-9;
-        negative |= cross < -1e-9;
-        let ax = a.0 - origin.0;
-        let ay = a.1 - origin.1;
-        let bx = b.0 - origin.0;
-        let by = b.1 - origin.1;
-        signed_area += ax.mul_add(by, -bx * ay);
-    }
-    !(positive && negative) && signed_area.is_finite() && signed_area.abs() > 1e-10
+    crate::polygon::area(quad) > 5e-11 && crate::polygon::contains_points(quad, &[point], 1e-9)
 }
 
 pub(crate) fn validate(reference: &GroundTruth, draft: &OcrDraft) -> Result<(), Error> {
@@ -388,11 +369,11 @@ fn candidate_lines<'a>(
                 *page == sample.page && contains(&line.quad, sample.center)
             })
             .map(|(index, (_, _, line))| {
-                let center_x = line.quad.iter().map(|p| p.0).sum::<f64>() / 4.0;
-                let center_y = line.quad.iter().map(|p| p.1).sum::<f64>() / 4.0;
+                let center_x = line.quad.iter().map(|p| p.0 * 0.25).sum::<f64>();
+                let center_y = line.quad.iter().map(|p| p.1 * 0.25).sum::<f64>();
                 let dx = center_x - sample.center.0;
                 let dy = center_y - sample.center.1;
-                (index, dx.mul_add(dx, dy * dy))
+                (index, dx.hypot(dy))
             })
             .collect::<Vec<_>>();
         found.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));

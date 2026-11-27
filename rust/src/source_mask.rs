@@ -12,7 +12,7 @@ use crate::{
     draft::OcrLine,
     geometry::{Point, Quad},
     paint_scan::ImagePaint,
-    polygon::area,
+    polygon::convex,
     sample_layout::color_components,
     source_samples::PackedSamples,
 };
@@ -317,7 +317,7 @@ fn to_top_left(quad: &Quad, width: u32, height: u32) -> Result<Quad, Error> {
     let width = f64::from(width);
     let height = f64::from(height);
     let result = quad.map(|p| Point(p.0, height - p.1));
-    if area(&result) <= 1e-8
+    if !convex(&result)
         || result.iter().any(|p| {
             !p.0.is_finite()
                 || !p.1.is_finite()

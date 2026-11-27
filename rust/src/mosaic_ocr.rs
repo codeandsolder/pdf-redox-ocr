@@ -18,25 +18,7 @@ use crate::{
 };
 
 fn inside_convex(point: Point, polygon: &Quad) -> bool {
-    if crate::polygon::area(polygon) <= 1e-9 {
-        return false;
-    }
-    let (mut positive, mut negative) = (false, false);
-    for index in 0..4 {
-        let from = polygon[index];
-        let to = polygon[(index + 1) % 4];
-        let cross =
-            (to.0 - from.0).mul_add(point.1 - from.1, -(to.1 - from.1) * (point.0 - from.0));
-        if cross > 1e-5 {
-            positive = true;
-        } else if cross < -1e-5 {
-            negative = true;
-        }
-        if positive && negative {
-            return false;
-        }
-    }
-    true
+    crate::polygon::area(polygon) > 1e-9 && crate::polygon::contains_points(polygon, &[point], 1e-5)
 }
 
 fn disjoint_groups(plan: &MosaicPlan, paints: &[ImagePaint]) -> bool {

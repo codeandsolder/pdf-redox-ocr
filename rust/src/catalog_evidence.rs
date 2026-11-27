@@ -11,7 +11,7 @@ use crate::{
     Error, PageNumber,
     character_alignment::RunAlignment,
     geometry::{Point, Quad, QuadBounds},
-    polygon::{area, clip_convex},
+    polygon::{area, convex, intersection_area},
     recognition::{RasterCharacterAudit, RasterCharacterMapping, RasterLocation},
 };
 
@@ -109,10 +109,7 @@ impl<'a> CatalogIndex<'a> {
                 }
                 let quad = placement.page_quad.map(|[x, y]| Point(x, y));
                 let measure = area(&quad);
-                if !measure.is_finite()
-                    || measure <= 1e-9
-                    || quad.iter().any(|p| !p.0.is_finite() || !p.1.is_finite())
-                {
+                if !measure.is_finite() || measure <= 1e-9 || !convex(&quad) {
                     return Err(Error::Invalid("invalid vector glyph geometry".into()));
                 }
                 let bounds = QuadBounds::new(&quad);
@@ -148,7 +145,7 @@ enum Association<'a> {
 fn associate<'a>(ink: &Quad, placements: &'a [Placement<'a>]) -> Association<'a> {
     let bounds = QuadBounds::new(ink);
     let ink_area = area(ink);
-    if ink_area <= 1e-9 || !ink_area.is_finite() {
+    if ink_area <= 1e-9 || !ink_area.is_finite() || !convex(ink) {
         return Association::None;
     }
     let end = placements.partition_point(|p| p.bounds.min_x < bounds.max_x);
@@ -158,7 +155,9 @@ fn associate<'a>(ink: &Quad, placements: &'a [Placement<'a>]) -> Association<'a>
         if !bounds.intersects(p.bounds) {
             continue;
         }
-        let intersection = area(&clip_convex(ink, &p.quad));
+        let Some(intersection) = intersection_area(ink, &p.quad) else {
+            return Association::PartialOrMultiple;
+        };
         let ink_coverage = intersection / ink_area;
         let vector_coverage = intersection / p.area;
         // A large unrelated rule may cross the glyph, or a tiny detached

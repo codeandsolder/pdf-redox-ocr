@@ -90,7 +90,8 @@ fn components<'a>(
         let region = QuadBounds::new(&line.quad);
         for (right, other) in candidate.iter().enumerate() {
             if region.intersects(bounds[right])
-                && overlap_fraction(&line.quad, &other.quad) >= minimum_overlap
+                && overlap_fraction(&line.quad, &other.quad)
+                    .is_some_and(|overlap| overlap >= minimum_overlap)
             {
                 components.connect(left, baseline.len() + right);
             }
@@ -134,7 +135,7 @@ fn classify<'a>(
             let canonical = character_edits(&normalized(left), &normalized(right));
             edits = Some(raw);
             normalized_edits = Some(canonical);
-            overlap = Some(overlap_fraction(&a.line.quad, &b.line.quad));
+            overlap = overlap_fraction(&a.line.quad, &b.line.quad);
             if raw == 0 {
                 LineAgreement::Exact
             } else if canonical == 0 {
