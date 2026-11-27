@@ -131,8 +131,11 @@ struct CropEvidence {
 }
 
 fn significant_overlap(first: &Quad, second: &Quad) -> bool {
+    if !crate::polygon::convex(first) || !crate::polygon::convex(second) {
+        return true;
+    }
     QuadBounds::new(first).intersects(QuadBounds::new(second))
-        && overlap_fraction(first, second) > 0.01
+        && overlap_fraction(first, second).is_none_or(|overlap| overlap > 0.01)
 }
 
 fn added_strip(

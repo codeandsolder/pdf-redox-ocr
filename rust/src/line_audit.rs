@@ -23,7 +23,7 @@ use crate::{
     line_frame::{LineAxis, LineFrame, SampleWindow},
     pdf_metadata::PdfMetadata,
     pixel_regions::{InkBounds, PixelRegion},
-    polygon::{area, clip_convex, convex},
+    polygon::{area, clip_convex, convex, intersection_area},
     rasterize::{calculate_crop, render_crop},
 };
 
@@ -507,18 +507,20 @@ fn boundary_overlap(
     candidate_components: &[(usize, &MappedComponent)],
     peer: BoundaryPeer,
     peer_quad: &Quad,
-) -> Option<BoundaryOverlap> {
+) -> Result<Option<BoundaryOverlap>, Error> {
     if !QuadBounds::new(expanded).intersects(QuadBounds::new(peer_quad)) {
-        return None;
+        return Ok(None);
     }
-    let expanded_overlap = area(&clip_convex(expanded, peer_quad));
+    let invalid = || Error::Invalid("unmeasurable peer geometry in boundary audit".into());
+    let expanded_overlap = intersection_area(expanded, peer_quad).ok_or_else(invalid)?;
     if !expanded_overlap.is_finite() || expanded_overlap <= 1e-9 {
-        return None;
+        return Ok(None);
     }
     let intersections = strips
         .iter()
         .map(|strip| clip_convex(strip, peer_quad))
-        .collect::<Vec<_>>();
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(invalid)?;
     let overlap = intersections.iter().map(|i| area(i)).sum::<f64>();
     let strip_area = strips.iter().map(|q| area(q)).sum::<f64>();
     let peer_area = area(peer_quad);
@@ -527,24 +529,29 @@ fn boundary_overlap(
             .iter()
             .any(|a| !a.is_finite() || *a <= 1e-9)
     {
-        return None;
+        return Err(invalid());
     }
-    let component_indices = candidate_components
-        .iter()
-        .filter(|(_, c)| {
-            intersections
-                .iter()
-                .any(|i| area(&clip_convex(i, &c.ink_quad)) > 1e-9)
-        })
-        .map(|(i, _)| *i)
-        .collect();
-    Some(BoundaryOverlap {
+    let mut component_indices = Vec::new();
+    for (index, component) in candidate_components {
+        for intersection in &intersections {
+            let overlap =
+                area(&clip_convex(intersection, &component.ink_quad).ok_or_else(invalid)?);
+            if !overlap.is_finite() {
+                return Err(invalid());
+            }
+            if overlap > 1e-9 {
+                component_indices.push(*index);
+                break;
+            }
+        }
+    }
+    Ok(Some(BoundaryOverlap {
         peer,
         strip_fraction: (overlap / strip_area).clamp(0.0, 1.0),
         peer_fraction: (overlap / peer_area).clamp(0.0, 1.0),
         expanded_peer_fraction: (expanded_overlap / peer_area).clamp(0.0, 1.0),
         component_indices,
-    })
+    }))
 }
 
 /// The reading-axis strip covers the full proposed band. Top/bottom
@@ -648,13 +655,16 @@ fn mapped_boundary_extensions(
                 .iter()
                 .enumerate()
                 .map(|(region_index, quad)| (BoundaryPeer::NativeText { region_index }, quad));
-            let (overlaps, peer_quads): (Vec<_>, Vec<_>) = peers
-                .chain(native)
-                .filter_map(|(peer, quad)| {
-                    boundary_overlap(&proposed_quad, &added_strips, &components, peer, quad)
-                        .map(|overlap| (overlap, *quad))
-                })
-                .unzip();
+            let mut overlaps = Vec::new();
+            let mut peer_quads = Vec::new();
+            for (peer, quad) in peers.chain(native) {
+                if let Some(overlap) =
+                    boundary_overlap(&proposed_quad, &added_strips, &components, peer, quad)?
+                {
+                    overlaps.push(overlap);
+                    peer_quads.push(*quad);
+                }
+            }
             let ink_accounting =
                 sample.account(evidence.expanded, &peer_quads, remaining_checks)?;
             Ok(MappedBoundaryExtension {
