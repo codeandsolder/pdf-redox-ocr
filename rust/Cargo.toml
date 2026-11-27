@@ -18,7 +18,7 @@ num-traits = "0.2"
 unicode-normalization = "0.1"
 clap = { version = "4.5", features = ["derive"], optional = true }
 image = { version = "0.25.10", default-features = false, features = ["pnm", "png"] }
-pdf-redox = { git = "https://github.com/codeandsolder/pdf-redox", rev = "39dcd198e5aba6fa1628b9da91022af2c3668407", package = "pdf-redox", optional = true }
+pdf-redox = { git = "https://github.com/codeandsolder/pdf-redox", rev = "1f2c6b4c64bf0297e0f0bd49b83240193021afff", package = "pdf-redox", optional = true }
 oar-ocr = { version = "=0.11.0", features = ["auto-download"], optional = true }
 tempfile = "3.27"
 hayro-syntax = { git = "https://github.com/codeandsolder/hayro", rev = "68a799c971877c150c79f2adeb76b4c81e988899", default-features = false, features = ["std", "images"], optional = true }
