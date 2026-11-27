@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use crate::{
-    Error,
+    Error, PageNumber,
     candidate_ink::{CandidateMapping, SourceInk},
     character_alignment::RunAlignment,
     ctc_alignment::SequenceAlignment,
@@ -501,8 +501,7 @@ pub fn rank<'a>(
     report: &RefinementReport,
     banks: &[&'a ReviewedGlyphBank],
 ) -> Result<(RankingReport<'a>, OcrDraft), Error> {
-    if source.schema_version != 3
-        || report.schema_version != 4
+    if report.schema_version != 4
         || source.pdf_sha256 != report.pdf_sha256
         || source.model != report.source_model
         || banks.is_empty()
@@ -510,13 +509,8 @@ pub fn rank<'a>(
     {
         return Err(invalid("incompatible source, report, or donor inputs"));
     }
+    let pages = source.validated_pages()?;
     let donors = collect_donors(banks, report.dpi)?;
-    let mut pages = BTreeMap::new();
-    for page in &source.pages {
-        if page.page == 0 || pages.insert(page.page, page).is_some() {
-            return Err(invalid("duplicate or invalid source page"));
-        }
-    }
     let mut seen = BTreeSet::new();
     let mut lines = Vec::new();
     for proposal in &report.proposals {
@@ -524,7 +518,7 @@ pub fn rank<'a>(
             return Err(invalid("duplicate refinement observation"));
         }
         let line = pages
-            .get(&proposal.page)
+            .get(&PageNumber::new(proposal.page)?)
             .and_then(|p| p.lines.get(proposal.line_index))
             .ok_or_else(|| invalid("unknown refinement observation"))?;
         validate_proposal(proposal, line)?;

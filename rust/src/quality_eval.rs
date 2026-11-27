@@ -286,6 +286,7 @@ pub(crate) fn contains(quad: &Quad, point: Point) -> bool {
 }
 
 pub(crate) fn validate(reference: &GroundTruth, draft: &OcrDraft) -> Result<(), Error> {
+    draft.validated_pages()?;
     if reference.schema_version != 1
         || reference.coordinate_system != "PDF user space"
         || reference.source_pdf_sha256 != draft.pdf_sha256
@@ -296,7 +297,6 @@ pub(crate) fn validate(reference: &GroundTruth, draft: &OcrDraft) -> Result<(), 
             .all(|b| b.is_ascii_hexdigit())
         || reference.provenance.trim().is_empty()
         || reference.samples.is_empty()
-        || draft.schema_version != 3
     {
         return Err(Error::Invalid(
             "invalid or source-mismatched manual OCR reference".into(),
@@ -318,17 +318,6 @@ pub(crate) fn validate(reference: &GroundTruth, draft: &OcrDraft) -> Result<(), 
             return Err(Error::Invalid(
                 "invalid or duplicate reference anchor".into(),
             ));
-        }
-    }
-    let mut pages = BTreeSet::new();
-    for page in &draft.pages {
-        if page.page == 0 || !pages.insert(page.page) {
-            return Err(Error::Invalid("invalid or duplicate draft page".into()));
-        }
-        for line in &page.lines {
-            if !line.confidence.is_finite() || !(0.0..=1.0).contains(&line.confidence) {
-                return Err(Error::Invalid("invalid OCR confidence".into()));
-            }
         }
     }
     Ok(())

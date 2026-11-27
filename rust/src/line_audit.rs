@@ -691,13 +691,9 @@ pub fn audit_lines(
         ));
     }
     let metadata = PdfMetadata::open(pdf)?;
-    let mut by_page = BTreeMap::new();
-    for page in &draft.pages {
-        let number = PageNumber::new(page.page)?;
+    let by_page = draft.validated_pages()?;
+    for &number in by_page.keys() {
         metadata.mapper(number)?;
-        if by_page.insert(number, page).is_some() {
-            return Err(Error::Invalid("duplicate source draft page".into()));
-        }
     }
     let mut lines = Vec::new();
     for (&page, indices) in targets {
@@ -712,7 +708,7 @@ pub fn audit_lines(
                 .lines
                 .get(index)
                 .ok_or_else(|| Error::Invalid("audit line index out of range".into()))?;
-            if line.text.trim().is_empty() || !(0.0..=1.0).contains(&line.confidence) {
+            if line.text.trim().is_empty() {
                 return Err(Error::Invalid("invalid original OCR observation".into()));
             }
             let mut sampled = audit_line(pdf, &metadata, page, index, line, policy, None)?;

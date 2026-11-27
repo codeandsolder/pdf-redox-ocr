@@ -10,8 +10,8 @@ use serde::Serialize;
 use crate::{
     Error,
     disjoint_set::DisjointSet,
-    draft::{DraftPage, OcrDraft, OcrLine},
-    geometry::{Point, Quad, QuadBounds},
+    draft::{OcrDraft, OcrLine},
+    geometry::{Quad, QuadBounds},
     polygon::overlap_fraction,
     quality_eval::{character_edits, normalized},
 };
@@ -74,30 +74,6 @@ pub struct DraftComparison<'a> {
     pub confidence_threshold: f64,
     pub counts: BTreeMap<LineAgreement, usize>,
     pub pages: Vec<PageComparison<'a>>,
-}
-
-fn pages(draft: &OcrDraft) -> Result<BTreeMap<u32, &DraftPage>, Error> {
-    let mut indexed = BTreeMap::new();
-    for page in &draft.pages {
-        if page.page == 0 || indexed.insert(page.page, page).is_some() {
-            return Err(Error::Invalid("invalid or duplicate draft page".into()));
-        }
-        let finite = |quad: &Quad| {
-            quad.iter()
-                .all(|Point(x, y)| x.is_finite() && y.is_finite())
-        };
-        if page
-            .lines
-            .iter()
-            .any(|line| !(0.0..=1.0).contains(&line.confidence) || !finite(&line.quad))
-            || page.native_text_regions.iter().any(|quad| !finite(quad))
-        {
-            return Err(Error::Invalid(
-                "invalid comparison draft coordinates or confidence".into(),
-            ));
-        }
-    }
-    Ok(indexed)
 }
 
 fn components<'a>(
@@ -206,9 +182,7 @@ pub fn compare<'a>(
     minimum_overlap: f64,
     confidence_threshold: f64,
 ) -> Result<DraftComparison<'a>, Error> {
-    if baseline.schema_version != 3
-        || candidate.schema_version != 3
-        || baseline.pdf_sha256 != candidate.pdf_sha256
+    if baseline.pdf_sha256 != candidate.pdf_sha256
         || !(0.0..=1.0).contains(&minimum_overlap)
         || minimum_overlap == 0.0
         || !(0.0..=1.0).contains(&confidence_threshold)
@@ -217,8 +191,8 @@ pub fn compare<'a>(
             "incompatible draft source or comparison policy".into(),
         ));
     }
-    let left = pages(baseline)?;
-    let right = pages(candidate)?;
+    let left = baseline.validated_pages()?;
+    let right = candidate.validated_pages()?;
     if left.keys().ne(right.keys()) {
         return Err(Error::Invalid(
             "comparison requires the same selected PDF pages".into(),
@@ -241,7 +215,7 @@ pub fn compare<'a>(
             *counts.entry(group.agreement).or_insert(0) += 1;
         }
         output.push(PageComparison {
-            page,
+            page: page.get(),
             baseline_lines: a.lines.len(),
             candidate_lines: b.lines.len(),
             baseline_threshold_qualified: qualified(&a.lines),
@@ -293,7 +267,7 @@ mod tests {
 
     fn draft(lines: Vec<OcrLine>) -> OcrDraft {
         OcrDraft::new(
-            "same-source".into(),
+            "ab".repeat(32),
             "fixture".into(),
             vec![DraftPage {
                 page: 1,

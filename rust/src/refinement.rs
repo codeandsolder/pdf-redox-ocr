@@ -172,32 +172,27 @@ pub fn refinement_plan(
     policy: RefinementPolicy,
 ) -> Result<BTreeMap<PageNumber, Vec<usize>>, Error> {
     let policy = policy.validate()?;
-    if draft.schema_version != 3 {
-        return Err(Error::Invalid("unsupported OCR importer schema".into()));
-    }
-    let mut seen = BTreeSet::new();
-    for page in &draft.pages {
-        let number = PageNumber::new(page.page)?;
-        if !usize::try_from(page.page).is_ok_and(|p| p <= page_count) || !seen.insert(number) {
-            return Err(Error::Invalid("invalid or duplicate draft page".into()));
-        }
-        for line in &page.lines {
-            if !line.confidence.is_finite() || !(0.0..=1.0).contains(&line.confidence) {
-                return Err(Error::Invalid("invalid primary OCR confidence".into()));
-            }
-        }
+    let indexed = draft.validated_pages()?;
+    if indexed
+        .keys()
+        .any(|number| !usize::try_from(number.get()).is_ok_and(|p| p <= page_count))
+    {
+        return Err(Error::Invalid(
+            "draft page exceeds document page count".into(),
+        ));
     }
 
     let mut plan = BTreeMap::new();
     match scope {
         RefinementScope::ByConfidence { pages } => {
-            if pages.is_some_and(|pages| pages.is_empty() || !pages.is_subset(&seen)) {
+            if pages.is_some_and(|pages| {
+                pages.is_empty() || pages.iter().any(|number| !indexed.contains_key(number))
+            }) {
                 return Err(Error::Invalid(
                     "requested refinement page missing from draft".into(),
                 ));
             }
-            for page in &draft.pages {
-                let number = PageNumber::new(page.page)?;
+            for (&number, page) in &indexed {
                 if pages.is_some_and(|pages| !pages.contains(&number)) {
                     continue;
                 }
@@ -221,10 +216,8 @@ pub fn refinement_plan(
                 return Err(Error::Invalid("empty explicit OCR targets".into()));
             }
             for (&number, indices) in targets {
-                let page = draft
-                    .pages
-                    .iter()
-                    .find(|page| page.page == number.get())
+                let page = indexed
+                    .get(&number)
                     .ok_or_else(|| Error::Invalid("explicit OCR target page missing".into()))?;
                 if indices.is_empty() {
                     return Err(Error::Invalid("empty explicit OCR target line set".into()));
