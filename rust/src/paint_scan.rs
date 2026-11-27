@@ -290,7 +290,6 @@ struct State {
     // when their own Resources reuse the same font name for another font.
     font: SelectedFont,
     render_mode: u8,
-    text_open: bool,
 }
 
 impl State {
@@ -303,7 +302,6 @@ impl State {
             optional_content: false,
             font: SelectedFont::default(),
             render_mode: 0,
-            text_open: false,
         };
         state.add_clip(PdfMatrix::IDENTITY.rect_quad(box_));
         state
@@ -1106,7 +1104,7 @@ impl NativeStreamClosure {
         self.marked_content.last().copied().unwrap_or(false)
     }
 
-    fn balanced(&self) -> bool {
+    const fn balanced(&self) -> bool {
         !self.text_open && self.marked_content.is_empty() && self.compatibility == 0
     }
 }
@@ -1259,8 +1257,7 @@ impl ScanContext<'_> {
                         state.gs_unsafe = true;
                     }
                 }
-                b"BT" => state.text_open = true,
-                b"ET" => state.text_open = false,
+                b"BT" | b"ET" => {}
                 b"Tj" | b"TJ" | b"'" | b"\"" => self.handle_text_show(&state),
                 b"sh" => self.summary.non_image_visual_paint += 1,
                 b"Do" => {
@@ -1279,7 +1276,7 @@ impl ScanContext<'_> {
         }
         if !saved_states.is_empty()
             || path.pending_clip
-            || state.text_open
+            || closure.text_open
             || closure.marked_content_invalid
             || !closure.marked_content.is_empty()
         {
