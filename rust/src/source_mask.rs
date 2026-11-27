@@ -169,9 +169,9 @@ pub fn mask_source_subset(
         return Ok(None);
     };
     let before = image.clone();
-    let width = u32::try_from(image.width)
+    let width = u32::try_from(image.width())
         .map_err(|_| Error::Invalid("source width exceeds u32".into()))?;
-    let height = u32::try_from(image.height)
+    let height = u32::try_from(image.height())
         .map_err(|_| Error::Invalid("source height exceeds u32".into()))?;
     let mut polygons = Vec::with_capacity(eligible.len());
     for line in &eligible {
@@ -183,14 +183,14 @@ pub fn mask_source_subset(
     let pad = f64::from(MASK_PADDING);
     let affected = polygons
         .iter()
-        .map(|polygon| extent(polygon, image.width, image.height, pad))
+        .map(|polygon| extent(polygon, image.width(), image.height(), pad))
         .collect::<Vec<_>>();
     for (index, line) in lines.iter().enumerate() {
         if selected.binary_search(&index).is_ok() || line.text.trim().is_empty() {
             continue;
         }
         let protected = to_top_left(&line.quad, width, height)?;
-        let bounds = extent(&protected, image.width, image.height, pad);
+        let bounds = extent(&protected, image.width(), image.height(), pad);
         if affected
             .iter()
             .any(|&target| bounds_overlap(bounds, target))
@@ -213,7 +213,7 @@ pub fn mask_source_subset(
     {
         return Ok(None);
     }
-    let payload = image.data;
+    let payload = image.into_data();
     let length = i64::try_from(payload.len())
         .map_err(|_| Error::Invalid("source stream length exceeds i64".into()))?;
     let mut rewritten = object;
@@ -392,7 +392,7 @@ fn restore_region(
     for y in y0..y1 {
         for x in x0..x1 {
             if within_quad(polygon, pixel_center(x, y), padding) {
-                for channel in 0..image.components {
+                for channel in 0..image.components() {
                     image.set(x, y, channel, original.get(x, y, channel));
                 }
             }
@@ -409,8 +409,8 @@ fn pixel_center(x: usize, y: usize) -> Point {
 
 fn cover_text(image: &mut PackedSamples, polygon: &Quad, padding: u32) {
     let pad = f64::from(padding);
-    let (x0, y0, x1, y1) = extent(polygon, image.width, image.height, pad + 5.0);
-    let mut channels = vec![Vec::<u16>::new(); image.components];
+    let (x0, y0, x1, y1) = extent(polygon, image.width(), image.height(), pad + 5.0);
+    let mut channels = vec![Vec::<u16>::new(); image.components()];
     for y in y0..y1 {
         for x in x0..x1 {
             let point = pixel_center(x, y);
@@ -443,7 +443,7 @@ fn cover_text(image: &mut PackedSamples, polygon: &Quad, padding: u32) {
 }
 
 fn changed_in_polygon(before: &PackedSamples, after: &PackedSamples, quad: &Quad) -> u64 {
-    count_in_polygon(before.width, before.height, quad, |x, y| {
+    count_in_polygon(before.width(), before.height(), quad, |x, y| {
         before.pixel_changed(after, x, y)
     })
 }
