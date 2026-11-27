@@ -11,7 +11,6 @@ use crate::{
     Error, PageNumber,
     candidate_ink::{CandidateMapping, SourceInk},
     character_alignment::RunAlignment,
-    ctc_alignment::SequenceAlignment,
     ctc_evidence::CtcOutcome,
     draft::{OcrDraft, OcrLine},
     glyph_matching::validate_bank,
@@ -204,29 +203,10 @@ fn candidates(recognition: &Recognition) -> Result<BTreeMap<String, Candidate<'_
             }
             continue;
         };
-        if evidence.greedy_text != view.greedy_text || evidence.hypotheses.len() > 5 {
+        if evidence.greedy_text != view.greedy_text {
             return Err(invalid("inconsistent CTC evidence"));
         }
-        for hypothesis in &evidence.hypotheses {
-            if hypothesis
-                .classes
-                .iter()
-                .any(|&class| class == 0 || class >= evidence.vocabulary_size)
-                || hypothesis.classes.len() != hypothesis.text.chars().count()
-                || !hypothesis.log_mass_lower_bound.is_finite()
-            {
-                return Err(invalid("invalid retained class sequence"));
-            }
-            if let SequenceAlignment::Measured { log_mass, tokens } = &hypothesis.alignment
-                && (!log_mass.is_finite()
-                    || *log_mass + 1e-8 < hypothesis.log_mass_lower_bound
-                    || tokens
-                        .iter()
-                        .any(|t| !(0.0..=1.0).contains(&t.mode_probability)))
-            {
-                return Err(invalid("invalid conditional alignment"));
-            }
-        }
+        evidence.validate()?;
         let mapping = ink.map_view(view.dimensions, evidence);
         if mapping != view.ink_mapping {
             return Err(invalid("recorded mapping differs from recomputed geometry"));
@@ -553,7 +533,7 @@ mod tests {
     use crate::{
         candidate_ink::SourceInk,
         ctc_alignment::{SequenceAlignment, TokenLocalization},
-        ctc_evidence::{CtcEvidence, SequenceHypothesis},
+        ctc_evidence::{ClassScore, CtcEvidence, EmissionEvidence, SequenceHypothesis},
         refinement_evidence::{RefinementDecision, ViewEvidence},
     };
     use image::{Rgb, RgbImage};
@@ -598,7 +578,27 @@ mod tests {
             row_class_limit: 3,
             beam_width: 2,
             greedy_text: "X".into(),
-            emissions: Vec::new(),
+            emissions: vec![EmissionEvidence {
+                column: 10,
+                classes: vec![
+                    ClassScore {
+                        class_index: 1,
+                        character: Some('X'),
+                        probability: 0.6,
+                    },
+                    ClassScore {
+                        class_index: 2,
+                        character: Some('Y'),
+                        probability: 0.3,
+                    },
+                    ClassScore {
+                        class_index: 0,
+                        character: None,
+                        probability: 0.1,
+                    },
+                ],
+                blank_probability: 0.1,
+            }],
             hypotheses,
         };
         ViewEvidence {

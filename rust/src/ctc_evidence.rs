@@ -7,7 +7,7 @@
 //! pruning still omits probability mass, so weights are lower bounds, not
 //! calibrated probabilities of transcription correctness.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -134,7 +134,8 @@ fn invalid(message: &str) -> Error {
 
 fn stronger(a: ClassScore, b: ClassScore) -> bool {
     a.probability > b.probability
-        || (a.probability.to_bits() == b.probability.to_bits() && a.class_index < b.class_index)
+        || (a.probability.partial_cmp(&b.probability) == Some(std::cmp::Ordering::Equal)
+            && a.class_index < b.class_index)
 }
 
 fn top_classes(row: &[f32], labels: &[char]) -> Result<Vec<ClassScore>, Error> {
@@ -337,7 +338,168 @@ impl PrefixBeam {
     }
 }
 
+struct EvidenceValidator {
+    sequence_length: usize,
+    vocabulary_size: usize,
+    labels: BTreeMap<usize, char>,
+}
+
+impl EvidenceValidator {
+    fn label(&mut self, index: usize, character: Option<char>) -> Result<(), Error> {
+        if index >= self.vocabulary_size {
+            return Err(invalid("CTC class outside vocabulary"));
+        }
+        match (index, character) {
+            (0, None) => Ok(()),
+            (1.., Some(character)) => {
+                if self
+                    .labels
+                    .insert(index, character)
+                    .is_some_and(|old| old != character)
+                {
+                    return Err(invalid("inconsistent recorded CTC vocabulary"));
+                }
+                Ok(())
+            }
+            _ => Err(invalid("inconsistent CTC blank or label")),
+        }
+    }
+
+    fn emission(&mut self, emission: &EmissionEvidence, limit: usize) -> Result<char, Error> {
+        if emission.column >= self.sequence_length
+            || emission.classes.len() != limit.min(self.vocabulary_size)
+            || !(0.0..=1.0).contains(&emission.blank_probability)
+        {
+            return Err(invalid("invalid recorded CTC emission"));
+        }
+        let mut seen = BTreeSet::new();
+        for class in &emission.classes {
+            self.label(class.class_index, class.character)?;
+            if !seen.insert(class.class_index)
+                || !(0.0..=1.0).contains(&class.probability)
+                || (class.class_index == 0
+                    && class.probability.partial_cmp(&emission.blank_probability)
+                        != Some(std::cmp::Ordering::Equal))
+            {
+                return Err(invalid("invalid recorded CTC class score"));
+            }
+        }
+        if !emission
+            .classes
+            .windows(2)
+            .all(|pair| stronger(pair[0], pair[1]))
+        {
+            return Err(invalid("unordered CTC emission scores"));
+        }
+        let winner = emission
+            .classes
+            .first()
+            .ok_or_else(|| invalid("empty CTC emission"))?;
+        if winner.probability < emission.blank_probability {
+            return Err(invalid("CTC emission is weaker than blank"));
+        }
+        winner
+            .character
+            .ok_or_else(|| invalid("blank cannot be a greedy emission"))
+    }
+
+    fn sequence(&mut self, sequence: SequenceData<'_>) -> Result<(), Error> {
+        if sequence.classes.len() != sequence.text.chars().count() {
+            return Err(invalid("CTC class sequence does not match text"));
+        }
+        for (&class, character) in sequence.classes.iter().zip(sequence.text.chars()) {
+            self.label(class, Some(character))?;
+        }
+        let SequenceAlignment::Measured { log_mass, tokens } = sequence.alignment else {
+            return Ok(());
+        };
+        let repeated = sequence
+            .classes
+            .windows(2)
+            .filter(|pair| pair[0] == pair[1])
+            .count();
+        if !log_mass.is_finite()
+            || sequence.classes.len().saturating_add(repeated) > self.sequence_length
+            || tokens.len() != sequence.classes.len()
+        {
+            return Err(invalid("invalid measured CTC sequence"));
+        }
+        for (token, &class) in tokens.iter().zip(sequence.classes) {
+            if token.class_index != class
+                || token.mode >= self.sequence_length
+                || token.interval[0] > token.interval[1]
+                || token.interval[1] >= self.sequence_length
+                || !(0.0..=1.0).contains(&token.mode_probability)
+            {
+                return Err(invalid("invalid conditional CTC localization"));
+            }
+        }
+        // Quantiles of ordered first-entry times are ordered too. Marginal
+        // modes are not, and need not fall within their equal-tail interval.
+        if tokens.windows(2).any(|pair| {
+            let gap = 1 + usize::from(pair[0].class_index == pair[1].class_index);
+            pair[0]
+                .interval
+                .iter()
+                .zip(pair[1].interval)
+                .any(|(&a, b)| b.saturating_sub(a) < gap)
+        }) {
+            return Err(invalid("CTC entry quantiles violate sequence order"));
+        }
+        Ok(())
+    }
+}
+
 impl CtcEvidence {
+    /// Verify the internal contract of recorded evidence before offline use.
+    /// This does not claim to reconstruct the discarded probability tensor.
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        if self.sequence_length == 0
+            || self.vocabulary_size < 2
+            || self.row_class_limit == 0
+            || self.beam_width == 0
+            || self.hypotheses.is_empty()
+            || self.hypotheses.len() > self.beam_width.min(REPORTED_HYPOTHESES)
+        {
+            return Err(invalid("invalid CTC evidence dimensions"));
+        }
+        let mut validator = EvidenceValidator {
+            sequence_length: self.sequence_length,
+            vocabulary_size: self.vocabulary_size,
+            labels: BTreeMap::new(),
+        };
+        let mut greedy = String::new();
+        for emission in &self.emissions {
+            greedy.push(validator.emission(emission, self.row_class_limit)?);
+        }
+        if greedy != self.greedy_text
+            || self
+                .emissions
+                .windows(2)
+                .any(|pair| pair[0].column >= pair[1].column)
+        {
+            return Err(invalid("inconsistent recorded greedy CTC sequence"));
+        }
+        let mut seen = BTreeSet::new();
+        for hypothesis in &self.hypotheses {
+            validator.sequence(hypothesis.data())?;
+            if !seen.insert(hypothesis.classes.as_slice())
+                || !hypothesis.log_mass_lower_bound.is_finite()
+                || matches!(hypothesis.alignment, SequenceAlignment::Measured { log_mass, .. }
+                    if log_mass + 1e-8 < hypothesis.log_mass_lower_bound)
+            {
+                return Err(invalid("invalid retained CTC hypothesis"));
+            }
+        }
+        for query in &self.queries {
+            validator.sequence(query.data())?;
+            if !seen.insert(query.classes.as_slice()) {
+                return Err(invalid("duplicate recorded CTC sequence"));
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(any(feature = "native-inference", test))]
     pub(crate) fn sequences(&self) -> impl Iterator<Item = (SequenceReference, SequenceData<'_>)> {
         self.hypotheses
@@ -529,6 +691,21 @@ impl CtcEvidence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_evidence_rejects_inconsistent_sequences() -> Result<(), Error> {
+        let labels = ['\0', 'A', 'B'];
+        let rows: [&[f32]; 3] = [&[0.1, 0.8, 0.1], &[0.8, 0.1, 0.1], &[0.1, 0.8, 0.1]];
+        let evidence = CtcEvidence::measure(&labels, rows, "AA", &[0, 2])?;
+        evidence.validate()?;
+        let mut evidence = evidence;
+        evidence.emissions[1].column = 0;
+        assert!(evidence.validate().is_err());
+        evidence.emissions[1].column = 2;
+        evidence.hypotheses[0].text = "BB".into();
+        assert!(evidence.validate().is_err());
+        Ok(())
+    }
 
     #[test]
     fn paired_exact_queries_do_not_depend_on_retained_beam()
