@@ -220,10 +220,10 @@ pub(crate) fn calculate_crop(
         f64::NEG_INFINITY,
     );
     for corner in [
-        Point(region.x0, region.y0),
-        Point(region.x1, region.y0),
-        Point(region.x1, region.y1),
-        Point(region.x0, region.y1),
+        Point(region.x0(), region.y0()),
+        Point(region.x1(), region.y0()),
+        Point(region.x1(), region.y1()),
+        Point(region.x0(), region.y1()),
     ] {
         let Point(u, v) = mapper.to_raster(corner);
         let x = u * display_width / points_per_pixel;
