@@ -626,6 +626,7 @@ pub(crate) fn extgstate_font_searchability(
         return Err(Error::Invalid("graphics-state Font must be a pair".into()));
     };
     let [font, size]: [OwnedObject; 2] = values
+        .into_vec()
         .try_into()
         .map_err(|_| Error::Invalid("graphics-state Font must have two elements".into()))?;
     let _ = resolved_number(source, &size)?;
