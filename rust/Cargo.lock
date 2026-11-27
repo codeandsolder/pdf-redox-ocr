@@ -1034,12 +1034,17 @@ checksum = "735eaa21a6a5ffb2e84362faaeb90c05ba8e19797ca30428478cb6ea3a4921bc"
 [[package]]
 name = "hayro-ccitt"
 version = "0.5.0"
+source = "git+https://github.com/codeandsolder/hayro?rev=68a799c971877c150c79f2adeb76b4c81e988899#68a799c971877c150c79f2adeb76b4c81e988899"
+
+[[package]]
+name = "hayro-ccitt"
+version = "0.5.0"
 source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
 
 [[package]]
 name = "hayro-cmap"
 version = "0.1.1"
-source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
+source = "git+https://github.com/codeandsolder/hayro?rev=68a799c971877c150c79f2adeb76b4c81e988899#68a799c971877c150c79f2adeb76b4c81e988899"
 dependencies = [
  "brotli",
  "hayro-postscript",
@@ -1048,11 +1053,11 @@ dependencies = [
 [[package]]
 name = "hayro-font"
 version = "0.5.0"
-source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
+source = "git+https://github.com/codeandsolder/hayro?rev=68a799c971877c150c79f2adeb76b4c81e988899#68a799c971877c150c79f2adeb76b4c81e988899"
 dependencies = [
  "bitflags",
  "hayro-cmap",
- "hayro-syntax",
+ "hayro-syntax 0.9.0 (git+https://github.com/codeandsolder/hayro?rev=68a799c971877c150c79f2adeb76b4c81e988899)",
  "kurbo",
  "phf",
  "rustc-hash",
@@ -1063,13 +1068,13 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.9.0"
-source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
+source = "git+https://github.com/codeandsolder/hayro?rev=68a799c971877c150c79f2adeb76b4c81e988899#68a799c971877c150c79f2adeb76b4c81e988899"
 dependencies = [
  "bitflags",
  "hayro-cmap",
  "hayro-font",
  "hayro-postscript",
- "hayro-syntax",
+ "hayro-syntax 0.9.0 (git+https://github.com/codeandsolder/hayro?rev=68a799c971877c150c79f2adeb76b4c81e988899)",
  "kurbo",
  "moxcms",
  "rustc-hash",
@@ -1080,38 +1085,65 @@ dependencies = [
 [[package]]
 name = "hayro-jbig2"
 version = "0.4.0"
-source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
+source = "git+https://github.com/codeandsolder/hayro?rev=68a799c971877c150c79f2adeb76b4c81e988899#68a799c971877c150c79f2adeb76b4c81e988899"
 dependencies = [
  "fearless_simd",
- "hayro-ccitt",
+ "hayro-ccitt 0.5.0 (git+https://github.com/codeandsolder/hayro?rev=68a799c971877c150c79f2adeb76b4c81e988899)",
+]
+
+[[package]]
+name = "hayro-jbig2"
+version = "0.4.0"
+source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
+dependencies = [
+ "hayro-ccitt 0.5.0 (git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874)",
+]
+
+[[package]]
+name = "hayro-jpeg2000"
+version = "0.5.0"
+source = "git+https://github.com/codeandsolder/hayro?rev=68a799c971877c150c79f2adeb76b4c81e988899#68a799c971877c150c79f2adeb76b4c81e988899"
+dependencies = [
+ "fearless_simd",
 ]
 
 [[package]]
 name = "hayro-jpeg2000"
 version = "0.5.0"
 source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
-dependencies = [
- "fearless_simd",
-]
 
 [[package]]
 name = "hayro-postscript"
 version = "0.2.0"
-source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
+source = "git+https://github.com/codeandsolder/hayro?rev=68a799c971877c150c79f2adeb76b4c81e988899#68a799c971877c150c79f2adeb76b4c81e988899"
+
+[[package]]
+name = "hayro-syntax"
+version = "0.9.0"
+source = "git+https://github.com/codeandsolder/hayro?rev=68a799c971877c150c79f2adeb76b4c81e988899#68a799c971877c150c79f2adeb76b4c81e988899"
+dependencies = [
+ "hayro-ccitt 0.5.0 (git+https://github.com/codeandsolder/hayro?rev=68a799c971877c150c79f2adeb76b4c81e988899)",
+ "hayro-jbig2 0.4.0 (git+https://github.com/codeandsolder/hayro?rev=68a799c971877c150c79f2adeb76b4c81e988899)",
+ "hayro-jpeg2000 0.5.0 (git+https://github.com/codeandsolder/hayro?rev=68a799c971877c150c79f2adeb76b4c81e988899)",
+ "memchr",
+ "miniz_oxide 0.8.9",
+ "rustc-hash",
+ "smallvec",
+ "zlib-rs 0.6.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zune-jpeg",
+]
 
 [[package]]
 name = "hayro-syntax"
 version = "0.9.0"
 source = "git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874#d07988b95efa78e8487a0ccb7bc93883d0fda874"
 dependencies = [
- "hayro-ccitt",
- "hayro-jbig2",
- "hayro-jpeg2000",
- "memchr",
+ "hayro-ccitt 0.5.0 (git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874)",
+ "hayro-jbig2 0.4.0 (git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874)",
+ "hayro-jpeg2000 0.5.0 (git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874)",
  "miniz_oxide 0.8.9",
  "rustc-hash",
  "smallvec",
- "zlib-rs 0.6.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "zune-jpeg",
 ]
 
@@ -1984,7 +2016,7 @@ dependencies = [
  "color_quant 2.0.0",
  "fast_image_resize",
  "fax 0.3.0",
- "hayro-syntax",
+ "hayro-syntax 0.9.0 (git+https://github.com/codeandsolder/hayro?rev=d07988b95efa78e8487a0ccb7bc93883d0fda874)",
  "libjpeg-turbo-rs",
  "num-traits",
  "serde",
@@ -2003,7 +2035,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "hayro-interpret",
- "hayro-syntax",
+ "hayro-syntax 0.9.0 (git+https://github.com/codeandsolder/hayro?rev=68a799c971877c150c79f2adeb76b4c81e988899)",
  "hex",
  "image",
  "num-traits",

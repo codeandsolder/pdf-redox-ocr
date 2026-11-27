@@ -21,8 +21,8 @@ image = { version = "0.25.10", default-features = false, features = ["pnm", "png
 pdf-redox = { git = "https://github.com/codeandsolder/pdf-redox", rev = "2a19406a5e5ba28435e37b115143fb5b863ba754", package = "pdf-redox", optional = true }
 oar-ocr = { version = "=0.11.0", features = ["auto-download"], optional = true }
 tempfile = "3.27"
-hayro-syntax = { git = "https://github.com/codeandsolder/hayro", rev = "d07988b95efa78e8487a0ccb7bc93883d0fda874", default-features = false, features = ["std", "images"], optional = true }
-hayro-interpret = { git = "https://github.com/codeandsolder/hayro", rev = "d07988b95efa78e8487a0ccb7bc93883d0fda874", optional = true }
+hayro-syntax = { git = "https://github.com/codeandsolder/hayro", rev = "68a799c971877c150c79f2adeb76b4c81e988899", default-features = false, features = ["std", "images"], optional = true }
+hayro-interpret = { git = "https://github.com/codeandsolder/hayro", rev = "68a799c971877c150c79f2adeb76b4c81e988899", optional = true }
 
 
 [features]
