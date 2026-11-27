@@ -14,7 +14,7 @@ use crate::{
     Error, PageNumber,
     draft::{DraftPage, OcrDraft, OcrLine},
     geometry::Quad,
-    polygon::overlap_fraction,
+    polygon::{convex, overlap_fraction},
 };
 
 /// Independent native-raster OCR observation and its paint identity.
@@ -100,16 +100,21 @@ pub fn approve_raster_only_pages(pages: &[RasterPageEvidence]) -> Vec<RasterPage
             if page.paints.is_empty() {
                 reasons.push("no_extracted_image_placements");
             }
-            if page.paints.iter().any(|paint| !paint.recognized) {
+            if page
+                .paints
+                .iter()
+                .any(|paint| !paint.recognized || !convex(&paint.page_quad))
+            {
                 reasons.push("unrecognized_or_unsupported_raster_placement");
             }
             if page.recognized_lines == 0 {
                 reasons.push("no_positive_raster_text_evidence");
             }
             if page.paints.iter().enumerate().any(|(index, paint)| {
-                page.paints[index + 1..]
-                    .iter()
-                    .any(|other| overlap_fraction(&paint.page_quad, &other.page_quad) > 1e-9)
+                page.paints[index + 1..].iter().any(|other| {
+                    overlap_fraction(&paint.page_quad, &other.page_quad)
+                        .is_none_or(|overlap| overlap > 1e-9)
+                })
             }) {
                 reasons.push("overlapping_image_layers_require_page_compositing");
             }
@@ -138,11 +143,11 @@ pub struct MergeProposal {
     /// Raw recognition confidence.
     pub raster_confidence: f64,
     /// Maximum overlap with text/confidence-qualified page observations.
-    pub page_overlap: f64,
+    pub page_overlap: Option<f64>,
     /// Maximum overlap including all low-confidence diagnostic observations.
-    pub raw_page_overlap: f64,
+    pub raw_page_overlap: Option<f64>,
     /// Maximum overlap with existing native searchable text.
-    pub native_overlap: f64,
+    pub native_overlap: Option<f64>,
     /// Source-specific visibility verified.
     pub verified_visible_source: bool,
     /// Whether the candidate enters the importer draft.
@@ -412,10 +417,16 @@ pub fn merge_ocr(
 /// provisional residual planning. Final proof identity is still checked
 /// independently by the merger.
 pub(crate) struct SourceAdmission {
-    pub(crate) page_overlap: f64,
-    pub(crate) raw_page_overlap: f64,
-    pub(crate) native_overlap: f64,
+    pub(crate) page_overlap: Option<f64>,
+    pub(crate) raw_page_overlap: Option<f64>,
+    pub(crate) native_overlap: Option<f64>,
     pub(crate) included: bool,
+}
+
+// Any unavailable qualified overlap invalidates the maximum as admission
+// evidence. An unqualified observation only affects the raw diagnostic.
+fn maximum_overlap(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    a.zip(b).map(|(a, b)| a.max(b))
 }
 
 impl SourceAdmission {
@@ -426,26 +437,26 @@ impl SourceAdmission {
         visible: bool,
         threshold: f64,
     ) -> Self {
-        let (raw_page_overlap, page_overlap) =
-            existing.fold((0.0_f64, 0.0_f64), |(raw, qualified), (quad, eligible)| {
-                let overlap = overlap_fraction(&line.quad, quad);
-                (
-                    raw.max(overlap),
-                    if eligible {
-                        qualified.max(overlap)
-                    } else {
-                        qualified
-                    },
-                )
-            });
+        let valid_geometry = convex(&line.quad);
+        let initial_overlap = valid_geometry.then_some(0.0_f64);
+        let mut raw_page_overlap = initial_overlap;
+        let mut page_overlap = initial_overlap;
+        for (quad, eligible) in existing {
+            let overlap = overlap_fraction(&line.quad, quad);
+            raw_page_overlap = maximum_overlap(raw_page_overlap, overlap);
+            if eligible {
+                page_overlap = maximum_overlap(page_overlap, overlap);
+            }
+        }
         let native_overlap = native
             .iter()
             .map(|quad| overlap_fraction(&line.quad, quad))
-            .fold(0.0_f64, f64::max);
+            .fold(initial_overlap, maximum_overlap);
         let included = visible
-            && page_overlap < 0.30
-            && native_overlap < 0.20
-            && line.confidence >= threshold
+            && valid_geometry
+            && page_overlap.is_some_and(|overlap| overlap < 0.30)
+            && native_overlap.is_some_and(|overlap| overlap < 0.20)
+            && (threshold..=1.0).contains(&line.confidence)
             && line.text.trim().chars().count() >= 2;
         Self {
             page_overlap,
@@ -499,9 +510,9 @@ fn merge_fallback_page(
             paint_index: image.paint_index,
             detection_index: image.detection_index,
             raster_confidence: image.line.confidence,
-            page_overlap: round4(admission.page_overlap),
-            raw_page_overlap: round4(admission.raw_page_overlap),
-            native_overlap: round4(admission.native_overlap),
+            page_overlap: admission.page_overlap.map(round4),
+            raw_page_overlap: admission.raw_page_overlap.map(round4),
+            native_overlap: admission.native_overlap.map(round4),
             verified_visible_source: visible,
             included_as_extra: admission.included,
         });
@@ -784,13 +795,56 @@ mod tests {
                 visibility_proofs: &proofs,
                 threshold: 0.97,
             })?;
-            assert_eq!(audit[0].raw_page_overlap, 1.0);
-            assert_eq!(audit[0].page_overlap, if expected { 0.0 } else { 1.0 });
+            assert_eq!(audit[0].raw_page_overlap, Some(1.0));
+            assert_eq!(
+                audit[0].page_overlap,
+                Some(if expected { 0.0 } else { 1.0 })
+            );
             assert_eq!(audit[0].included_as_extra, expected);
             assert_eq!(draft.pages[1].lines[0].confidence, confidence);
             assert_eq!(draft.pages[1].lines[0].reviewed, reviewed);
         }
         Ok(())
+    }
+
+    #[test]
+    fn unknown_qualified_overlap_never_proves_source_admission() {
+        let line = OcrLine {
+            text: "label".into(),
+            confidence: 0.99,
+            quad: [
+                Point(0.0, 0.0),
+                Point(5.0, 0.0),
+                Point(5.0, 2.0),
+                Point(0.0, 2.0),
+            ],
+            reviewed: false,
+        };
+        let invalid = [Point(0.0, 0.0); 4];
+        let unknown =
+            super::SourceAdmission::evaluate(&line, [(&invalid, true)].into_iter(), &[], true, 0.9);
+        assert!(unknown.page_overlap.is_none());
+        assert!(!unknown.included);
+        let diagnostic = super::SourceAdmission::evaluate(
+            &line,
+            [(&invalid, false)].into_iter(),
+            &[],
+            true,
+            0.9,
+        );
+        assert!(diagnostic.raw_page_overlap.is_none());
+        assert_eq!(diagnostic.page_overlap, Some(0.0));
+        assert!(diagnostic.included);
+        let native =
+            super::SourceAdmission::evaluate(&line, std::iter::empty(), &[invalid], true, 0.9);
+        assert!(native.native_overlap.is_none());
+        assert!(!native.included);
+        let mut degenerate = line;
+        degenerate.quad = invalid;
+        assert!(
+            !super::SourceAdmission::evaluate(&degenerate, std::iter::empty(), &[], true, 0.9)
+                .included
+        );
     }
 
     #[test]

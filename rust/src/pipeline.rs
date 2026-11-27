@@ -312,7 +312,7 @@ impl ResidualAttempt {
                 }
                 for conflict in &rejected {
                     observer.message(format!(
-                        "page {} residual source {:?} rejected: page overlap {}, native overlap {}",
+                        "page {} residual source {:?} rejected: page overlap {:?}, native overlap {:?}",
                         self.page.get(),
                         conflict.proposal.raster_text,
                         conflict.proposal.page_overlap,

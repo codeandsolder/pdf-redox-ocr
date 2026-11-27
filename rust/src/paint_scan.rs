@@ -14,7 +14,7 @@ use crate::{
     Error, PageNumber,
     geometry::{PageBox, Point, Quad},
     pdf_metadata::{PdfMetadata, resolve_owned},
-    polygon::{area, convex},
+    polygon::{area, contains_points, convex},
     sample_layout::{ImageSampleLayout, image_sample_layout},
 };
 
@@ -166,9 +166,10 @@ impl ImagePaint {
     pub fn wholly_visible_in_clip(&self, quad: &Quad) -> bool {
         self.unsafe_reasons.is_empty()
             && convex(quad)
-            && self.clips.iter().all(|clip| {
-                convex(clip) && quad.iter().all(|point| inside_convex(*point, clip, 1e-3))
-            })
+            && self
+                .clips
+                .iter()
+                .all(|clip| convex(clip) && contains_points(clip, quad, 1e-3))
     }
 }
 
@@ -446,23 +447,6 @@ fn rectangle_path_quad(points: &[Point]) -> Option<Quad> {
         return None;
     }
     Some(quad)
-}
-
-fn inside_convex(point: Point, polygon: &Quad, epsilon: f64) -> bool {
-    let mut minimum = f64::INFINITY;
-    let mut maximum = f64::NEG_INFINITY;
-    for index in 0..4 {
-        let begin = polygon[index];
-        let end = polygon[(index + 1) % 4];
-        let cross =
-            (end.0 - begin.0).mul_add(point.1 - begin.1, -(end.1 - begin.1) * (point.0 - begin.0));
-        if !cross.is_finite() {
-            return false;
-        }
-        minimum = minimum.min(cross);
-        maximum = maximum.max(cross);
-    }
-    minimum >= -epsilon || maximum <= epsilon
 }
 
 struct ScanContext<'a> {
