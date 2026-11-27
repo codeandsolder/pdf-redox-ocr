@@ -1160,6 +1160,19 @@ impl ScanContext<'_> {
         result
     }
 
+    fn apply_transform(&mut self, numbers: Option<&[f64]>, state: &mut State) {
+        if let Some(args) = numbers
+            && let Ok(next) = PdfMatrix::try_from(args)
+        {
+            state.ctm = state.ctm.concat(next);
+            if state.ctm.0.iter().all(|value| value.is_finite()) {
+                return;
+            }
+        }
+        self.summary.unknown_paint += 1;
+        state.clip_unknown = true;
+    }
+
     fn visit_stream(
         &mut self,
         bytes: &[u8],
@@ -1197,20 +1210,7 @@ impl ScanContext<'_> {
                         state.clip_unknown = true;
                     }
                 }
-                b"cm" => {
-                    if let Some(args) = numbers.as_deref()
-                        && let Ok(next) = PdfMatrix::try_from(args)
-                    {
-                        state.ctm = state.ctm.concat(next);
-                        if !state.ctm.0.iter().all(|value| value.is_finite()) {
-                            self.summary.unknown_paint += 1;
-                            state.clip_unknown = true;
-                        }
-                    } else {
-                        self.summary.unknown_paint += 1;
-                        state.clip_unknown = true;
-                    }
-                }
+                b"cm" => self.apply_transform(numbers.as_deref(), &mut state),
                 b"gs" => {
                     self.apply_extended_graphics_state(&instruction, resources, &mut state)?;
                 }
