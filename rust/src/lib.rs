@@ -84,6 +84,8 @@ pub mod reviewed_glyphs;
 pub mod sample_layout;
 #[cfg(feature = "pdf-integration")]
 pub mod source_appearances;
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+mod source_completeness;
 #[cfg(feature = "pdf-integration")]
 pub mod source_glyphs;
 #[cfg(feature = "pdf-integration")]
