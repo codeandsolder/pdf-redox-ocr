@@ -95,6 +95,8 @@ mod source_reconciliation;
 #[cfg(feature = "pdf-integration")]
 mod source_samples;
 pub mod source_selection;
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+mod source_span;
 #[cfg(all(feature = "native-inference", feature = "pdf-integration"))]
 mod stroke_reconciliation;
 

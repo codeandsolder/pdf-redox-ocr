@@ -132,6 +132,29 @@ pub struct RunInk {
 pub struct RunAccounting {
     pub runs: Vec<RunInk>,
     pub charged_checks: u64,
+    /// Exact per-column foreground and peer membership for uncertain band
+    /// boundaries. Measured in the same pass and only when requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<ColumnInk>>,
+}
+
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+#[derive(Debug, Serialize)]
+pub struct ColumnInk {
+    pub column: u32,
+    pub foreground: u64,
+    pub peers: BTreeMap<usize, u64>,
+}
+
+#[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+#[derive(Clone, Copy)]
+struct PartitionInput<'a> {
+    expanded: InkBounds,
+    bounds: &'a [InkBounds],
+    expected_pixels: &'a [u64],
+    peer_quads: &'a [Quad],
+    accounting: &'a InkAccounting,
+    capture_columns: bool,
 }
 
 struct MeasuredInk {
@@ -217,8 +240,8 @@ impl Sample<'_> {
         })
     }
 
-    /// Measure recognized projection runs in the *same* thresholded raster
-    /// as the boundary extension. Their coordinates are relative to expanded.
+    /// Preserve the original independently segmented projection-run source
+    /// accounting, with the same exact measured partition conservation check.
     #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
     pub(crate) fn account_runs(
         &self,
@@ -228,6 +251,114 @@ impl Sample<'_> {
         accounting: &InkAccounting,
         remaining_checks: &mut u64,
     ) -> Result<Option<RunAccounting>, Error> {
+        let bounds = groups.iter().map(|g| g.run.ink).collect::<Vec<_>>();
+        let pixels = groups
+            .iter()
+            .map(|g| g.run.observation_support.inside_pixels)
+            .collect::<Vec<_>>();
+        self.account_partition(
+            &PartitionInput {
+                expanded,
+                bounds: &bounds,
+                expected_pixels: &pixels,
+                peer_quads,
+                accounting,
+                capture_columns: false,
+            },
+            remaining_checks,
+        )
+    }
+
+    /// Disjoint column bands can split connected glyph components without
+    /// duplicating foreground or exempting competing peer-owned ink.
+    #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+    pub(crate) fn account_spans(
+        &self,
+        expanded: InkBounds,
+        spans: &[crate::source_span::ColumnBand],
+        peer_quads: &[Quad],
+        accounting: &InkAccounting,
+        remaining_checks: &mut u64,
+    ) -> Result<Option<RunAccounting>, Error> {
+        let bounds = spans.iter().map(|span| span.bounds).collect::<Vec<_>>();
+        let pixels = spans.iter().map(|span| span.foreground).collect::<Vec<_>>();
+        self.account_partition(
+            &PartitionInput {
+                expanded,
+                bounds: &bounds,
+                expected_pixels: &pixels,
+                peer_quads,
+                accounting,
+                capture_columns: true,
+            },
+            remaining_checks,
+        )
+    }
+
+    /// One physical pixel pass for a source partition member; the same peer
+    /// ownership and foreground threshold drive both segmentation approaches.
+    #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+    fn tally_partition_run(
+        &self,
+        index: usize,
+        bounds: InkBounds,
+        expanded: InkBounds,
+        observation: InkBounds,
+        peer_quads: &[ConvexQuad],
+        columns: &mut Option<Vec<ColumnInk>>,
+    ) -> Result<RunInk, Error> {
+        let mut run = RunInk {
+            run: index,
+            ..RunInk::default()
+        };
+        for y in bounds.top..bounds.bottom {
+            for x in bounds.left..bounds.right {
+                let column = x;
+                let (x, y) = (x + expanded.left, y + expanded.top);
+                if self.image.get_pixel(x, y).0[0] >= self.threshold {
+                    continue;
+                }
+                let part = classify_pixel(observation, expanded, x, y);
+                run.sample.record(part);
+                if let Some(columns) = columns.as_mut() {
+                    columns[usize::try_from(column)
+                        .map_err(|_| Error::Invalid("invalid column index".into()))?]
+                    .foreground += 1;
+                }
+                let point = self
+                    .window
+                    .to_source(self.frame, Point(f64::from(x) + 0.5, f64::from(y) + 0.5));
+                for (peer, quad) in peer_quads.iter().enumerate() {
+                    if quad.contains(point) {
+                        run.peers.entry(peer).or_default().record(part);
+                        if let Some(columns) = columns.as_mut() {
+                            *columns[usize::try_from(column)
+                                .map_err(|_| Error::Invalid("invalid column index".into()))?]
+                            .peers
+                            .entry(peer)
+                            .or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(run)
+    }
+
+    #[cfg(all(feature = "pdf-integration", feature = "native-inference"))]
+    fn account_partition(
+        &self,
+        input: &PartitionInput<'_>,
+        remaining_checks: &mut u64,
+    ) -> Result<Option<RunAccounting>, Error> {
+        let PartitionInput {
+            expanded,
+            bounds,
+            expected_pixels,
+            peer_quads,
+            accounting,
+            capture_columns,
+        } = *input;
         let InkAccounting::Measured { sample, peers, .. } = accounting else {
             return Ok(None);
         };
@@ -245,9 +376,22 @@ impl Sample<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         let observation = self.window.observation(self.frame);
         let mut previous_right = 0;
-        let mut runs = Vec::with_capacity(groups.len());
-        for (index, group) in groups.iter().enumerate() {
-            let bounds = group.run.ink;
+        if bounds.len() != expected_pixels.len() {
+            return Err(Error::Invalid(
+                "source-ink partition support count mismatch".into(),
+            ));
+        }
+        let mut columns = capture_columns.then(|| {
+            (0..width)
+                .map(|column| ColumnInk {
+                    column,
+                    foreground: 0,
+                    peers: BTreeMap::new(),
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut runs = Vec::with_capacity(bounds.len());
+        for (index, (&bounds, &expected)) in bounds.iter().zip(expected_pixels).enumerate() {
             if bounds.left < previous_right
                 || bounds.left >= bounds.right
                 || bounds.top >= bounds.bottom
@@ -259,33 +403,17 @@ impl Sample<'_> {
                 ));
             }
             previous_right = bounds.right;
-            let mut run = RunInk {
-                run: index,
-                ..RunInk::default()
-            };
-            for y in bounds.top..bounds.bottom {
-                for x in bounds.left..bounds.right {
-                    let (x, y) = (x + expanded.left, y + expanded.top);
-                    if self.image.get_pixel(x, y).0[0] >= self.threshold {
-                        continue;
-                    }
-                    let part = classify_pixel(observation, expanded, x, y);
-                    run.sample.record(part);
-                    let point = self
-                        .window
-                        .to_source(self.frame, Point(f64::from(x) + 0.5, f64::from(y) + 0.5));
-                    for (peer, quad) in peer_quads.iter().enumerate() {
-                        if quad.contains(point) {
-                            run.peers.entry(peer).or_default().record(part);
-                        }
-                    }
-                }
-            }
-            if run.sample.original + run.sample.added()
-                != group.run.observation_support.inside_pixels
-            {
+            let run = self.tally_partition_run(
+                index,
+                bounds,
+                expanded,
+                observation,
+                &peer_quads,
+                &mut columns,
+            )?;
+            if run.sample.original + run.sample.added() != expected {
                 return Err(Error::Invalid(
-                    "recognized run differs from shared raster ink".into(),
+                    "recognized partition band differs from shared raster ink".into(),
                 ));
             }
             runs.push(run);
@@ -306,12 +434,13 @@ impl Sample<'_> {
             || covered_peers.keys().any(|peer| !peers.contains_key(peer))
         {
             return Err(Error::Invalid(
-                "recognition runs do not conserve measured source ink".into(),
+                "recognition partition does not conserve measured source ink".into(),
             ));
         }
         Ok(Some(RunAccounting {
             runs,
             charged_checks,
+            columns,
         }))
     }
 

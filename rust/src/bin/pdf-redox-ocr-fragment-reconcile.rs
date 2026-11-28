@@ -34,6 +34,10 @@ struct Args {
     max_ink_checks: u64,
     #[arg(long)]
     ocr_threads: Option<NonZeroUsize>,
+    /// Opt into slower source-pixel ownership research diagnostics.
+    /// No additional text corrections are automatically applied.
+    #[arg(long)]
+    source_spans: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -59,6 +63,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     policy.audit.max_pixels = args.max_line_pixels;
     policy.audit.max_ink_checks = args.max_ink_checks;
     policy.max_page_pixels = args.max_page_pixels;
+    policy.source_span_diagnostics = args.source_spans;
     let (report, draft) =
         reconcile_fragments(&args.pdf, &source, &targets, &policy, args.ocr_threads)?;
     if sha256_file(&args.primary_ocr)? != primary_sha256 {

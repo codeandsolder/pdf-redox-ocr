@@ -68,19 +68,6 @@ struct Slot {
     editable: bool,
 }
 
-impl Slot {
-    /// Literal retention has zero cost; a substitution needs independently
-    /// editable ink. Every consumed old token must support this exact run.
-    fn match_cost(self, old: &[&CandidateAnchor], j: usize) -> Option<usize> {
-        let anchor = old.get(j)?;
-        if !anchor.supports_run(self.run) {
-            return None;
-        }
-        let changed = anchor.anchor.character != self.character;
-        (!changed || self.editable).then_some(usize::from(changed))
-    }
-}
-
 const UNREACHABLE: usize = usize::MAX;
 
 struct Prefix {
@@ -90,28 +77,37 @@ struct Prefix {
 }
 
 impl Prefix {
-    fn measure(old: &[&CandidateAnchor], slots: &[Slot]) -> Option<Self> {
-        if old.len() > slots.len() {
+    fn measure(
+        old: &[char],
+        revised: &[char],
+        editable: &[bool],
+        supports: &impl Fn(usize, usize) -> bool,
+    ) -> Option<Self> {
+        if old.len() > revised.len() || revised.len() != editable.len() {
             return None;
         }
         let width = old.len().checked_add(1)?;
-        let cells = slots.len().checked_add(1)?.checked_mul(width)?;
+        let cells = revised.len().checked_add(1)?.checked_mul(width)?;
         if cells > crate::ctc_alignment::MAX_CELLS {
             return None;
         }
         let mut costs = vec![UNREACHABLE; cells];
         costs[0] = 0;
-        for (i, &slot) in slots.iter().enumerate() {
+        for (i, &character) in revised.iter().enumerate() {
             for j in 0..width {
                 let cost = costs[i * width + j];
                 if cost == UNREACHABLE {
                     continue;
                 }
                 let row = (i + 1) * width;
-                if slot.editable {
+                if editable[i] {
                     costs[row + j] = costs[row + j].min(cost);
                 }
-                if let Some(change) = slot.match_cost(old, j) {
+                if let Some(&old_character) = old.get(j)
+                    && supports(j, i)
+                    && (old_character == character || editable[i])
+                {
+                    let change = usize::from(old_character != character);
                     costs[row + j + 1] = costs[row + j + 1].min(cost + change);
                 }
             }
@@ -200,12 +196,10 @@ impl SourceEdits {
             .copied()
     }
 
-    fn combine(votes: &[SourceVote]) -> Option<Self> {
+    pub(crate) fn combine<'a>(edits: impl Iterator<Item = &'a Self> + Clone) -> Option<Self> {
         Some(Self {
-            inserted: ChangePositions::combine(votes.iter().map(|v| &v.embedding.edits.inserted))?,
-            substituted: ChangePositions::combine(
-                votes.iter().map(|v| &v.embedding.edits.substituted),
-            )?,
+            inserted: ChangePositions::combine(edits.clone().map(|e| &e.inserted))?,
+            substituted: ChangePositions::combine(edits.map(|e| &e.substituted))?,
         })
     }
 }
@@ -215,29 +209,37 @@ impl SourceEdits {
 /// difference. Among geometrically compatible paths, minimize substitutions
 /// so literal preservation needs no gratuitous relabeling. Compute the
 /// complete set of minimum-cost edges without enumerating embeddings.
-fn embedding(old: &[&CandidateAnchor], slots: &[Slot]) -> Option<Embedding> {
-    let prefix = Prefix::measure(old, slots)?;
+/// Solve every minimum-substitution ordered complete embedding, independent
+/// of whether the source supports tokens by projection runs or by disjoint
+/// pixel-ownership bands. The caller supplies measured geometric compatibility.
+pub fn embedding_compatible(
+    old: &[char],
+    revised: &[char],
+    editable: &[bool],
+    supports: impl Fn(usize, usize) -> bool,
+) -> Option<Embedding> {
+    let prefix = Prefix::measure(old, revised, editable, &supports)?;
     let mut suffix = vec![UNREACHABLE; prefix.width];
     suffix[old.len()] = 0;
     let mut edits = SourceEdits::empty();
-    for (i, &slot) in slots.iter().enumerate().rev() {
+    for i in (0..revised.len()).rev() {
         let mut possible = SlotPossibilities::default();
         // Ascending j preserves the unread suffix[j+1] from the next row.
         for j in 0..prefix.width {
-            let inserted = if slot.editable {
-                suffix[j]
-            } else {
-                UNREACHABLE
-            };
+            let inserted = if editable[i] { suffix[j] } else { UNREACHABLE };
             possible.inserted |= prefix.optimal_edge(i, j, 0, inserted);
-            let consumed = slot.match_cost(old, j).map_or(UNREACHABLE, |cost| {
-                let tail = suffix[j + 1];
-                if prefix.optimal_edge(i, j, cost, tail) {
-                    possible.retained |= cost == 0;
-                    possible.substituted |= cost != 0;
-                }
-                tail.saturating_add(cost)
-            });
+            let consumed = old
+                .get(j)
+                .filter(|&&c| supports(j, i) && (c == revised[i] || editable[i]))
+                .map_or(UNREACHABLE, |&c| {
+                    let cost = usize::from(c != revised[i]);
+                    let tail = suffix[j + 1];
+                    if prefix.optimal_edge(i, j, cost, tail) {
+                        possible.retained |= cost == 0;
+                        possible.substituted |= cost != 0;
+                    }
+                    tail.saturating_add(cost)
+                });
             suffix[j] = inserted.min(consumed);
         }
         possible.record(i, &mut edits);
@@ -250,13 +252,22 @@ fn embedding(old: &[&CandidateAnchor], slots: &[Slot]) -> Option<Embedding> {
     })
 }
 
-fn vote(
-    view_index: usize,
+fn embedding(old: &[&CandidateAnchor], slots: &[Slot]) -> Option<Embedding> {
+    let old_chars = old.iter().map(|a| a.anchor.character).collect::<Vec<_>>();
+    let revised = slots.iter().map(|s| s.character).collect::<Vec<_>>();
+    let editable = slots.iter().map(|s| s.editable).collect::<Vec<_>>();
+    embedding_compatible(&old_chars, &revised, &editable, |j, i| {
+        old[j].supports_run(slots[i].run)
+    })
+}
+
+/// One exact, explicitly measured likelihood comparison on a fixed crop.
+/// An absent original beam candidate must be an actual full-sequence query.
+pub fn exact_view_odds(
     view: &ViewEvidence,
     old: &str,
     revised: &str,
-    ink: &SourceInk,
-) -> Option<(Vec<usize>, SourceVote)> {
+) -> Option<(SequenceReference, f64)> {
     let CtcOutcome::Measured { evidence } = &view.ctc else {
         return None;
     };
@@ -269,6 +280,17 @@ fn vote(
     if odds <= 0.0 {
         return None;
     }
+    Some((primary, odds))
+}
+
+fn vote(
+    view_index: usize,
+    view: &ViewEvidence,
+    old: &str,
+    revised: &str,
+    ink: &SourceInk,
+) -> Option<(Vec<usize>, SourceVote)> {
+    let (primary, odds) = exact_view_odds(view, old, revised)?;
     let mapping = view.ink_mapping.as_ref()?;
     let runs = mapping.hypotheses.first()?.unique_runs(revised)?;
     let old = mapping.sequence(primary)?.visible_anchors(old)?;
@@ -319,7 +341,8 @@ pub fn propose(
     .ok_or(Rejection::UnlocalizedSourceEdit)?;
     // Text and geometry are identical across all feasible explanations;
     // keep the whole uncertainty set, not a fabricated unique old identity.
-    let edits = SourceEdits::combine(&votes).ok_or(Rejection::UnlocalizedSourceEdit)?;
+    let edits = SourceEdits::combine(votes.iter().map(|v| &v.embedding.edits))
+        .ok_or(Rejection::UnlocalizedSourceEdit)?;
     Ok(SourceRecognition {
         source_rgb_sha256: ink.rgb_sha256.clone(),
         revised_runs,
