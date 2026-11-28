@@ -9,12 +9,12 @@ selected using source geometry and independently checked visibility.
 ## Build and run
 
 Install Poppler's `pdfimages`, `pdftoppm` and `pdftotext` executables.
-The integrated build uses nightly Rust because the pinned optimizer's
-compression backend uses portable SIMD. The model-free core supports stable.
+All builds use the repository-pinned nightly because the PDF and PNG
+paths share the same portable-SIMD DEFLATE backend.
 
 ```sh
 cd rust
-cargo +nightly-2026-11-17 build --release --locked --all-features
+cargo build --release --locked --all-features
 cd ..
 ./run-auto.sh input.pdf searchable.pdf
 ```
@@ -39,8 +39,8 @@ catalog association, independently reviewed glyph matching and evaluation.
 
 ```sh
 cd rust
-cargo +stable test --locked --no-default-features
-cargo +nightly-2026-11-17 test --locked --all-features
+cargo test --locked --no-default-features
+cargo test --locked --all-features
 ```
 
 The legacy Python pipeline, its tests, all original documentation and

@@ -135,10 +135,11 @@ unselected-page pixels. This avoids the cross-page Form mutation found in
 the Python reference, which remains the production baseline until corpus and
 performance parity is demonstrated.
 
-The source core is tested using stable Rust 1.100 with
-cargo +stable test --locked --no-default-features. The integrated crate
-requires pinned nightly because the upstream pdf-redox dependency currently
-uses zlib-rs-fast portable SIMD. Shared CI runs strict Clippy for both.
+The model-free and integrated builds both use the repository-pinned nightly.
+PNG and PDF share zlib-rs-fast portable SIMD, including in the model-free
+build. Shared CI runs strict Clippy for both and verifies the active codec
+graph across all targets. Update the zlib-rs registry patch together with
+the PDF dependency when its zlib-rs-fast revision changes.
 
 ## Library orchestration
 
