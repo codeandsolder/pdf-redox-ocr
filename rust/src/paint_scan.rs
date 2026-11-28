@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use hayro_syntax::{content::UntypedIter, object::Object as HayroObject};
+use pdf_redox::hayro_syntax::{content::UntypedIter, object::Object as HayroObject};
 use pdf_redox::{ObjectHandle, ObjectId, OwnedDictionary, OwnedObject, SourcePdf};
 use serde::Serialize;
 
@@ -808,7 +808,7 @@ fn non_pattern_color_space(
 }
 
 fn instruction_numbers(
-    instruction: &hayro_syntax::content::Instruction<'_, '_>,
+    instruction: &pdf_redox::hayro_syntax::content::Instruction<'_, '_>,
 ) -> Option<Vec<f64>> {
     instruction
         .operands()
@@ -819,7 +819,9 @@ fn instruction_numbers(
         .collect()
 }
 
-fn instruction_name(instruction: &hayro_syntax::content::Instruction<'_, '_>) -> Option<Vec<u8>> {
+fn instruction_name(
+    instruction: &pdf_redox::hayro_syntax::content::Instruction<'_, '_>,
+) -> Option<Vec<u8>> {
     let mut ops = instruction.operands();
     let first = ops.next()?;
     if ops.next().is_some() {
@@ -1039,7 +1041,7 @@ impl NativeStreamClosure {
 
     fn inspect(
         &mut self,
-        instruction: &hayro_syntax::content::Instruction<'_, '_>,
+        instruction: &pdf_redox::hayro_syntax::content::Instruction<'_, '_>,
         numbers: Option<&[f64]>,
         source: &SourcePdf,
         resources: &OwnedDictionary,
@@ -1126,7 +1128,7 @@ impl ScanContext<'_> {
 
     fn apply_extended_graphics_state(
         &mut self,
-        instruction: &hayro_syntax::content::Instruction<'_, '_>,
+        instruction: &pdf_redox::hayro_syntax::content::Instruction<'_, '_>,
         resources: &OwnedDictionary,
         state: &mut State,
     ) -> Result<(), Error> {
@@ -1159,7 +1161,7 @@ impl ScanContext<'_> {
 
     fn visit_do(
         &mut self,
-        instruction: &hayro_syntax::content::Instruction<'_, '_>,
+        instruction: &pdf_redox::hayro_syntax::content::Instruction<'_, '_>,
         resources: &OwnedDictionary,
         state: &State,
         depth: usize,

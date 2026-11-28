@@ -6,19 +6,19 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, btree_map::Entry};
 
-use hayro_interpret::{
+use image::RgbImage;
+use pdf_redox::hayro_interpret::{
     BlendMode, ClipPath, Context, Device, DrawMode, DrawProps, Image, ImageData, ImageDrawProps,
     InterpreterCache, InterpreterSettings, RasterDecodeContext, RenderContent, SoftMask,
     font::GlyphRun,
     interpret_page,
     kurbo::{Affine, BezPath, Rect},
 };
-use hayro_syntax::{
+use pdf_redox::hayro_syntax::{
     content::UntypedIter,
     object::{ObjectIdentifier, Stream},
     page::Page,
 };
-use image::RgbImage;
 
 use crate::{
     Error, PageNumber,

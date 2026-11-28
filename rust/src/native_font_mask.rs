@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use hayro_syntax::{content::UntypedIter, object::Object as HayroObject};
+use pdf_redox::hayro_syntax::{content::UntypedIter, object::Object as HayroObject};
 use pdf_redox::{EditDocument, ObjectHandle, ObjectId, OwnedDictionary, OwnedObject, SourcePdf};
 
 use crate::{
@@ -59,7 +59,9 @@ struct TextState {
     render_mode: u8,
 }
 
-fn set_render_mode(instruction: &hayro_syntax::content::Instruction<'_, '_>) -> Result<u8, Error> {
+fn set_render_mode(
+    instruction: &pdf_redox::hayro_syntax::content::Instruction<'_, '_>,
+) -> Result<u8, Error> {
     let mut operands = instruction.operands();
     let Some(HayroObject::Number(number)) = operands.next() else {
         return Err(Error::Invalid("native text Tr has invalid operand".into()));
@@ -76,7 +78,9 @@ fn set_render_mode(instruction: &hayro_syntax::content::Instruction<'_, '_>) -> 
         .ok_or_else(|| Error::Invalid("native text Tr conversion failed".into()))
 }
 
-fn set_font(instruction: &hayro_syntax::content::Instruction<'_, '_>) -> Option<Vec<u8>> {
+fn set_font(
+    instruction: &pdf_redox::hayro_syntax::content::Instruction<'_, '_>,
+) -> Option<Vec<u8>> {
     match instruction.operands().next() {
         Some(HayroObject::Name(name)) => Some(name.as_ref().to_vec()),
         _ => None,
@@ -89,7 +93,7 @@ fn set_font(instruction: &hayro_syntax::content::Instruction<'_, '_>) -> Option<
 fn update_selected_font_from_gs(
     source: &SourcePdf,
     resources: &OwnedDictionary,
-    instruction: &hayro_syntax::content::Instruction<'_, '_>,
+    instruction: &pdf_redox::hayro_syntax::content::Instruction<'_, '_>,
     selected: &mut bool,
 ) -> Result<(), Error> {
     let mut operands = instruction.operands();
@@ -232,7 +236,7 @@ impl FormRewriter<'_> {
 
     fn rewrite_show(
         &mut self,
-        instruction: &hayro_syntax::content::Instruction<'_, '_>,
+        instruction: &pdf_redox::hayro_syntax::content::Instruction<'_, '_>,
         bytes: &[u8],
         state: &TextState,
         edits: &mut Vec<ByteEdit>,
@@ -260,7 +264,7 @@ impl FormRewriter<'_> {
 
     fn rewrite_do(
         &mut self,
-        instruction: &hayro_syntax::content::Instruction<'_, '_>,
+        instruction: &pdf_redox::hayro_syntax::content::Instruction<'_, '_>,
         resources: &mut OwnedDictionary,
         state: &TextState,
         depth: usize,
