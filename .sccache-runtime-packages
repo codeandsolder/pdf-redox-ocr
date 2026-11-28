@@ -1,0 +1,3 @@
+# Native PDF rendering and dependency graph checks
+poppler-utils
+ripgrep
