@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)/rust"
 # Check active edges, not every optional package in Cargo.lock.
 # Build dependencies and all target-specific branches also count.
-graph=$(cargo tree --locked --all-features --target all --edges normal,build --prefix none --format '{p}' | sed 's/ (\*)$//' | sort -u)
+graph=$(cargo tree --color never --locked --all-features --target all --edges normal,build --prefix none --format '{p}' | sed 's/ (\*)$//' | sort -u)
 if printf '%s\n' "$graph" | rg '^(miniz_oxide|zune-jpeg|zune-core|rav1e|ravif|exr|gif|tiff|image-webp|qoi|ab_glyph|owned_ttf_parser|ttf-parser|rustdct|rustfft) v'; then
     echo 'Unexpected native OCR codec or image-processing subsystem' >&2
     exit 1
