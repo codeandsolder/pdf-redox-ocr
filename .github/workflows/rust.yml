@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 jobs:
-  model-free-core:
+  stable-core:
     uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
     with:
       command: |
@@ -45,8 +45,8 @@ jobs:
   merge-gate:
     name: Rust CI merge gate
     if: ${{ always() }}
-    needs: [model-free-core, native-pdf]
+    needs: [stable-core, native-pdf]
     uses: codeandsolder/ci-workflows/.github/workflows/merge-gate.yml@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
     with:
       needs-json: ${{ toJSON(needs) }}
-      expected-results: '[["model-free-core","success"],["native-pdf","success"]]'
+      expected-results: '[["stable-core","success"],["native-pdf","success"]]'
