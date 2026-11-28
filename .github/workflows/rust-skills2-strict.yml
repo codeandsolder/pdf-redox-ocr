@@ -25,7 +25,7 @@ jobs:
     name: Strict Rust merge gate
     if: ${{ always() }}
     needs: [strict-rust]
-    uses: codeandsolder/ci-workflows/.github/workflows/merge-gate.yml@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
+    uses: codeandsolder/ci-workflows/.github/workflows/merge-gate.yml@c91a4c750313d013131dd9b5cda15d1523cf81b6 # main
     with:
       needs-json: ${{ toJSON(needs) }}
       expected-results: '[["strict-rust","success"]]'
