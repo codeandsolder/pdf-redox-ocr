@@ -880,7 +880,7 @@ checksum = "626d4928326b646e70f65ed36fc7cf9f206bdb68a0019ee7c6b4709da4e084c4"
 dependencies = [
  "crc32fast",
  "miniz_oxide 0.9.1",
- "zlib-rs",
+ "zlib-rs 0.6.9",
 ]
 
 [[package]]
@@ -1034,12 +1034,12 @@ checksum = "735eaa21a6a5ffb2e84362faaeb90c05ba8e19797ca30428478cb6ea3a4921bc"
 [[package]]
 name = "hayro-ccitt"
 version = "0.5.0"
-source = "git+https://github.com/codeandsolder/hayro?rev=c90e8b85aaf69afcc8764b91793885e05e16b775#c90e8b85aaf69afcc8764b91793885e05e16b775"
+source = "git+https://github.com/codeandsolder/hayro?rev=bf67c667eb095d20a53e20821390317e698d3fe0#bf67c667eb095d20a53e20821390317e698d3fe0"
 
 [[package]]
 name = "hayro-cmap"
 version = "0.1.1"
-source = "git+https://github.com/codeandsolder/hayro?rev=c90e8b85aaf69afcc8764b91793885e05e16b775#c90e8b85aaf69afcc8764b91793885e05e16b775"
+source = "git+https://github.com/codeandsolder/hayro?rev=bf67c667eb095d20a53e20821390317e698d3fe0#bf67c667eb095d20a53e20821390317e698d3fe0"
 dependencies = [
  "brotli",
  "hayro-postscript",
@@ -1048,7 +1048,7 @@ dependencies = [
 [[package]]
 name = "hayro-font"
 version = "0.5.0"
-source = "git+https://github.com/codeandsolder/hayro?rev=c90e8b85aaf69afcc8764b91793885e05e16b775#c90e8b85aaf69afcc8764b91793885e05e16b775"
+source = "git+https://github.com/codeandsolder/hayro?rev=bf67c667eb095d20a53e20821390317e698d3fe0#bf67c667eb095d20a53e20821390317e698d3fe0"
 dependencies = [
  "bitflags",
  "hayro-cmap",
@@ -1063,7 +1063,7 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.9.0"
-source = "git+https://github.com/codeandsolder/hayro?rev=c90e8b85aaf69afcc8764b91793885e05e16b775#c90e8b85aaf69afcc8764b91793885e05e16b775"
+source = "git+https://github.com/codeandsolder/hayro?rev=bf67c667eb095d20a53e20821390317e698d3fe0#bf67c667eb095d20a53e20821390317e698d3fe0"
 dependencies = [
  "bitflags",
  "hayro-cmap",
@@ -1080,7 +1080,7 @@ dependencies = [
 [[package]]
 name = "hayro-jbig2"
 version = "0.4.0"
-source = "git+https://github.com/codeandsolder/hayro?rev=c90e8b85aaf69afcc8764b91793885e05e16b775#c90e8b85aaf69afcc8764b91793885e05e16b775"
+source = "git+https://github.com/codeandsolder/hayro?rev=bf67c667eb095d20a53e20821390317e698d3fe0#bf67c667eb095d20a53e20821390317e698d3fe0"
 dependencies = [
  "fearless_simd",
  "hayro-ccitt",
@@ -1089,7 +1089,7 @@ dependencies = [
 [[package]]
 name = "hayro-jpeg2000"
 version = "0.5.0"
-source = "git+https://github.com/codeandsolder/hayro?rev=c90e8b85aaf69afcc8764b91793885e05e16b775#c90e8b85aaf69afcc8764b91793885e05e16b775"
+source = "git+https://github.com/codeandsolder/hayro?rev=bf67c667eb095d20a53e20821390317e698d3fe0#bf67c667eb095d20a53e20821390317e698d3fe0"
 dependencies = [
  "fearless_simd",
 ]
@@ -1097,21 +1097,21 @@ dependencies = [
 [[package]]
 name = "hayro-postscript"
 version = "0.2.0"
-source = "git+https://github.com/codeandsolder/hayro?rev=c90e8b85aaf69afcc8764b91793885e05e16b775#c90e8b85aaf69afcc8764b91793885e05e16b775"
+source = "git+https://github.com/codeandsolder/hayro?rev=bf67c667eb095d20a53e20821390317e698d3fe0#bf67c667eb095d20a53e20821390317e698d3fe0"
 
 [[package]]
 name = "hayro-syntax"
 version = "0.9.0"
-source = "git+https://github.com/codeandsolder/hayro?rev=c90e8b85aaf69afcc8764b91793885e05e16b775#c90e8b85aaf69afcc8764b91793885e05e16b775"
+source = "git+https://github.com/codeandsolder/hayro?rev=bf67c667eb095d20a53e20821390317e698d3fe0#bf67c667eb095d20a53e20821390317e698d3fe0"
 dependencies = [
  "hayro-ccitt",
  "hayro-jbig2",
  "hayro-jpeg2000",
+ "libjpeg-turbo-rs",
  "memchr",
  "rustc-hash",
  "smallvec",
- "zlib-rs",
- "zune-jpeg",
+ "zlib-rs 0.6.8",
 ]
 
 [[package]]
@@ -1978,11 +1978,12 @@ checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 [[package]]
 name = "pdf-redox"
 version = "0.1.0"
-source = "git+https://github.com/codeandsolder/pdf-redox?rev=e0fa06041e026b856d815b5d3042053efec01c01#e0fa06041e026b856d815b5d3042053efec01c01"
+source = "git+https://github.com/codeandsolder/pdf-redox?rev=34f942d3a797ed29130fe261b9e7441018a628ce#34f942d3a797ed29130fe261b9e7441018a628ce"
 dependencies = [
  "color_quant 2.0.0",
  "fast_image_resize",
  "fax 0.3.0",
+ "hayro-interpret",
  "hayro-syntax",
  "libjpeg-turbo-rs",
  "num-traits",
@@ -1991,8 +1992,9 @@ dependencies = [
  "skera",
  "smallvec",
  "thiserror",
+ "wasm-bindgen",
  "write-fonts",
- "zlib-rs",
+ "zlib-rs 0.6.8",
 ]
 
 [[package]]
@@ -2000,8 +2002,6 @@ name = "pdf-redox-ocr"
 version = "0.1.0"
 dependencies = [
  "clap",
- "hayro-interpret",
- "hayro-syntax",
  "hex",
  "image",
  "num-traits",
@@ -3506,6 +3506,12 @@ source = "git+https://github.com/codeandsolder/zlib-rs-fast?rev=1f746b2e90019666
 dependencies = [
  "rayon-core",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa76918995d776d9dd34d371030be228d021137449771493d56e29f77e4148ac"
 
 [[package]]
 name = "zmij"

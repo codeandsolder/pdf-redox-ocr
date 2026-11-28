@@ -18,17 +18,15 @@ num-traits = "0.2"
 unicode-normalization = "0.1"
 clap = { version = "4.5", features = ["derive"], optional = true }
 image = { version = "0.25.10", default-features = false, features = ["pnm", "png"] }
-pdf-redox = { git = "https://github.com/codeandsolder/pdf-redox", rev = "e0fa06041e026b856d815b5d3042053efec01c01", package = "pdf-redox", optional = true }
+pdf-redox = { git = "https://github.com/codeandsolder/pdf-redox", rev = "34f942d3a797ed29130fe261b9e7441018a628ce", package = "pdf-redox", optional = true, features = ["interpret"] }
 oar-ocr = { version = "=0.11.0", features = ["auto-download"], optional = true }
 tempfile = "3.27"
-hayro-syntax = { git = "https://github.com/codeandsolder/hayro", rev = "c90e8b85aaf69afcc8764b91793885e05e16b775", default-features = false, features = ["std", "images"], optional = true }
-hayro-interpret = { git = "https://github.com/codeandsolder/hayro", rev = "c90e8b85aaf69afcc8764b91793885e05e16b775", optional = true }
 
 
 [features]
 default = ["native-inference", "pdf-integration", "cli"]
 cli = ["dep:clap"]
-pdf-integration = ["dep:pdf-redox", "dep:hayro-syntax", "dep:hayro-interpret"]
+pdf-integration = ["dep:pdf-redox"]
 native-inference = ["dep:oar-ocr"]
 
 [lints.rust]
@@ -93,6 +91,3 @@ required-features = ["cli"]
 name = "pdf-redox-ocr-fragment-reconcile"
 path = "src/bin/pdf-redox-ocr-fragment-reconcile.rs"
 required-features = ["native-inference", "pdf-integration", "cli"]
-
-[patch.crates-io]
-zlib-rs = { git = "https://github.com/codeandsolder/zlib-rs-fast", rev = "1f746b2e90019666a0afadfb49740a5d13908296" }

@@ -9,7 +9,7 @@ use std::{
     ops::Range,
 };
 
-use hayro_syntax::{
+use pdf_redox::hayro_syntax::{
     content::{Instruction, UntypedIter},
     object::Object as HayroObject,
 };

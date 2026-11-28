@@ -3,26 +3,5 @@
   "extends": [
     "github>codeandsolder/ci-workflows:renovate-fleet",
     "github>codeandsolder/ci-workflows:renovate-native-automerge"
-  ],
-  "packageRules": [
-    {
-      "description": "Update the PDF integration dependency family atomically to retain shared Hayro type identity",
-      "matchManagers": [
-        "cargo"
-      ],
-      "matchDatasources": [
-        "git-refs"
-      ],
-      "matchPackageNames": [
-        "https://github.com/codeandsolder/pdf-redox",
-        "https://github.com/codeandsolder/hayro",
-        "https://github.com/codeandsolder/zlib-rs-fast"
-      ],
-      "matchUpdateTypes": [
-        "digest"
-      ],
-      "groupName": "PDF integration git family",
-      "groupSlug": "pdf-integration-git-family"
-    }
   ]
 }
