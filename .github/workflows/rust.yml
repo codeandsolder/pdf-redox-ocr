@@ -31,10 +31,11 @@ jobs:
     uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
     with:
       command: |
-        if ! command -v pdfimages >/dev/null || ! command -v pdftoppm >/dev/null || ! command -v pdftotext >/dev/null; then
+        if ! command -v rg >/dev/null || ! command -v pdfimages >/dev/null || ! command -v pdftoppm >/dev/null || ! command -v pdftotext >/dev/null; then
           sudo apt-get update -qq
-          sudo apt-get install -y -qq poppler-utils
+          sudo apt-get install -y -qq poppler-utils ripgrep
         fi
+        bash .github/scripts/check-native-dependencies.sh
         cd rust
         cargo clippy --locked --all-targets --all-features -- -D warnings
         cargo test --locked --all-features

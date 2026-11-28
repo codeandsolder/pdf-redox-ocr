@@ -19,7 +19,7 @@ unicode-normalization = "0.1"
 clap = { version = "4.5", features = ["derive"], optional = true }
 image = { version = "0.25.10", default-features = false, features = ["pnm", "png"] }
 pdf-redox = { git = "https://github.com/codeandsolder/pdf-redox", rev = "ba4530f8a90fbad5d3f456ab7057beac78d78c4e", package = "pdf-redox", optional = true, features = ["interpret"] }
-oar-ocr = { version = "=0.11.0", features = ["auto-download"], optional = true }
+oar-ocr = { version = "=0.11.0", default-features = false, features = ["auto-download", "download-binaries", "simd"], optional = true }
 tempfile = "3.27"
 
 
@@ -91,3 +91,9 @@ required-features = ["cli"]
 name = "pdf-redox-ocr-fragment-reconcile"
 path = "src/bin/pdf-redox-ocr-fragment-reconcile.rs"
 required-features = ["native-inference", "pdf-integration", "cli"]
+
+[patch.crates-io]
+oar-ocr = { git = "https://github.com/codeandsolder/cargo-patches.git", branch = "generated/oar-image-features" }
+oar-ocr-core = { git = "https://github.com/codeandsolder/cargo-patches.git", branch = "generated/oar-image-features" }
+png = { git = "https://github.com/codeandsolder/cargo-patches.git", branch = "generated/ksp-image-codecs" }
+zlib-rs = { git = "https://github.com/codeandsolder/zlib-rs-fast", rev = "1f746b2e90019666a0afadfb49740a5d13908296" }
