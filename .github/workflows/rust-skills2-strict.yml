@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   strict-rust:
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@b61ab038d121c13230c5c361794a34a59d773fce # main
+    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@535609a4878f34a6697afea7ba3da04a454cc5f4 # main
     with:
       working-directory: rust
       apt-packages: poppler-utils
@@ -25,7 +25,7 @@ jobs:
     name: Strict Rust merge gate
     if: ${{ always() }}
     needs: [strict-rust]
-    uses: codeandsolder/ci-workflows/.github/workflows/merge-gate.yml@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
+    uses: codeandsolder/ci-workflows/.github/workflows/merge-gate.yml@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
     with:
       needs-json: ${{ toJSON(needs) }}
       expected-results: '[["strict-rust","success"]]'

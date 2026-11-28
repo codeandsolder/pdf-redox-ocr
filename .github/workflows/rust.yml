@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   stable-core:
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
     with:
       command: |
         bash -n run-auto.sh
@@ -28,7 +28,7 @@ jobs:
         RUSTDOCFLAGS=-Dwarnings cargo doc --locked --no-default-features --no-deps
       rust-components: "rustfmt clippy"
   native-pdf:
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
     with:
       command: |
         if ! command -v pdfimages >/dev/null || ! command -v pdftoppm >/dev/null || ! command -v pdftotext >/dev/null; then
@@ -45,7 +45,7 @@ jobs:
     name: Rust CI merge gate
     if: ${{ always() }}
     needs: [stable-core, native-pdf]
-    uses: codeandsolder/ci-workflows/.github/workflows/merge-gate.yml@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
+    uses: codeandsolder/ci-workflows/.github/workflows/merge-gate.yml@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
     with:
       needs-json: ${{ toJSON(needs) }}
       expected-results: '[["stable-core","success"],["native-pdf","success"]]'
